@@ -3,6 +3,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
+import { createHash } from "crypto";
 import { clerkMiddleware, getAuth } from "@clerk/express";
 import { Configuration, PlaidApi, PlaidEnvironments, Products, CountryCode } from "plaid";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -15,6 +16,8 @@ import {
   getUserItems, upsertUserItem, removeUserItem,
   getCursor, saveCursor, upsertTransactions,
   getTransactions, getSpendingByCategory,
+  saveOAuthState, getOAuthState, deleteOAuthState,
+  saveOAuthCode, getOAuthCode, deleteOAuthCode,
 } from "./db.js";
 
 dotenv.config();
@@ -267,10 +270,183 @@ app.post("/api/sync", requireClerkAuth, async (req, res) => {
 // ── Health ────────────────────────────────────────────────────────────────────
 app.get("/api/health", (_, res) => res.json({ ok: true }));
 
-// ── MCP endpoint (authenticated via API key) ──────────────────────────────────
+// ── OAuth metadata ────────────────────────────────────────────────────────────
+app.get("/.well-known/oauth-authorization-server", (_, res) => {
+  res.json({
+    issuer: APP_URL,
+    authorization_endpoint: `${APP_URL}/oauth/authorize`,
+    token_endpoint: `${APP_URL}/oauth/token`,
+    response_types_supported: ["code"],
+    grant_types_supported: ["authorization_code"],
+    code_challenge_methods_supported: ["S256"],
+  });
+});
+
+app.get("/.well-known/oauth-protected-resource", (_, res) => {
+  res.json({
+    resource: `${APP_URL}/mcp`,
+    authorization_servers: [APP_URL],
+  });
+});
+
+// ── OAuth authorize — serves browser login page ───────────────────────────────
+app.get("/oauth/authorize", async (req, res) => {
+  const { state, redirect_uri, code_challenge, code_challenge_method } = req.query;
+  if (!state || !redirect_uri) return res.status(400).send("Missing state or redirect_uri");
+
+  await saveOAuthState(state, redirect_uri, code_challenge, code_challenge_method);
+
+  const publishableKey = process.env.CLERK_PUBLISHABLE_KEY || "";
+
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign in to FinApp</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0f172a; color: #f8fafc; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; gap: 24px; }
+    .wordmark { font-size: 2rem; font-weight: 800; letter-spacing: -0.04em; }
+    .wordmark span { color: #6366f1; }
+    .subtitle { color: #94a3b8; font-size: 0.9rem; }
+    #clerk-signin { width: 100%; max-width: 420px; }
+    .status { color: #94a3b8; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <div class="wordmark">fin<span>app</span></div>
+  <p class="subtitle">Sign in to connect with Claude</p>
+  <div id="clerk-signin"></div>
+  <p id="status" class="status"></p>
+
+  <script>
+    const PUBLISHABLE_KEY = ${JSON.stringify(publishableKey)};
+    const STATE = ${JSON.stringify(state)};
+
+    async function loadClerk() {
+      const script = document.createElement("script");
+      script.src = "https://cdn.jsdelivr.net/npm/@clerk/clerk-js@latest/dist/clerk.browser.js";
+      script.crossOrigin = "anonymous";
+      document.head.appendChild(script);
+      await new Promise((resolve, reject) => { script.onload = resolve; script.onerror = reject; });
+
+      const clerk = new window.Clerk(PUBLISHABLE_KEY);
+      await clerk.load();
+
+      if (clerk.user) {
+        await completeFlow(clerk);
+      } else {
+        clerk.mountSignIn(document.getElementById("clerk-signin"), {
+          appearance: { variables: { colorBackground: "#1e293b", colorText: "#f8fafc", colorPrimary: "#6366f1" } },
+        });
+        clerk.addListener(({ user }) => { if (user) completeFlow(clerk); });
+      }
+    }
+
+    async function completeFlow(clerk) {
+      document.getElementById("status").textContent = "Completing sign in…";
+      try {
+        const token = await clerk.session.getToken();
+        const resp = await fetch("/oauth/complete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token, state: STATE }),
+        });
+        const data = await resp.json();
+        if (data.redirect_to) {
+          window.location.href = data.redirect_to;
+        } else {
+          document.getElementById("status").textContent = "Error: " + (data.error || "Unknown error");
+        }
+      } catch (err) {
+        document.getElementById("status").textContent = "Error: " + err.message;
+      }
+    }
+
+    loadClerk().catch(console.error);
+  </script>
+</body>
+</html>`);
+});
+
+// ── OAuth complete — called by browser after Clerk sign-in ────────────────────
+app.post("/oauth/complete", async (req, res) => {
+  const { token, state } = req.body;
+  if (!token || !state) return res.status(400).json({ error: "Missing token or state" });
+
+  const oauthState = await getOAuthState(state);
+  if (!oauthState) return res.status(400).json({ error: "Invalid or expired state" });
+
+  // Verify the Clerk token and get user ID
+  let clerkUserId;
+  try {
+    const { createClerkClient } = await import("@clerk/express");
+    const clerkClient = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
+    const { sub } = await clerkClient.verifyToken(token);
+    clerkUserId = sub;
+  } catch (err) {
+    console.error("Token verification failed:", err.message);
+    return res.status(401).json({ error: "Invalid token" });
+  }
+
+  const code = randomBytes(32).toString("hex");
+  await saveOAuthCode(code, clerkUserId, oauthState.redirect_uri, oauthState.code_challenge);
+  await deleteOAuthState(state);
+
+  const redirectUrl = new URL(oauthState.redirect_uri);
+  redirectUrl.searchParams.set("code", code);
+  redirectUrl.searchParams.set("state", state);
+
+  res.json({ redirect_to: redirectUrl.toString() });
+});
+
+// ── OAuth token — exchange code for access token ──────────────────────────────
+app.post("/oauth/token", express.urlencoded({ extended: true }), async (req, res) => {
+  const { code, redirect_uri, code_verifier, grant_type } = req.body;
+
+  if (grant_type !== "authorization_code") {
+    return res.status(400).json({ error: "unsupported_grant_type" });
+  }
+
+  const oauthCode = await getOAuthCode(code);
+  if (!oauthCode) return res.status(400).json({ error: "invalid_grant" });
+
+  // Verify PKCE
+  if (oauthCode.code_challenge && code_verifier) {
+    const hash = createHash("sha256").update(code_verifier).digest("base64url");
+    if (hash !== oauthCode.code_challenge) {
+      return res.status(400).json({ error: "invalid_grant" });
+    }
+  }
+
+  // Get or create API key (used as the access token)
+  let apiKey = await getApiKeyForUser(oauthCode.clerk_user_id);
+  if (!apiKey) apiKey = await createApiKey(oauthCode.clerk_user_id);
+
+  await deleteOAuthCode(code);
+
+  res.json({
+    access_token: apiKey,
+    token_type: "bearer",
+    expires_in: 31536000,
+  });
+});
+
+// ── MCP endpoint (authenticated via Bearer token or x-api-key) ───────────────
 app.post("/mcp", async (req, res) => {
-  const apiKey = req.headers["x-api-key"];
-  const clerkUserId = apiKey ? await getClerkUserIdByApiKey(apiKey) : null;
+  const authHeader = req.headers["authorization"];
+  const apiKey = authHeader?.startsWith("Bearer ")
+    ? authHeader.slice(7)
+    : req.headers["x-api-key"];
+
+  if (!apiKey) {
+    return res.status(401)
+      .set("WWW-Authenticate", `Bearer realm="${APP_URL}", resource_metadata="${APP_URL}/.well-known/oauth-protected-resource"`)
+      .json({ error: "Unauthorized" });
+  }
+
+  const clerkUserId = await getClerkUserIdByApiKey(apiKey);
 
   const server = new McpServer({ name: "finapp", version: "3.0.0" });
 

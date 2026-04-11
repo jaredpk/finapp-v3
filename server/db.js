@@ -66,6 +66,24 @@ export async function initDb() {
       pending BOOLEAN DEFAULT FALSE,
       created_at TIMESTAMP DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS oauth_states (
+      state TEXT PRIMARY KEY,
+      redirect_uri TEXT NOT NULL,
+      code_challenge TEXT,
+      code_challenge_method TEXT,
+      expires_at TIMESTAMP NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS oauth_codes (
+      code TEXT PRIMARY KEY,
+      clerk_user_id TEXT NOT NULL,
+      redirect_uri TEXT NOT NULL,
+      code_challenge TEXT,
+      expires_at TIMESTAMP NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
   `);
 }
 
@@ -218,6 +236,48 @@ export async function getSpendingByCategory(clerkUserId, { startDate, endDate } 
     params
   );
   return rows;
+}
+
+// ── OAuth ─────────────────────────────────────────────────────────────────────
+export async function saveOAuthState(state, redirectUri, codeChallenge, codeChallengeMethod) {
+  await pool.query(
+    `INSERT INTO oauth_states (state, redirect_uri, code_challenge, code_challenge_method, expires_at)
+     VALUES ($1, $2, $3, $4, NOW() + INTERVAL '10 minutes')
+     ON CONFLICT (state) DO NOTHING`,
+    [state, redirectUri, codeChallenge || null, codeChallengeMethod || null]
+  );
+}
+
+export async function getOAuthState(state) {
+  const { rows } = await pool.query(
+    "SELECT * FROM oauth_states WHERE state = $1 AND expires_at > NOW()",
+    [state]
+  );
+  return rows[0] || null;
+}
+
+export async function deleteOAuthState(state) {
+  await pool.query("DELETE FROM oauth_states WHERE state = $1", [state]);
+}
+
+export async function saveOAuthCode(code, clerkUserId, redirectUri, codeChallenge) {
+  await pool.query(
+    `INSERT INTO oauth_codes (code, clerk_user_id, redirect_uri, code_challenge, expires_at)
+     VALUES ($1, $2, $3, $4, NOW() + INTERVAL '5 minutes')`,
+    [code, clerkUserId, redirectUri, codeChallenge || null]
+  );
+}
+
+export async function getOAuthCode(code) {
+  const { rows } = await pool.query(
+    "SELECT * FROM oauth_codes WHERE code = $1 AND expires_at > NOW()",
+    [code]
+  );
+  return rows[0] || null;
+}
+
+export async function deleteOAuthCode(code) {
+  await pool.query("DELETE FROM oauth_codes WHERE code = $1", [code]);
 }
 
 export default pool;
