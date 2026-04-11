@@ -8,6 +8,7 @@ import { clerkMiddleware, getAuth } from "@clerk/express";
 import { Configuration, PlaidApi, PlaidEnvironments, Products, CountryCode } from "plaid";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { z } from "zod";
 import {
   initDb,
@@ -442,128 +443,115 @@ app.post("/oauth/token", express.urlencoded({ extended: true }), async (req, res
   });
 });
 
-// ── MCP endpoint (authenticated via Bearer token or x-api-key) ───────────────
-app.get("/mcp", (_, res) => {
-  res.status(405).set("Allow", "POST").json({ error: "Method not allowed. Use POST." });
+// ── MCP server factory ────────────────────────────────────────────────────────
+function buildMcpServer(clerkUserId) {
+  const server = new McpServer({ name: "finapp", version: "3.0.0" });
+  const noAuth = { content: [{ type: "text", text: "Not authenticated. Connect via OAuth to use this tool." }] };
+
+  server.tool("get_bank_link_url", "Generate a URL to connect a bank account via Plaid", {}, async () => {
+    if (!clerkUserId) return noAuth;
+    const sessionId = await createLinkSession(clerkUserId);
+    return { content: [{ type: "text", text: `Open this URL in your browser to connect a bank:\n\n${APP_URL}/link?session=${sessionId}\n\nExpires in 30 minutes. After connecting, ask me to sync your transactions.` }] };
+  });
+
+  server.tool("list_linked_banks", "List all linked bank accounts", {}, async () => {
+    if (!clerkUserId) return noAuth;
+    const items = await getUserItems(clerkUserId);
+    if (!items.length) return { content: [{ type: "text", text: "No banks linked yet. Use get_bank_link_url to connect one." }] };
+    return { content: [{ type: "text", text: JSON.stringify(items.map(i => ({ itemId: i.itemId, institution: i.institutionName })), null, 2) }] };
+  });
+
+  server.tool("remove_bank", "Remove a linked bank account", { item_id: z.string() }, async ({ item_id }) => {
+    if (!clerkUserId) return noAuth;
+    const removed = await removeUserItem(clerkUserId, item_id);
+    return { content: [{ type: "text", text: removed ? `Bank ${item_id} removed.` : "Bank not found." }] };
+  });
+
+  server.tool("sync_transactions", "Pull latest transactions from Plaid", {}, async () => {
+    if (!clerkUserId) return noAuth;
+    await syncTransactions(clerkUserId);
+    return { content: [{ type: "text", text: "Sync complete." }] };
+  });
+
+  server.tool("get_balances", "Get current balances for all linked accounts", {}, async () => {
+    if (!clerkUserId) return noAuth;
+    const items = await getUserItems(clerkUserId);
+    if (!items.length) return { content: [{ type: "text", text: "No banks linked yet." }] };
+    const accounts = (await Promise.all(items.map(async ({ accessToken, institutionName }) => {
+      const r = await plaidClient.accountsBalanceGet({ access_token: accessToken });
+      return r.data.accounts.map(a => ({ institution: institutionName, name: a.name, type: a.subtype, balance: a.balances.current, available: a.balances.available }));
+    }))).flat();
+    return { content: [{ type: "text", text: JSON.stringify(accounts, null, 2) }] };
+  });
+
+  server.tool("get_transactions", "Get transactions with optional filters", {
+    limit: z.number().optional().describe("Max to return (default 50)"),
+    start_date: z.string().optional().describe("YYYY-MM-DD"),
+    end_date: z.string().optional().describe("YYYY-MM-DD"),
+    category: z.string().optional(),
+  }, async ({ limit = 50, start_date, end_date, category }) => {
+    if (!clerkUserId) return noAuth;
+    const txns = await getTransactions(clerkUserId, { limit, startDate: start_date, endDate: end_date, category });
+    return { content: [{ type: "text", text: JSON.stringify(txns, null, 2) }] };
+  });
+
+  server.tool("get_spending_by_category", "Spending summary grouped by category", {
+    start_date: z.string().optional().describe("YYYY-MM-DD"),
+    end_date: z.string().optional().describe("YYYY-MM-DD"),
+  }, async ({ start_date, end_date }) => {
+    if (!clerkUserId) return noAuth;
+    const summary = await getSpendingByCategory(clerkUserId, { startDate: start_date, endDate: end_date });
+    return { content: [{ type: "text", text: JSON.stringify(summary, null, 2) }] };
+  });
+
+  return server;
+}
+
+// ── Auth helper for MCP ───────────────────────────────────────────────────────
+async function resolveMcpUser(req) {
+  const authHeader = req.headers["authorization"];
+  const apiKey = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : req.headers["x-api-key"];
+  if (!apiKey) return null;
+  return getClerkUserIdByApiKey(apiKey);
+}
+
+function unauthorizedMcp(res) {
+  return res.status(401)
+    .set("WWW-Authenticate", `Bearer realm="${APP_URL}", resource_metadata="${APP_URL}/.well-known/oauth-protected-resource"`)
+    .json({ error: "Unauthorized" });
+}
+
+// ── SSE sessions store ────────────────────────────────────────────────────────
+const sseSessions = new Map();
+
+// ── MCP — SSE transport (GET) ─────────────────────────────────────────────────
+app.get("/mcp", async (req, res) => {
+  const clerkUserId = await resolveMcpUser(req);
+  if (!clerkUserId) return unauthorizedMcp(res);
+
+  const transport = new SSEServerTransport("/mcp", res);
+  sseSessions.set(transport.sessionId, transport);
+  transport.onclose = () => sseSessions.delete(transport.sessionId);
+
+  const server = buildMcpServer(clerkUserId);
+  await server.connect(transport);
 });
 
+// ── MCP — Streamable HTTP (POST) ──────────────────────────────────────────────
 app.post("/mcp", async (req, res) => {
-  const authHeader = req.headers["authorization"];
-  const apiKey = authHeader?.startsWith("Bearer ")
-    ? authHeader.slice(7)
-    : req.headers["x-api-key"];
+  const sessionId = req.query.sessionId;
 
-  if (!apiKey) {
-    return res.status(401)
-      .set("WWW-Authenticate", `Bearer realm="${APP_URL}", resource_metadata="${APP_URL}/.well-known/oauth-protected-resource"`)
-      .json({ error: "Unauthorized" });
+  // SSE follow-up message
+  if (sessionId && sseSessions.has(sessionId)) {
+    return sseSessions.get(sessionId).handlePostMessage(req, res, req.body);
   }
 
-  const clerkUserId = await getClerkUserIdByApiKey(apiKey);
-
-  const server = new McpServer({ name: "finapp", version: "3.0.0" });
-
-  server.tool(
-    "get_bank_link_url",
-    "Generate a URL to open in your browser to connect a bank account via Plaid. Requires a valid API key.",
-    {},
-    async () => {
-      if (!clerkUserId) return { content: [{ type: "text", text: "No valid API key. Go to FinApp Settings to generate one." }] };
-      const sessionId = await createLinkSession(clerkUserId);
-      const url = `${APP_URL}/link?session=${sessionId}`;
-      return { content: [{ type: "text", text: `Open this URL in your browser to connect a bank:\n\n${url}\n\nThe link expires in 30 minutes. After connecting, ask me to sync your transactions.` }] };
-    }
-  );
-
-  server.tool(
-    "list_linked_banks",
-    "List all bank accounts currently linked to your FinApp account",
-    {},
-    async () => {
-      if (!clerkUserId) return { content: [{ type: "text", text: "No valid API key." }] };
-      const items = await getUserItems(clerkUserId);
-      if (items.length === 0) return { content: [{ type: "text", text: "No banks linked yet. Use get_bank_link_url to connect one." }] };
-      return { content: [{ type: "text", text: JSON.stringify(items.map(i => ({ itemId: i.itemId, institution: i.institutionName })), null, 2) }] };
-    }
-  );
-
-  server.tool(
-    "remove_bank",
-    "Remove a linked bank account",
-    { item_id: z.string().describe("The item_id of the bank to remove") },
-    async ({ item_id }) => {
-      if (!clerkUserId) return { content: [{ type: "text", text: "No valid API key." }] };
-      const removed = await removeUserItem(clerkUserId, item_id);
-      return { content: [{ type: "text", text: removed ? `Bank ${item_id} removed.` : "Bank not found." }] };
-    }
-  );
-
-  server.tool(
-    "sync_transactions",
-    "Pull the latest transactions from Plaid and store them",
-    {},
-    async () => {
-      if (!clerkUserId) return { content: [{ type: "text", text: "No valid API key." }] };
-      await syncTransactions(clerkUserId);
-      return { content: [{ type: "text", text: "Sync complete. Transactions are up to date." }] };
-    }
-  );
-
-  server.tool(
-    "get_balances",
-    "Get current balances for all linked bank accounts",
-    {},
-    async () => {
-      if (!clerkUserId) return { content: [{ type: "text", text: "No valid API key." }] };
-      const items = await getUserItems(clerkUserId);
-      if (items.length === 0) return { content: [{ type: "text", text: "No banks linked yet." }] };
-      const allAccounts = await Promise.all(
-        items.map(async ({ accessToken, institutionName }) => {
-          const r = await plaidClient.accountsBalanceGet({ access_token: accessToken });
-          return r.data.accounts.map((a) => ({
-            institution: institutionName,
-            name: a.name,
-            type: a.subtype,
-            balance: a.balances.current,
-            available: a.balances.available,
-          }));
-        })
-      );
-      return { content: [{ type: "text", text: JSON.stringify(allAccounts.flat(), null, 2) }] };
-    }
-  );
-
-  server.tool(
-    "get_transactions",
-    "Get transactions with optional filters",
-    {
-      limit: z.number().optional().describe("Max transactions to return (default 50)"),
-      start_date: z.string().optional().describe("Start date YYYY-MM-DD"),
-      end_date: z.string().optional().describe("End date YYYY-MM-DD"),
-      category: z.string().optional().describe("Filter by category"),
-    },
-    async ({ limit = 50, start_date, end_date, category }) => {
-      if (!clerkUserId) return { content: [{ type: "text", text: "No valid API key." }] };
-      const txns = await getTransactions(clerkUserId, { limit, startDate: start_date, endDate: end_date, category });
-      return { content: [{ type: "text", text: JSON.stringify(txns, null, 2) }] };
-    }
-  );
-
-  server.tool(
-    "get_spending_by_category",
-    "Get a summary of spending grouped by category",
-    {
-      start_date: z.string().optional().describe("Start date YYYY-MM-DD"),
-      end_date: z.string().optional().describe("End date YYYY-MM-DD"),
-    },
-    async ({ start_date, end_date }) => {
-      if (!clerkUserId) return { content: [{ type: "text", text: "No valid API key." }] };
-      const summary = await getSpendingByCategory(clerkUserId, { startDate: start_date, endDate: end_date });
-      return { content: [{ type: "text", text: JSON.stringify(summary, null, 2) }] };
-    }
-  );
+  // New Streamable HTTP request
+  const clerkUserId = await resolveMcpUser(req);
+  if (!clerkUserId) return unauthorizedMcp(res);
 
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+  const server = buildMcpServer(clerkUserId);
   await server.connect(transport);
   await transport.handleRequest(req, res, req.body);
 });
