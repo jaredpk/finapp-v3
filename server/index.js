@@ -524,12 +524,32 @@ function unauthorizedMcp(res) {
 // ── SSE sessions store ────────────────────────────────────────────────────────
 const sseSessions = new Map();
 
-// ── MCP — SSE transport (GET) ─────────────────────────────────────────────────
+// ── MCP — SSE transport on /sse (for claude.ai) ───────────────────────────────
+app.get("/sse", async (req, res) => {
+  const clerkUserId = await resolveMcpUser(req);
+  if (!clerkUserId) return unauthorizedMcp(res);
+
+  const transport = new SSEServerTransport("/messages", res);
+  sseSessions.set(transport.sessionId, transport);
+  transport.onclose = () => sseSessions.delete(transport.sessionId);
+
+  const server = buildMcpServer(clerkUserId);
+  await server.connect(transport);
+});
+
+app.post("/messages", async (req, res) => {
+  const sessionId = req.query.sessionId;
+  const session = sseSessions.get(sessionId);
+  if (!session) return res.status(404).json({ error: "Session not found" });
+  await session.handlePostMessage(req, res, req.body);
+});
+
+// ── MCP — SSE transport on /mcp (GET) ────────────────────────────────────────
 app.get("/mcp", async (req, res) => {
   const clerkUserId = await resolveMcpUser(req);
   if (!clerkUserId) return unauthorizedMcp(res);
 
-  const transport = new SSEServerTransport("/mcp", res);
+  const transport = new SSEServerTransport("/messages", res);
   sseSessions.set(transport.sessionId, transport);
   transport.onclose = () => sseSessions.delete(transport.sessionId);
 
@@ -541,12 +561,10 @@ app.get("/mcp", async (req, res) => {
 app.post("/mcp", async (req, res) => {
   const sessionId = req.query.sessionId;
 
-  // SSE follow-up message
   if (sessionId && sseSessions.has(sessionId)) {
     return sseSessions.get(sessionId).handlePostMessage(req, res, req.body);
   }
 
-  // New Streamable HTTP request
   const clerkUserId = await resolveMcpUser(req);
   if (!clerkUserId) return unauthorizedMcp(res);
 
