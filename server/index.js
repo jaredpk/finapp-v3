@@ -19,7 +19,6 @@ dotenv.config();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isProd = process.env.NODE_ENV === "production";
-const MCP_SECRET = process.env.MCP_SECRET;
 const APP_URL = process.env.APP_URL || "http://localhost:3001";
 
 const app = express();
@@ -60,13 +59,6 @@ async function syncTransactions(userId) {
 }
 
 // ── Auth helpers ──────────────────────────────────────────────────────────────
-function requireMcpSecret(req, res, next) {
-  if (MCP_SECRET && req.headers["x-mcp-secret"] !== MCP_SECRET) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-  next();
-}
-
 async function resolveUser(req) {
   const apiKey = req.headers["x-api-key"];
   if (apiKey) return getUserByApiKey(apiKey);
@@ -246,7 +238,7 @@ app.post("/api/sync", async (req, res) => {
 app.get("/api/health", (_, res) => res.json({ ok: true }));
 
 // ── MCP endpoint ──────────────────────────────────────────────────────────────
-app.post("/mcp", requireMcpSecret, async (req, res) => {
+app.post("/mcp", async (req, res) => {
   const apiKey = req.headers["x-api-key"];
   const user = apiKey ? await getUserByApiKey(apiKey) : null;
 
