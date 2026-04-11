@@ -27,7 +27,16 @@ const isProd = process.env.NODE_ENV === "production";
 const APP_URL = process.env.APP_URL || "http://localhost:3001";
 
 const app = express();
-app.use(cors({ origin: isProd ? false : "http://localhost:5173" }));
+app.use(cors({
+  origin: (origin, cb) => {
+    // Allow requests from Claude.ai, localhost in dev, and no-origin (curl/server-to-server)
+    const allowed = !origin || origin.includes("claude.ai") || origin.includes("localhost") || origin.includes("anthropic.com");
+    cb(null, allowed ? origin || "*" : false);
+  },
+  allowedHeaders: ["Content-Type", "Authorization", "x-api-key", "mcp-session-id"],
+  exposedHeaders: ["mcp-session-id"],
+  credentials: true,
+}));
 app.use(express.json());
 app.use(clerkMiddleware());
 
@@ -434,6 +443,10 @@ app.post("/oauth/token", express.urlencoded({ extended: true }), async (req, res
 });
 
 // ── MCP endpoint (authenticated via Bearer token or x-api-key) ───────────────
+app.get("/mcp", (_, res) => {
+  res.status(405).set("Allow", "POST").json({ error: "Method not allowed. Use POST." });
+});
+
 app.post("/mcp", async (req, res) => {
   const authHeader = req.headers["authorization"];
   const apiKey = authHeader?.startsWith("Bearer ")
