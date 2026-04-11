@@ -1,4 +1,5 @@
 import pg from "pg";
+import { randomBytes } from "crypto";
 
 const { Pool } = pg;
 
@@ -53,9 +54,7 @@ export async function initDb() {
 
 // ── Users ─────────────────────────────────────────────────────────────────────
 export async function createUser(username) {
-  const apiKey = Array.from(crypto.getRandomValues(new Uint8Array(32)))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  const apiKey = randomBytes(32).toString("hex");
   const { rows } = await pool.query(
     `INSERT INTO users (username, api_key) VALUES ($1, $2)
      ON CONFLICT (username) DO UPDATE SET username = EXCLUDED.username
@@ -80,9 +79,7 @@ export async function listUsers() {
 
 // ── Link sessions ─────────────────────────────────────────────────────────────
 export async function createLinkSession(userId) {
-  const id = Array.from(crypto.getRandomValues(new Uint8Array(16)))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  const id = randomBytes(16).toString("hex");
   await pool.query(
     `INSERT INTO link_sessions (id, user_id, expires_at) VALUES ($1, $2, NOW() + INTERVAL '30 minutes')`,
     [id, userId]
