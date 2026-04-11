@@ -3,12 +3,14 @@ import cors from "cors";
 import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
+import { clerkMiddleware, getAuth } from "@clerk/express";
 import { Configuration, PlaidApi, PlaidEnvironments, Products, CountryCode } from "plaid";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import {
-  initDb, createUser, getUserByApiKey, listUsers,
+  initDb,
+  getApiKeyForUser, createApiKey, getClerkUserIdByApiKey,
   createLinkSession, getLinkSession, deleteLinkSession,
   getUserItems, upsertUserItem, removeUserItem,
   getCursor, saveCursor, upsertTransactions,
@@ -24,6 +26,7 @@ const APP_URL = process.env.APP_URL || "http://localhost:3001";
 const app = express();
 app.use(cors({ origin: isProd ? false : "http://localhost:5173" }));
 app.use(express.json());
+app.use(clerkMiddleware());
 
 if (isProd) {
   app.use(express.static(path.join(__dirname, "../client/dist")));
@@ -42,15 +45,15 @@ const plaidConfig = new Configuration({
 const plaidClient = new PlaidApi(plaidConfig);
 
 // ── Sync transactions for a user ──────────────────────────────────────────────
-async function syncTransactions(userId) {
-  const items = await getUserItems(userId);
+async function syncTransactions(clerkUserId) {
+  const items = await getUserItems(clerkUserId);
   for (const { accessToken, itemId } of items) {
     let cursor = await getCursor(itemId);
     let hasMore = true;
     while (hasMore) {
       const r = await plaidClient.transactionsSync({ access_token: accessToken, cursor });
-      await upsertTransactions(userId, r.data.added);
-      await upsertTransactions(userId, r.data.modified);
+      await upsertTransactions(clerkUserId, r.data.added);
+      await upsertTransactions(clerkUserId, r.data.modified);
       cursor = r.data.next_cursor;
       hasMore = r.data.has_more;
     }
@@ -59,13 +62,26 @@ async function syncTransactions(userId) {
 }
 
 // ── Auth helpers ──────────────────────────────────────────────────────────────
-async function resolveUser(req) {
-  const apiKey = req.headers["x-api-key"];
-  if (apiKey) return getUserByApiKey(apiKey);
-  return null;
+function requireClerkAuth(req, res, next) {
+  const { userId } = getAuth(req);
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+  next();
 }
 
-// ── Plaid Link page ───────────────────────────────────────────────────────────
+// ── User API key management ───────────────────────────────────────────────────
+app.get("/api/user/api-key", requireClerkAuth, async (req, res) => {
+  const { userId } = getAuth(req);
+  const key = await getApiKeyForUser(userId);
+  res.json({ key });
+});
+
+app.post("/api/user/api-key", requireClerkAuth, async (req, res) => {
+  const { userId } = getAuth(req);
+  const key = await createApiKey(userId);
+  res.json({ key });
+});
+
+// ── Plaid Link page (opened from MCP bank link URL) ───────────────────────────
 app.get("/link", async (req, res) => {
   const { session } = req.query;
   if (!session) return res.status(400).send("Missing session");
@@ -76,7 +92,7 @@ app.get("/link", async (req, res) => {
   let linkToken;
   try {
     const r = await plaidClient.linkTokenCreate({
-      user: { client_user_id: String(linkSession.user_id) },
+      user: { client_user_id: linkSession.clerk_user_id },
       client_name: "FinApp",
       products: [Products.Transactions, Products.Auth],
       country_codes: [CountryCode.Us],
@@ -98,34 +114,29 @@ app.get("/link", async (req, res) => {
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
     .card { background: #1e293b; border-radius: 16px; padding: 48px 40px; max-width: 440px; width: 90%; text-align: center; box-shadow: 0 25px 50px rgba(0,0,0,0.4); }
-    .logo { font-size: 2rem; margin-bottom: 8px; }
     h1 { font-size: 1.5rem; font-weight: 700; margin-bottom: 8px; }
     p { color: #94a3b8; margin-bottom: 32px; line-height: 1.6; }
-    button { background: #6366f1; color: white; border: none; border-radius: 10px; padding: 14px 32px; font-size: 1rem; font-weight: 600; cursor: pointer; width: 100%; transition: background 0.2s; }
-    button:hover { background: #4f46e5; }
+    button { background: #6366f1; color: white; border: none; border-radius: 10px; padding: 14px 32px; font-size: 1rem; font-weight: 600; cursor: pointer; width: 100%; }
     button:disabled { background: #334155; cursor: not-allowed; }
     .status { margin-top: 20px; padding: 12px; border-radius: 8px; font-size: 0.9rem; display: none; }
     .status.success { background: #064e3b; color: #6ee7b7; display: block; }
-    .status.error   { background: #450a0a; color: #fca5a5; display: block; }
+    .status.error { background: #450a0a; color: #fca5a5; display: block; }
   </style>
 </head>
 <body>
   <div class="card">
-    <div class="logo">🏦</div>
-    <h1>Connect Your Bank</h1>
-    <p>Securely link your bank account to FinApp using Plaid. Your credentials are never stored.</p>
+    <h1>🏦 Connect Your Bank</h1>
+    <p>Securely link your bank account to FinApp using Plaid.</p>
     <button id="btn">Connect Bank Account</button>
     <div id="status" class="status"></div>
   </div>
-
   <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
   <script>
     const btn = document.getElementById("btn");
     const status = document.getElementById("status");
-
     const handler = Plaid.create({
       token: ${JSON.stringify(linkToken)},
-      onSuccess: async (public_token, metadata) => {
+      onSuccess: async (public_token) => {
         btn.disabled = true;
         btn.textContent = "Connecting...";
         try {
@@ -137,43 +148,64 @@ app.get("/link", async (req, res) => {
           const data = await res.json();
           if (data.success) {
             status.className = "status success";
-            status.textContent = "✓ Bank connected successfully! You can close this tab and return to Claude.";
+            status.textContent = "✓ Bank connected! You can close this tab and return to Claude.";
             btn.style.display = "none";
-          } else {
-            throw new Error(data.error || "Unknown error");
-          }
+          } else { throw new Error(data.error); }
         } catch (err) {
           status.className = "status error";
-          status.textContent = "Failed to connect: " + err.message;
+          status.textContent = "Failed: " + err.message;
           btn.disabled = false;
           btn.textContent = "Try Again";
         }
       },
       onExit: (err) => {
-        if (err) {
-          status.className = "status error";
-          status.textContent = "Connection cancelled or failed.";
-        }
+        if (err) { status.className = "status error"; status.textContent = "Connection cancelled."; }
       },
     });
-
     btn.addEventListener("click", () => handler.open());
   </script>
 </body>
 </html>`);
 });
 
-// ── Exchange public token (called by link page) ───────────────────────────────
+// ── Create link token (from web app, uses Clerk auth) ─────────────────────────
+app.post("/api/create_link_token", requireClerkAuth, async (req, res) => {
+  const { userId } = getAuth(req);
+  try {
+    const response = await plaidClient.linkTokenCreate({
+      user: { client_user_id: userId },
+      client_name: "FinApp",
+      products: [Products.Transactions, Products.Auth],
+      country_codes: [CountryCode.Us],
+      language: "en",
+    });
+    res.json({ link_token: response.data.link_token });
+  } catch (err) {
+    console.error(err.response?.data || err.message);
+    res.status(500).json({ error: "Failed to create link token" });
+  }
+});
+
+// ── Exchange public token ─────────────────────────────────────────────────────
 app.post("/api/exchange_public_token", async (req, res) => {
   const { public_token, session } = req.body;
-  try {
+
+  let clerkUserId;
+  if (session) {
     const linkSession = await getLinkSession(session);
     if (!linkSession) return res.status(400).json({ error: "Invalid or expired session" });
+    clerkUserId = linkSession.clerk_user_id;
+    await deleteLinkSession(session);
+  } else {
+    const auth = getAuth(req);
+    if (!auth.userId) return res.status(401).json({ error: "Unauthorized" });
+    clerkUserId = auth.userId;
+  }
 
+  try {
     const r = await plaidClient.itemPublicTokenExchange({ public_token });
     const { access_token, item_id } = r.data;
 
-    // Try to get institution name
     let institutionName = null;
     try {
       const itemResp = await plaidClient.itemGet({ access_token });
@@ -184,10 +216,8 @@ app.post("/api/exchange_public_token", async (req, res) => {
       }
     } catch (_) {}
 
-    await upsertUserItem(linkSession.user_id, access_token, item_id, institutionName);
-    await deleteLinkSession(session);
-    await syncTransactions(linkSession.user_id);
-
+    await upsertUserItem(clerkUserId, access_token, item_id, institutionName);
+    await syncTransactions(clerkUserId);
     res.json({ success: true });
   } catch (err) {
     console.error(err.response?.data || err.message);
@@ -195,11 +225,10 @@ app.post("/api/exchange_public_token", async (req, res) => {
   }
 });
 
-// ── REST API (used by the React frontend) ─────────────────────────────────────
-app.get("/api/accounts", async (req, res) => {
-  const user = await resolveUser(req);
-  if (!user) return res.status(401).json({ error: "Missing x-api-key header" });
-  const items = await getUserItems(user.id);
+// ── Accounts ──────────────────────────────────────────────────────────────────
+app.get("/api/accounts", requireClerkAuth, async (req, res) => {
+  const { userId } = getAuth(req);
+  const items = await getUserItems(userId);
   try {
     const allAccounts = await Promise.all(
       items.map(async ({ accessToken, itemId, institutionName }) => {
@@ -213,117 +242,91 @@ app.get("/api/accounts", async (req, res) => {
   }
 });
 
-app.get("/api/transactions", async (req, res) => {
-  const user = await resolveUser(req);
-  if (!user) return res.status(401).json({ error: "Missing x-api-key header" });
+// ── Transactions ──────────────────────────────────────────────────────────────
+app.get("/api/transactions", requireClerkAuth, async (req, res) => {
+  const { userId } = getAuth(req);
   try {
-    const transactions = await getTransactions(user.id, { limit: 200 });
+    const transactions = await getTransactions(userId, { limit: 200 });
     res.json({ transactions });
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch transactions" });
   }
 });
 
-app.post("/api/sync", async (req, res) => {
-  const user = await resolveUser(req);
-  if (!user) return res.status(401).json({ error: "Missing x-api-key header" });
+// ── Sync ──────────────────────────────────────────────────────────────────────
+app.post("/api/sync", requireClerkAuth, async (req, res) => {
+  const { userId } = getAuth(req);
   try {
-    await syncTransactions(user.id);
+    await syncTransactions(userId);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: "Sync failed" });
   }
 });
 
+// ── Health ────────────────────────────────────────────────────────────────────
 app.get("/api/health", (_, res) => res.json({ ok: true }));
 
-// ── MCP endpoint ──────────────────────────────────────────────────────────────
+// ── MCP endpoint (authenticated via API key) ──────────────────────────────────
 app.post("/mcp", async (req, res) => {
   const apiKey = req.headers["x-api-key"];
-  const user = apiKey ? await getUserByApiKey(apiKey) : null;
+  const clerkUserId = apiKey ? await getClerkUserIdByApiKey(apiKey) : null;
 
-  const server = new McpServer({ name: "finapp", version: "2.0.0" });
-
-  // ── Account management ────────────────────────────────────────────────────
-  server.tool(
-    "create_account",
-    "Create a new FinApp user account. Returns a personal API key to use in future requests.",
-    { username: z.string().describe("A unique username for this account") },
-    async ({ username }) => {
-      const newUser = await createUser(username);
-      return {
-        content: [{
-          type: "text",
-          text: `Account created!\n\nUsername: ${newUser.username}\nAPI Key: ${newUser.api_key}\n\nUpdate your Claude Desktop MCP config to add:\n"x-api-key": "${newUser.api_key}"`,
-        }],
-      };
-    }
-  );
-
-  server.tool("list_accounts", "List all FinApp user accounts", {}, async () => {
-    const users = await listUsers();
-    return { content: [{ type: "text", text: JSON.stringify(users, null, 2) }] };
-  });
-
-  // All tools below require a valid user
-  const requireUser = (fn) => async (args) => {
-    if (!user) return { content: [{ type: "text", text: "No account found. Please add your x-api-key to the MCP config, or create an account first with create_account." }] };
-    return fn(args, user);
-  };
+  const server = new McpServer({ name: "finapp", version: "3.0.0" });
 
   server.tool(
     "get_bank_link_url",
-    "Generate a URL to open in your browser to connect a bank account via Plaid",
+    "Generate a URL to open in your browser to connect a bank account via Plaid. Requires a valid API key.",
     {},
-    requireUser(async (_, u) => {
-      const sessionId = await createLinkSession(u.id);
+    async () => {
+      if (!clerkUserId) return { content: [{ type: "text", text: "No valid API key. Go to FinApp Settings to generate one." }] };
+      const sessionId = await createLinkSession(clerkUserId);
       const url = `${APP_URL}/link?session=${sessionId}`;
-      return {
-        content: [{
-          type: "text",
-          text: `Open this URL in your browser to connect a bank account:\n\n${url}\n\nThe link expires in 30 minutes. After connecting, come back and ask me to sync your transactions.`,
-        }],
-      };
-    })
+      return { content: [{ type: "text", text: `Open this URL in your browser to connect a bank:\n\n${url}\n\nThe link expires in 30 minutes. After connecting, ask me to sync your transactions.` }] };
+    }
   );
 
   server.tool(
     "list_linked_banks",
     "List all bank accounts currently linked to your FinApp account",
     {},
-    requireUser(async (_, u) => {
-      const items = await getUserItems(u.id);
+    async () => {
+      if (!clerkUserId) return { content: [{ type: "text", text: "No valid API key." }] };
+      const items = await getUserItems(clerkUserId);
       if (items.length === 0) return { content: [{ type: "text", text: "No banks linked yet. Use get_bank_link_url to connect one." }] };
       return { content: [{ type: "text", text: JSON.stringify(items.map(i => ({ itemId: i.itemId, institution: i.institutionName })), null, 2) }] };
-    })
+    }
   );
 
   server.tool(
     "remove_bank",
     "Remove a linked bank account",
-    { item_id: z.string().describe("The item_id of the bank to remove (from list_linked_banks)") },
-    requireUser(async ({ item_id }, u) => {
-      const removed = await removeUserItem(u.id, item_id);
+    { item_id: z.string().describe("The item_id of the bank to remove") },
+    async ({ item_id }) => {
+      if (!clerkUserId) return { content: [{ type: "text", text: "No valid API key." }] };
+      const removed = await removeUserItem(clerkUserId, item_id);
       return { content: [{ type: "text", text: removed ? `Bank ${item_id} removed.` : "Bank not found." }] };
-    })
+    }
   );
 
   server.tool(
     "sync_transactions",
-    "Pull the latest transactions from Plaid and store them in the database",
+    "Pull the latest transactions from Plaid and store them",
     {},
-    requireUser(async (_, u) => {
-      await syncTransactions(u.id);
-      return { content: [{ type: "text", text: "Sync complete. Your transactions are up to date." }] };
-    })
+    async () => {
+      if (!clerkUserId) return { content: [{ type: "text", text: "No valid API key." }] };
+      await syncTransactions(clerkUserId);
+      return { content: [{ type: "text", text: "Sync complete. Transactions are up to date." }] };
+    }
   );
 
   server.tool(
     "get_balances",
     "Get current balances for all linked bank accounts",
     {},
-    requireUser(async (_, u) => {
-      const items = await getUserItems(u.id);
+    async () => {
+      if (!clerkUserId) return { content: [{ type: "text", text: "No valid API key." }] };
+      const items = await getUserItems(clerkUserId);
       if (items.length === 0) return { content: [{ type: "text", text: "No banks linked yet." }] };
       const allAccounts = await Promise.all(
         items.map(async ({ accessToken, institutionName }) => {
@@ -338,22 +341,23 @@ app.post("/mcp", async (req, res) => {
         })
       );
       return { content: [{ type: "text", text: JSON.stringify(allAccounts.flat(), null, 2) }] };
-    })
+    }
   );
 
   server.tool(
     "get_transactions",
-    "Get transactions from the database with optional filters",
+    "Get transactions with optional filters",
     {
       limit: z.number().optional().describe("Max transactions to return (default 50)"),
       start_date: z.string().optional().describe("Start date YYYY-MM-DD"),
       end_date: z.string().optional().describe("End date YYYY-MM-DD"),
       category: z.string().optional().describe("Filter by category"),
     },
-    requireUser(async ({ limit = 50, start_date, end_date, category }, u) => {
-      const txns = await getTransactions(u.id, { limit, startDate: start_date, endDate: end_date, category });
+    async ({ limit = 50, start_date, end_date, category }) => {
+      if (!clerkUserId) return { content: [{ type: "text", text: "No valid API key." }] };
+      const txns = await getTransactions(clerkUserId, { limit, startDate: start_date, endDate: end_date, category });
       return { content: [{ type: "text", text: JSON.stringify(txns, null, 2) }] };
-    })
+    }
   );
 
   server.tool(
@@ -363,10 +367,11 @@ app.post("/mcp", async (req, res) => {
       start_date: z.string().optional().describe("Start date YYYY-MM-DD"),
       end_date: z.string().optional().describe("End date YYYY-MM-DD"),
     },
-    requireUser(async ({ start_date, end_date }, u) => {
-      const summary = await getSpendingByCategory(u.id, { startDate: start_date, endDate: end_date });
+    async ({ start_date, end_date }) => {
+      if (!clerkUserId) return { content: [{ type: "text", text: "No valid API key." }] };
+      const summary = await getSpendingByCategory(clerkUserId, { startDate: start_date, endDate: end_date });
       return { content: [{ type: "text", text: JSON.stringify(summary, null, 2) }] };
-    })
+    }
   );
 
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });

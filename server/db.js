@@ -6,17 +6,34 @@ const { Pool } = pg;
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
 export async function initDb() {
+  // Migrate old integer-based schema if present
+  const { rows } = await pool.query(`
+    SELECT data_type FROM information_schema.columns
+    WHERE table_name = 'user_items' AND column_name = 'user_id'
+  `);
+  if (rows.length > 0 && rows[0].data_type === "integer") {
+    await pool.query(`
+      DROP TABLE IF EXISTS transactions CASCADE;
+      DROP TABLE IF EXISTS transaction_cursors CASCADE;
+      DROP TABLE IF EXISTS link_sessions CASCADE;
+      DROP TABLE IF EXISTS user_items CASCADE;
+      DROP TABLE IF EXISTS users CASCADE;
+      DROP TABLE IF EXISTS api_keys CASCADE;
+    `);
+  }
+
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS users (
+    CREATE TABLE IF NOT EXISTS api_keys (
       id SERIAL PRIMARY KEY,
-      username TEXT UNIQUE NOT NULL,
-      api_key TEXT UNIQUE NOT NULL,
+      clerk_user_id TEXT NOT NULL,
+      key TEXT UNIQUE NOT NULL,
+      name TEXT DEFAULT 'Default',
       created_at TIMESTAMP DEFAULT NOW()
     );
 
     CREATE TABLE IF NOT EXISTS user_items (
       id SERIAL PRIMARY KEY,
-      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      clerk_user_id TEXT NOT NULL,
       access_token TEXT NOT NULL,
       item_id TEXT UNIQUE NOT NULL,
       institution_name TEXT,
@@ -25,7 +42,7 @@ export async function initDb() {
 
     CREATE TABLE IF NOT EXISTS link_sessions (
       id TEXT PRIMARY KEY,
-      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      clerk_user_id TEXT NOT NULL,
       expires_at TIMESTAMP NOT NULL,
       created_at TIMESTAMP DEFAULT NOW()
     );
@@ -38,7 +55,7 @@ export async function initDb() {
 
     CREATE TABLE IF NOT EXISTS transactions (
       id SERIAL PRIMARY KEY,
-      user_id INTEGER NOT NULL,
+      clerk_user_id TEXT NOT NULL,
       transaction_id TEXT UNIQUE NOT NULL,
       account_id TEXT NOT NULL,
       amount NUMERIC NOT NULL,
@@ -52,44 +69,50 @@ export async function initDb() {
   `);
 }
 
-// ── Users ─────────────────────────────────────────────────────────────────────
-export async function createUser(username) {
-  const apiKey = randomBytes(32).toString("hex");
+// ── API Keys ──────────────────────────────────────────────────────────────────
+export async function getApiKeyForUser(clerkUserId) {
   const { rows } = await pool.query(
-    `INSERT INTO users (username, api_key) VALUES ($1, $2)
-     ON CONFLICT (username) DO UPDATE SET username = EXCLUDED.username
-     RETURNING id, username, api_key`,
-    [username, apiKey]
+    "SELECT key FROM api_keys WHERE clerk_user_id = $1 ORDER BY created_at DESC LIMIT 1",
+    [clerkUserId]
   );
-  return rows[0];
+  return rows[0]?.key || null;
 }
 
-export async function getUserByApiKey(apiKey) {
-  const { rows } = await pool.query(
-    "SELECT id, username FROM users WHERE api_key = $1",
-    [apiKey]
+export async function createApiKey(clerkUserId) {
+  const key = randomBytes(32).toString("hex");
+  await pool.query(
+    `DELETE FROM api_keys WHERE clerk_user_id = $1`,
+    [clerkUserId]
   );
-  return rows[0] || null;
+  await pool.query(
+    `INSERT INTO api_keys (clerk_user_id, key) VALUES ($1, $2)`,
+    [clerkUserId, key]
+  );
+  return key;
 }
 
-export async function listUsers() {
-  const { rows } = await pool.query("SELECT id, username, created_at FROM users ORDER BY created_at");
-  return rows;
+export async function getClerkUserIdByApiKey(key) {
+  const { rows } = await pool.query(
+    "SELECT clerk_user_id FROM api_keys WHERE key = $1",
+    [key]
+  );
+  return rows[0]?.clerk_user_id || null;
 }
 
 // ── Link sessions ─────────────────────────────────────────────────────────────
-export async function createLinkSession(userId) {
+export async function createLinkSession(clerkUserId) {
   const id = randomBytes(16).toString("hex");
   await pool.query(
-    `INSERT INTO link_sessions (id, user_id, expires_at) VALUES ($1, $2, NOW() + INTERVAL '30 minutes')`,
-    [id, userId]
+    `INSERT INTO link_sessions (id, clerk_user_id, expires_at)
+     VALUES ($1, $2, NOW() + INTERVAL '30 minutes')`,
+    [id, clerkUserId]
   );
   return id;
 }
 
 export async function getLinkSession(id) {
   const { rows } = await pool.query(
-    "SELECT user_id FROM link_sessions WHERE id = $1 AND expires_at > NOW()",
+    "SELECT clerk_user_id FROM link_sessions WHERE id = $1 AND expires_at > NOW()",
     [id]
   );
   return rows[0] || null;
@@ -100,28 +123,28 @@ export async function deleteLinkSession(id) {
 }
 
 // ── User items (banks) ────────────────────────────────────────────────────────
-export async function getUserItems(userId) {
+export async function getUserItems(clerkUserId) {
   const { rows } = await pool.query(
     `SELECT access_token AS "accessToken", item_id AS "itemId", institution_name AS "institutionName"
-     FROM user_items WHERE user_id = $1`,
-    [userId]
+     FROM user_items WHERE clerk_user_id = $1`,
+    [clerkUserId]
   );
   return rows;
 }
 
-export async function upsertUserItem(userId, accessToken, itemId, institutionName) {
+export async function upsertUserItem(clerkUserId, accessToken, itemId, institutionName) {
   await pool.query(
-    `INSERT INTO user_items (user_id, access_token, item_id, institution_name)
+    `INSERT INTO user_items (clerk_user_id, access_token, item_id, institution_name)
      VALUES ($1, $2, $3, $4)
      ON CONFLICT (item_id) DO UPDATE SET institution_name = $4`,
-    [userId, accessToken, itemId, institutionName || null]
+    [clerkUserId, accessToken, itemId, institutionName || null]
   );
 }
 
-export async function removeUserItem(userId, itemId) {
+export async function removeUserItem(clerkUserId, itemId) {
   const { rowCount } = await pool.query(
-    "DELETE FROM user_items WHERE user_id = $1 AND item_id = $2",
-    [userId, itemId]
+    "DELETE FROM user_items WHERE clerk_user_id = $1 AND item_id = $2",
+    [clerkUserId, itemId]
   );
   return rowCount > 0;
 }
@@ -145,15 +168,15 @@ export async function saveCursor(itemId, cursor) {
 }
 
 // ── Transactions ──────────────────────────────────────────────────────────────
-export async function upsertTransactions(userId, transactions) {
+export async function upsertTransactions(clerkUserId, transactions) {
   for (const t of transactions) {
     await pool.query(
       `INSERT INTO transactions
-         (user_id, transaction_id, account_id, amount, date, name, merchant_name, category, pending)
+         (clerk_user_id, transaction_id, account_id, amount, date, name, merchant_name, category, pending)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (transaction_id) DO UPDATE SET amount = $4, pending = $9`,
       [
-        userId,
+        clerkUserId,
         t.transaction_id,
         t.account_id,
         t.amount,
@@ -167,9 +190,9 @@ export async function upsertTransactions(userId, transactions) {
   }
 }
 
-export async function getTransactions(userId, { limit = 100, startDate, endDate, category } = {}) {
-  const conditions = ["user_id = $1"];
-  const params = [userId];
+export async function getTransactions(clerkUserId, { limit = 100, startDate, endDate, category } = {}) {
+  const conditions = ["clerk_user_id = $1"];
+  const params = [clerkUserId];
   let i = 2;
   if (startDate) { conditions.push(`date >= $${i++}`); params.push(startDate); }
   if (endDate)   { conditions.push(`date <= $${i++}`); params.push(endDate); }
@@ -182,9 +205,9 @@ export async function getTransactions(userId, { limit = 100, startDate, endDate,
   return rows;
 }
 
-export async function getSpendingByCategory(userId, { startDate, endDate } = {}) {
-  const conditions = ["user_id = $1", "pending = false", "amount > 0"];
-  const params = [userId];
+export async function getSpendingByCategory(clerkUserId, { startDate, endDate } = {}) {
+  const conditions = ["clerk_user_id = $1", "pending = false", "amount > 0"];
+  const params = [clerkUserId];
   let i = 2;
   if (startDate) { conditions.push(`date >= $${i++}`); params.push(startDate); }
   if (endDate)   { conditions.push(`date <= $${i++}`); params.push(endDate); }
