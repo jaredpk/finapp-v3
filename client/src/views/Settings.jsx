@@ -29,6 +29,8 @@ export default function Settings() {
     setTimeout(() => setCopied(false), 2000);
   }
 
+  const sseUrl = apiKey ? `${window.location.origin}/sse?key=${apiKey}` : null;
+
   const mcpConfig = apiKey ? JSON.stringify({
     mcpServers: {
       finapp: {
@@ -88,6 +90,22 @@ export default function Settings() {
           </button>
         )}
       </section>
+
+      {/* Claude.ai URL */}
+      {sseUrl && (
+        <section style={styles.card}>
+          <h2 style={styles.cardTitle}>Claude.ai MCP URL</h2>
+          <p style={styles.description}>
+            Go to <strong>claude.ai → Settings → Integrations</strong> and paste this URL to connect FinApp.
+          </p>
+          <div style={styles.keyBox}>
+            <code style={styles.keyText}>{sseUrl}</code>
+            <button style={styles.copyBtn} onClick={() => handleCopy(sseUrl)}>
+              {copied ? "Copied!" : "Copy"}
+            </button>
+          </div>
+        </section>
+      )}
 
       {/* Claude Desktop config */}
       {mcpConfig && (

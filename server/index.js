@@ -510,7 +510,9 @@ function buildMcpServer(clerkUserId) {
 // ── Auth helper for MCP ───────────────────────────────────────────────────────
 async function resolveMcpUser(req) {
   const authHeader = req.headers["authorization"];
-  const apiKey = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : req.headers["x-api-key"];
+  const apiKey = authHeader?.startsWith("Bearer ")
+    ? authHeader.slice(7)
+    : req.headers["x-api-key"] || req.query.key;
   if (!apiKey) return null;
   return getClerkUserIdByApiKey(apiKey);
 }
