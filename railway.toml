@@ -5,4 +5,4 @@ buildCommand = "npm run install-server && npm run build"
 startCommand = "NODE_ENV=production npm start"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 30
-restartPolicyType = "on-failure"
+restartPolicyType = "ON_FAILURE"
