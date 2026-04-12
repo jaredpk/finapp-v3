@@ -280,6 +280,11 @@ app.post("/api/sync", requireClerkAuth, async (req, res) => {
 // ── Health ────────────────────────────────────────────────────────────────────
 app.get("/api/health", (_, res) => res.json({ ok: true }));
 
+// ── Public config (safe to expose) ───────────────────────────────────────────
+app.get("/api/config", (_, res) => res.json({
+  clerkPublishableKey: process.env.CLERK_PUBLISHABLE_KEY || "",
+}));
+
 // ── OAuth metadata ────────────────────────────────────────────────────────────
 app.get("/.well-known/oauth-authorization-server", (_, res) => {
   res.json({
