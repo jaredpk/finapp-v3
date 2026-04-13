@@ -87,6 +87,19 @@ function requireClerkAuth(req, res, next) {
   next();
 }
 
+// Accepts either a Clerk JWT (from the React app) or an API key (from the widget/MCP)
+async function requireApiKeyOrClerkAuth(req, res, next) {
+  const { userId } = getAuth(req);
+  if (userId) { req._userId = userId; return next(); }
+  const authHeader = req.headers["authorization"];
+  const apiKey = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : req.headers["x-api-key"];
+  if (apiKey) {
+    const uid = await getClerkUserIdByApiKey(apiKey);
+    if (uid) { req._userId = uid; return next(); }
+  }
+  return res.status(401).json({ error: "Unauthorized" });
+}
+
 // ── User API key management ───────────────────────────────────────────────────
 app.get("/api/user/api-key", requireClerkAuth, async (req, res) => {
   const { userId } = getAuth(req);
@@ -262,10 +275,16 @@ app.get("/api/accounts", requireClerkAuth, async (req, res) => {
 });
 
 // ── Transactions ──────────────────────────────────────────────────────────────
-app.get("/api/transactions", requireClerkAuth, async (req, res) => {
-  const { userId } = getAuth(req);
+app.get("/api/transactions", requireApiKeyOrClerkAuth, async (req, res) => {
+  const userId = req._userId;
   try {
-    const transactions = await getTransactions(userId, { limit: 200 });
+    const limit = Math.min(parseInt(req.query.limit) || 200, 1000);
+    const transactions = await getTransactions(userId, {
+      limit,
+      startDate: req.query.start_date,
+      endDate: req.query.end_date,
+      category: req.query.category,
+    });
     res.json({ transactions });
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch transactions" });
@@ -296,8 +315,8 @@ app.post("/api/categories/seed", requireClerkAuth, async (req, res) => {
   res.json({ created, categories: all });
 });
 
-app.get("/api/categories", requireClerkAuth, async (req, res) => {
-  const { userId } = getAuth(req);
+app.get("/api/categories", requireApiKeyOrClerkAuth, async (req, res) => {
+  const userId = req._userId;
   const cats = await getCategories(userId);
   res.json({ categories: cats });
 });
@@ -325,14 +344,14 @@ app.delete("/api/categories/:id", requireClerkAuth, async (req, res) => {
 });
 
 // ── Assignments ───────────────────────────────────────────────────────────────
-app.get("/api/assignments", requireClerkAuth, async (req, res) => {
-  const { userId } = getAuth(req);
+app.get("/api/assignments", requireApiKeyOrClerkAuth, async (req, res) => {
+  const userId = req._userId;
   const rows = await getAssignments(userId);
   res.json({ assignments: rows });
 });
 
-app.post("/api/assignments", requireClerkAuth, async (req, res) => {
-  const { userId } = getAuth(req);
+app.post("/api/assignments", requireApiKeyOrClerkAuth, async (req, res) => {
+  const userId = req._userId;
   const { transaction_id, category_id } = req.body;
   if (!transaction_id) return res.status(400).json({ error: "transaction_id required" });
   await upsertAssignment(userId, transaction_id, category_id);
