@@ -130,7 +130,7 @@ async function apiFetch(path, opts = {}) {
   const key = document.getElementById('apiKey').value.trim();
   const r = await fetch(path, {
     ...opts,
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}`, ...(opts.headers || {}) },
+    headers: { 'Content-Type': 'application/json', 'x-api-key': key, ...(opts.headers || {}) },
   });
   if (!r.ok) {
     const err = await r.json().catch(() => ({}));

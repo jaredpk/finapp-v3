@@ -89,12 +89,20 @@ function requireClerkAuth(req, res, next) {
 
 // Accepts either a Clerk JWT (from the React app) or an API key (from the widget/MCP)
 async function requireApiKeyOrClerkAuth(req, res, next) {
+  // Try x-api-key header first (avoids Clerk middleware consuming the Authorization header)
+  const directKey = req.headers["x-api-key"] || req.query.key;
+  if (directKey) {
+    const uid = await getClerkUserIdByApiKey(directKey);
+    if (uid) { req._userId = uid; return next(); }
+  }
+  // Try Clerk JWT
   const { userId } = getAuth(req);
   if (userId) { req._userId = userId; return next(); }
+  // Try Authorization: Bearer as last resort
   const authHeader = req.headers["authorization"];
-  const apiKey = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : req.headers["x-api-key"];
-  if (apiKey) {
-    const uid = await getClerkUserIdByApiKey(apiKey);
+  const bearerKey = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  if (bearerKey) {
+    const uid = await getClerkUserIdByApiKey(bearerKey);
     if (uid) { req._userId = uid; return next(); }
   }
   return res.status(401).json({ error: "Unauthorized" });
