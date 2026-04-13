@@ -117,3 +117,21 @@ export async function saveMerchantOverride(transaction_id, merchant_name) {
   });
   return r.json();
 }
+
+// ── CSV Import ────────────────────────────────────────────────────────────────
+export async function importTransactions(transactions) {
+  const r = await fetch(`${BASE}/import`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ transactions }),
+  });
+  return r.json();
+}
+
+export async function clearImportedTransactions() {
+  const r = await fetch(`${BASE}/import`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+  });
+  return r.json();
+}

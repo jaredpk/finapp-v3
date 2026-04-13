@@ -314,6 +314,25 @@ export async function deleteOAuthCode(code) {
   await pool.query("DELETE FROM oauth_codes WHERE code = $1", [code]);
 }
 
+// ── CSV Import ────────────────────────────────────────────────────────────────
+export async function upsertImportedTransaction(clerkUserId, t) {
+  await pool.query(
+    `INSERT INTO transactions
+       (clerk_user_id, transaction_id, account_id, amount, date, name, merchant_name, category, pending)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, false)
+     ON CONFLICT (transaction_id) DO UPDATE SET amount = $4, category = $8`,
+    [clerkUserId, t.transaction_id, t.account_id, t.amount, t.date, t.name, t.merchant_name, t.category || null]
+  );
+}
+
+export async function deleteImportedTransactions(clerkUserId) {
+  const { rowCount } = await pool.query(
+    "DELETE FROM transactions WHERE clerk_user_id = $1 AND transaction_id LIKE 'simplifi_%'",
+    [clerkUserId]
+  );
+  return rowCount;
+}
+
 // ── Categories ────────────────────────────────────────────────────────────────
 export async function getCategories(clerkUserId) {
   const { rows } = await pool.query(

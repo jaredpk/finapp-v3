@@ -1,13 +1,73 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useUser } from "@clerk/clerk-react";
-import { getApiKey, generateApiKey } from "../api.js";
+import { getApiKey, generateApiKey, importTransactions, clearImportedTransactions } from "../api.js";
 
-export default function Settings() {
+// ── Simplifi CSV parser ───────────────────────────────────────────────────────
+const MONTHS = { Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12 };
+
+function parseCsvLine(line) {
+  const result = [];
+  let cur = "", inQ = false;
+  for (const ch of line) {
+    if (ch === '"') { inQ = !inQ; }
+    else if (ch === ',' && !inQ) { result.push(cur); cur = ""; }
+    else { cur += ch; }
+  }
+  result.push(cur);
+  return result;
+}
+
+function parseSimplifiCsv(text) {
+  const lines = text.trim().split(/\r?\n/);
+  const headers = parseCsvLine(lines[0]).map((h) => h.trim());
+  const idx = (name) => headers.indexOf(name);
+
+  const rows = [];
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    const cols = parseCsvLine(line);
+
+    const dateStr = cols[idx("Date")]?.trim();
+    const account = cols[idx("Account")]?.trim() || "Unknown";
+    const payee   = cols[idx("Payee")]?.trim() || "Unknown";
+    const category = cols[idx("Category")]?.trim() || "";
+    const excluded = cols[idx("Exclusion")]?.trim().toLowerCase() === "yes";
+    const amountStr = cols[idx("Amount")]?.trim();
+
+    if (!dateStr || !amountStr) continue;
+
+    // Parse "11-Apr-26" → "2026-04-11"
+    const [day, mon, yr] = dateStr.split("-");
+    const month = MONTHS[mon];
+    if (!month) continue;
+    const year = 2000 + parseInt(yr, 10);
+    const date = `${year}-${String(month).padStart(2,"0")}-${String(parseInt(day,10)).padStart(2,"0")}`;
+
+    // Simplifi: negative = expense. Our DB: positive = expense. Negate.
+    const amount = -1 * parseFloat(amountStr);
+
+    const txnId = `simplifi_${i}_${date}_${payee.replace(/\W/g,"").slice(0,20)}_${Math.abs(amount).toFixed(0)}`;
+
+    rows.push({ transaction_id: txnId, account_id: account, amount, date, name: payee, merchant_name: payee, category, excluded });
+  }
+  return rows;
+}
+
+export default function Settings({ reloadData }) {
   const { user } = useUser();
   const [apiKey, setApiKey] = useState(null);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [copied, setCopied] = useState(false);
+
+  // CSV import state
+  const fileRef = useRef(null);
+  const [parsed, setParsed] = useState(null);       // parsed rows
+  const [skipExcluded, setSkipExcluded] = useState(true);
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState(null); // "Imported 47 transactions"
+  const [clearing, setClearing] = useState(false);
 
   useEffect(() => {
     getApiKey().then((data) => {
@@ -27,6 +87,46 @@ export default function Settings() {
     navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  }
+
+  function handleFileChange(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const rows = parseSimplifiCsv(ev.target.result);
+      setParsed(rows);
+      setImportResult(null);
+    };
+    reader.readAsText(file);
+  }
+
+  async function handleImport() {
+    if (!parsed) return;
+    setImporting(true);
+    try {
+      const rows = skipExcluded ? parsed.filter((r) => !r.excluded) : parsed;
+      // Strip the 'excluded' flag before sending to server
+      const toSend = rows.map(({ excluded, ...rest }) => rest);
+      const res = await importTransactions(toSend);
+      setImportResult(`Imported ${res.imported} transactions.`);
+      setParsed(null);
+      if (fileRef.current) fileRef.current.value = "";
+      if (reloadData) reloadData();
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  async function handleClear() {
+    setClearing(true);
+    try {
+      const res = await clearImportedTransactions();
+      setImportResult(`Cleared ${res.deleted} imported transactions.`);
+      if (reloadData) reloadData();
+    } finally {
+      setClearing(false);
+    }
   }
 
   const sseUrl = apiKey ? `${window.location.origin}/sse?key=${apiKey}` : null;
@@ -122,6 +222,61 @@ export default function Settings() {
           </div>
         </section>
       )}
+      {/* CSV Import */}
+      <section style={styles.card}>
+        <h2 style={styles.cardTitle}>Import from Simplifi</h2>
+        <p style={styles.description}>
+          In Simplifi, go to <strong>Transactions → Export</strong> and download the CSV. Select it below to import your real transactions while Plaid approval is pending.
+        </p>
+
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".csv"
+          style={{ display: "none" }}
+          onChange={handleFileChange}
+        />
+        <button style={styles.generateBtn} onClick={() => fileRef.current?.click()}>
+          Select CSV File
+        </button>
+
+        {parsed && (
+          <div style={styles.importPreview}>
+            <p style={styles.previewText}>
+              Found <strong>{parsed.length}</strong> transactions
+              {parsed.filter((r) => r.excluded).length > 0 && (
+                <> · <span style={{ color: "var(--muted)" }}>{parsed.filter((r) => r.excluded).length} marked as excluded (transfers/internal)</span></>
+              )}
+            </p>
+            <label style={styles.checkLabel}>
+              <input
+                type="checkbox"
+                checked={skipExcluded}
+                onChange={(e) => setSkipExcluded(e.target.checked)}
+                style={{ marginRight: 8 }}
+              />
+              Skip excluded transactions
+            </label>
+            <p style={styles.previewCount}>
+              Will import: <strong>{skipExcluded ? parsed.filter((r) => !r.excluded).length : parsed.length}</strong> transactions
+            </p>
+            <button style={styles.generateBtn} onClick={handleImport} disabled={importing}>
+              {importing ? "Importing…" : "Import Now"}
+            </button>
+          </div>
+        )}
+
+        {importResult && (
+          <p style={styles.importSuccess}>{importResult}</p>
+        )}
+
+        <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid var(--border)" }}>
+          <p style={styles.muted}>Previously imported Simplifi data can be cleared here before re-importing.</p>
+          <button style={styles.regenerateBtn} onClick={handleClear} disabled={clearing}>
+            {clearing ? "Clearing…" : "Clear Imported Data"}
+          </button>
+        </div>
+      </section>
     </div>
   );
 }
@@ -196,4 +351,9 @@ const styles = {
   },
   configText: { fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text)", margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-all" },
   inlineCode: { fontFamily: "var(--font-mono)", fontSize: 12, background: "var(--surface2)", padding: "1px 4px", borderRadius: 4 },
+  importPreview: { marginTop: 16, padding: 16, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8 },
+  previewText: { fontSize: 13, color: "var(--text)", marginBottom: 10 },
+  previewCount: { fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-mono)", margin: "8px 0 12px" },
+  checkLabel: { display: "flex", alignItems: "center", fontSize: 13, color: "var(--text)", cursor: "pointer" },
+  importSuccess: { marginTop: 12, fontSize: 13, color: "var(--green, #22c55e)", fontFamily: "var(--font-mono)" },
 };

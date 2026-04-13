@@ -23,6 +23,7 @@ import {
   getAssignments, upsertAssignment,
   getSplits, createSplit, deleteSplit, deleteSplitsForTransaction,
   getMerchantOverrides, upsertMerchantOverride,
+  upsertImportedTransaction, deleteImportedTransactions,
 } from "./db.js";
 
 dotenv.config();
@@ -347,6 +348,23 @@ app.delete("/api/splits/:id", requireClerkAuth, async (req, res) => {
   const { userId } = getAuth(req);
   const ok = await deleteSplit(userId, req.params.id);
   res.json({ ok });
+});
+
+// ── CSV Import ────────────────────────────────────────────────────────────────
+app.post("/api/import", requireClerkAuth, async (req, res) => {
+  const { userId } = getAuth(req);
+  const { transactions: rows } = req.body;
+  if (!Array.isArray(rows)) return res.status(400).json({ error: "transactions array required" });
+  for (const t of rows) {
+    await upsertImportedTransaction(userId, t);
+  }
+  res.json({ imported: rows.length });
+});
+
+app.delete("/api/import", requireClerkAuth, async (req, res) => {
+  const { userId } = getAuth(req);
+  const deleted = await deleteImportedTransactions(userId);
+  res.json({ deleted });
 });
 
 // ── Merchant overrides ────────────────────────────────────────────────────────
