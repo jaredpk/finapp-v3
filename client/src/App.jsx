@@ -4,11 +4,15 @@ import Sidebar from "./components/Sidebar.jsx";
 import Dashboard from "./views/Dashboard.jsx";
 import Accounts from "./views/Accounts.jsx";
 import Transactions from "./views/Transactions.jsx";
+import Categories from "./views/Categories.jsx";
 import Budget from "./views/Budget.jsx";
 import CashFlow from "./views/CashFlow.jsx";
 import Settings from "./views/Settings.jsx";
 import { usePlaidConnect } from "./hooks/usePlaid.js";
-import { fetchAccounts, fetchTransactions, setTokenGetter } from "./api.js";
+import {
+  fetchAccounts, fetchTransactions, setTokenGetter,
+  fetchCategories, fetchAssignments, fetchMerchantOverrides,
+} from "./api.js";
 
 export default function App() {
   return (
@@ -30,6 +34,9 @@ function AuthenticatedApp() {
   const [view, setView] = useState("dashboard");
   const [accounts, setAccounts] = useState([]);
   const [transactions, setTransactions] = useState([]);
+  const [categories, setCategories] = useState([]);
+  const [assignments, setAssignments] = useState({}); // { transaction_id: category_id }
+  const [merchantOverrides, setMerchantOverrides] = useState({}); // { transaction_id: merchant_name }
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -39,12 +46,24 @@ function AuthenticatedApp() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [acctRes, txnRes] = await Promise.all([
+      const [acctRes, txnRes, catRes, assnRes, overrideRes] = await Promise.all([
         fetchAccounts(),
         fetchTransactions(),
+        fetchCategories(),
+        fetchAssignments(),
+        fetchMerchantOverrides(),
       ]);
       setAccounts(acctRes.accounts || []);
       setTransactions(txnRes.transactions || []);
+      setCategories(catRes.categories || []);
+
+      const assnMap = {};
+      (assnRes.assignments || []).forEach((a) => { assnMap[a.transaction_id] = a.category_id; });
+      setAssignments(assnMap);
+
+      const overrideMap = {};
+      (overrideRes.overrides || []).forEach((o) => { overrideMap[o.transaction_id] = o.merchant_name; });
+      setMerchantOverrides(overrideMap);
     } catch (e) {
       console.error("Failed to load data", e);
     } finally {
@@ -58,10 +77,23 @@ function AuthenticatedApp() {
     loadData();
   }, [loadData]);
 
+  const sharedProps = {
+    accounts,
+    transactions,
+    categories,
+    assignments,
+    merchantOverrides,
+    setCategories,
+    setAssignments,
+    setMerchantOverrides,
+    reloadData: loadData,
+  };
+
   const VIEWS = {
     dashboard: Dashboard,
     accounts: Accounts,
     transactions: Transactions,
+    categories: Categories,
     budget: Budget,
     cashflow: CashFlow,
     settings: Settings,
@@ -77,14 +109,14 @@ function AuthenticatedApp() {
         connecting={connecting}
       />
       <main style={styles.main}>
-        {loading && accounts.length === 0 ? (
+        {loading && accounts.length === 0 && transactions.length === 0 ? (
           <div style={styles.loader}>
             <span className="pulse" style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 13 }}>
               Loading…
             </span>
           </div>
         ) : (
-          <ActiveView accounts={accounts} transactions={transactions} />
+          <ActiveView {...sharedProps} />
         )}
       </main>
     </div>

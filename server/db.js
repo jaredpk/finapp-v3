@@ -84,6 +84,40 @@ export async function initDb() {
       expires_at TIMESTAMP NOT NULL,
       created_at TIMESTAMP DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS categories (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      clerk_user_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      color TEXT DEFAULT '#6366f1',
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS assignments (
+      transaction_id TEXT NOT NULL,
+      clerk_user_id TEXT NOT NULL,
+      category_id UUID REFERENCES categories(id) ON DELETE SET NULL,
+      updated_at TIMESTAMP DEFAULT NOW(),
+      PRIMARY KEY (transaction_id, clerk_user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS splits (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      transaction_id TEXT NOT NULL,
+      clerk_user_id TEXT NOT NULL,
+      category_id UUID REFERENCES categories(id) ON DELETE SET NULL,
+      amount NUMERIC(12,2) NOT NULL,
+      note TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS merchant_overrides (
+      transaction_id TEXT NOT NULL,
+      clerk_user_id TEXT NOT NULL,
+      merchant_name TEXT NOT NULL,
+      updated_at TIMESTAMP DEFAULT NOW(),
+      PRIMARY KEY (transaction_id, clerk_user_id)
+    );
   `);
 }
 
@@ -278,6 +312,114 @@ export async function getOAuthCode(code) {
 
 export async function deleteOAuthCode(code) {
   await pool.query("DELETE FROM oauth_codes WHERE code = $1", [code]);
+}
+
+// ── Categories ────────────────────────────────────────────────────────────────
+export async function getCategories(clerkUserId) {
+  const { rows } = await pool.query(
+    "SELECT id, name, color, created_at FROM categories WHERE clerk_user_id = $1 ORDER BY name",
+    [clerkUserId]
+  );
+  return rows;
+}
+
+export async function createCategory(clerkUserId, name, color = "#6366f1") {
+  const { rows } = await pool.query(
+    `INSERT INTO categories (clerk_user_id, name, color) VALUES ($1, $2, $3) RETURNING *`,
+    [clerkUserId, name, color]
+  );
+  return rows[0];
+}
+
+export async function updateCategory(clerkUserId, id, name, color) {
+  const { rows } = await pool.query(
+    `UPDATE categories SET name = $3, color = $4 WHERE id = $1 AND clerk_user_id = $2 RETURNING *`,
+    [id, clerkUserId, name, color]
+  );
+  return rows[0] || null;
+}
+
+export async function deleteCategory(clerkUserId, id) {
+  const { rowCount } = await pool.query(
+    "DELETE FROM categories WHERE id = $1 AND clerk_user_id = $2",
+    [id, clerkUserId]
+  );
+  return rowCount > 0;
+}
+
+// ── Assignments ───────────────────────────────────────────────────────────────
+export async function getAssignments(clerkUserId) {
+  const { rows } = await pool.query(
+    "SELECT transaction_id, category_id FROM assignments WHERE clerk_user_id = $1",
+    [clerkUserId]
+  );
+  return rows;
+}
+
+export async function upsertAssignment(clerkUserId, transactionId, categoryId) {
+  await pool.query(
+    `INSERT INTO assignments (transaction_id, clerk_user_id, category_id, updated_at)
+     VALUES ($1, $2, $3, NOW())
+     ON CONFLICT (transaction_id, clerk_user_id) DO UPDATE SET category_id = $3, updated_at = NOW()`,
+    [transactionId, clerkUserId, categoryId || null]
+  );
+}
+
+// ── Splits ────────────────────────────────────────────────────────────────────
+export async function getSplits(clerkUserId) {
+  const { rows } = await pool.query(
+    `SELECT s.id, s.transaction_id, s.category_id, s.amount, s.note,
+            c.name AS category_name, c.color AS category_color
+     FROM splits s
+     LEFT JOIN categories c ON s.category_id = c.id
+     WHERE s.clerk_user_id = $1
+     ORDER BY s.transaction_id, s.created_at`,
+    [clerkUserId]
+  );
+  return rows;
+}
+
+export async function createSplit(clerkUserId, transactionId, categoryId, amount, note) {
+  const { rows } = await pool.query(
+    `INSERT INTO splits (transaction_id, clerk_user_id, category_id, amount, note)
+     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+    [transactionId, clerkUserId, categoryId || null, amount, note || null]
+  );
+  return rows[0];
+}
+
+export async function deleteSplit(clerkUserId, splitId) {
+  const { rowCount } = await pool.query(
+    "DELETE FROM splits WHERE id = $1 AND clerk_user_id = $2",
+    [splitId, clerkUserId]
+  );
+  return rowCount > 0;
+}
+
+export async function deleteSplitsForTransaction(clerkUserId, transactionId) {
+  const { rowCount } = await pool.query(
+    "DELETE FROM splits WHERE transaction_id = $1 AND clerk_user_id = $2",
+    [transactionId, clerkUserId]
+  );
+  return rowCount;
+}
+
+// ── Merchant Overrides ────────────────────────────────────────────────────────
+export async function getMerchantOverrides(clerkUserId) {
+  const { rows } = await pool.query(
+    "SELECT transaction_id, merchant_name FROM merchant_overrides WHERE clerk_user_id = $1",
+    [clerkUserId]
+  );
+  return rows;
+}
+
+export async function upsertMerchantOverride(clerkUserId, transactionId, merchantName) {
+  await pool.query(
+    `INSERT INTO merchant_overrides (transaction_id, clerk_user_id, merchant_name, updated_at)
+     VALUES ($1, $2, $3, NOW())
+     ON CONFLICT (transaction_id, clerk_user_id) DO UPDATE SET merchant_name = $3, updated_at = NOW()`,
+    [transactionId, clerkUserId, merchantName]
+  );
 }
 
 export default pool;

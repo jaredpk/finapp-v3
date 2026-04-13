@@ -9,7 +9,7 @@ const fmt = (n) =>
 
 const COLORS = ["var(--accent)", "var(--accent2)", "var(--blue)", "var(--green)"];
 
-export default function Dashboard({ accounts, transactions }) {
+export default function Dashboard({ accounts, transactions, categories, assignments }) {
   const netWorth = useMemo(() => {
     if (!accounts.length) return null;
     return accounts.reduce((sum, a) => {
@@ -50,21 +50,31 @@ export default function Dashboard({ accounts, transactions }) {
     }));
   }, [transactions]);
 
-  // Top spending categories
-  const categories = useMemo(() => {
+  // Build category id → name lookup
+  const categoryMap = useMemo(() => {
+    const m = {};
+    (categories || []).forEach((c) => { m[c.id] = c.name; });
+    return m;
+  }, [categories]);
+
+  // Top spending categories — prefer user-assigned, fall back to Plaid
+  const spendByCategory = useMemo(() => {
     const map = {};
     transactions
       .filter((t) => t.amount > 0)
       .forEach((t) => {
-        const cat = t.personal_finance_category?.primary || t.category?.[0] || "Other";
-        map[cat] = (map[cat] || 0) + t.amount;
+        const assignedId = assignments?.[t.transaction_id];
+        const label = (assignedId && categoryMap[assignedId])
+          ? categoryMap[assignedId]
+          : (t.category || "Other").replace(/_/g, " ");
+        map[label] = (map[label] || 0) + t.amount;
       });
     return Object.entries(map)
       .sort((a, b) => b[1] - a[1])
       .slice(0, 5);
-  }, [transactions]);
+  }, [transactions, assignments, categoryMap]);
 
-  const totalCat = categories.reduce((s, [, v]) => s + v, 0);
+  const totalCat = spendByCategory.reduce((s, [, v]) => s + v, 0);
 
   return (
     <div style={styles.wrap}>
@@ -109,12 +119,12 @@ export default function Dashboard({ accounts, transactions }) {
       {/* Categories */}
       <div className="fade-up-3" style={styles.catCard}>
         <p style={styles.chartTitle}>Top Spending Categories</p>
-        {categories.length === 0 ? <Empty /> : (
+        {spendByCategory.length === 0 ? <Empty /> : (
           <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 8 }}>
-            {categories.map(([cat, amt], i) => (
+            {spendByCategory.map(([cat, amt], i) => (
               <div key={cat}>
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
-                  <span style={{ fontSize: 12, fontFamily: "var(--font-mono)", color: "var(--text)" }}>{cat.replace(/_/g, " ")}</span>
+                  <span style={{ fontSize: 12, fontFamily: "var(--font-mono)", color: "var(--text)" }}>{cat}</span>
                   <span style={{ fontSize: 12, fontFamily: "var(--font-mono)", color: "var(--muted)" }}>{fmt(amt)}</span>
                 </div>
                 <div style={{ height: 4, background: "var(--border)", borderRadius: 99, overflow: "hidden" }}>

@@ -55,3 +55,65 @@ export async function generateApiKey() {
   });
   return r.json();
 }
+
+// ── Categories ────────────────────────────────────────────────────────────────
+export async function fetchCategories() {
+  const r = await fetch(`${BASE}/categories`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function createCategoryApi(name, color) {
+  const r = await fetch(`${BASE}/categories`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ name, color }),
+  });
+  return r.json();
+}
+
+export async function updateCategoryApi(id, name, color) {
+  const r = await fetch(`${BASE}/categories/${id}`, {
+    method: "PUT",
+    headers: await authHeaders(),
+    body: JSON.stringify({ name, color }),
+  });
+  return r.json();
+}
+
+export async function deleteCategoryApi(id) {
+  const r = await fetch(`${BASE}/categories/${id}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+  });
+  return r.json();
+}
+
+// ── Assignments ───────────────────────────────────────────────────────────────
+export async function fetchAssignments() {
+  const r = await fetch(`${BASE}/assignments`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function saveAssignment(transaction_id, category_id) {
+  const r = await fetch(`${BASE}/assignments`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ transaction_id, category_id }),
+  });
+  return r.json();
+}
+
+// ── Merchant overrides ────────────────────────────────────────────────────────
+export async function fetchMerchantOverrides() {
+  const r = await fetch(`${BASE}/merchant-overrides`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function saveMerchantOverride(transaction_id, merchant_name) {
+  const r = await fetch(`${BASE}/merchant-overrides`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ transaction_id, merchant_name }),
+  });
+  return r.json();
+}

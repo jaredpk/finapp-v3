@@ -19,6 +19,10 @@ import {
   getTransactions, getSpendingByCategory,
   saveOAuthState, getOAuthState, deleteOAuthState,
   saveOAuthCode, getOAuthCode, deleteOAuthCode,
+  getCategories, createCategory, updateCategory, deleteCategory,
+  getAssignments, upsertAssignment,
+  getSplits, createSplit, deleteSplit, deleteSplitsForTransaction,
+  getMerchantOverrides, upsertMerchantOverride,
 } from "./db.js";
 
 dotenv.config();
@@ -280,6 +284,86 @@ app.post("/api/sync", requireClerkAuth, async (req, res) => {
 // ── Health ────────────────────────────────────────────────────────────────────
 app.get("/api/health", (_, res) => res.json({ ok: true }));
 
+// ── Categories ────────────────────────────────────────────────────────────────
+app.get("/api/categories", requireClerkAuth, async (req, res) => {
+  const { userId } = getAuth(req);
+  const cats = await getCategories(userId);
+  res.json({ categories: cats });
+});
+
+app.post("/api/categories", requireClerkAuth, async (req, res) => {
+  const { userId } = getAuth(req);
+  const { name, color } = req.body;
+  if (!name) return res.status(400).json({ error: "name required" });
+  const cat = await createCategory(userId, name, color);
+  res.json({ category: cat });
+});
+
+app.put("/api/categories/:id", requireClerkAuth, async (req, res) => {
+  const { userId } = getAuth(req);
+  const { name, color } = req.body;
+  const cat = await updateCategory(userId, req.params.id, name, color);
+  if (!cat) return res.status(404).json({ error: "not found" });
+  res.json({ category: cat });
+});
+
+app.delete("/api/categories/:id", requireClerkAuth, async (req, res) => {
+  const { userId } = getAuth(req);
+  const ok = await deleteCategory(userId, req.params.id);
+  res.json({ ok });
+});
+
+// ── Assignments ───────────────────────────────────────────────────────────────
+app.get("/api/assignments", requireClerkAuth, async (req, res) => {
+  const { userId } = getAuth(req);
+  const rows = await getAssignments(userId);
+  res.json({ assignments: rows });
+});
+
+app.post("/api/assignments", requireClerkAuth, async (req, res) => {
+  const { userId } = getAuth(req);
+  const { transaction_id, category_id } = req.body;
+  if (!transaction_id) return res.status(400).json({ error: "transaction_id required" });
+  await upsertAssignment(userId, transaction_id, category_id);
+  res.json({ ok: true });
+});
+
+// ── Splits ────────────────────────────────────────────────────────────────────
+app.get("/api/splits", requireClerkAuth, async (req, res) => {
+  const { userId } = getAuth(req);
+  const rows = await getSplits(userId);
+  res.json({ splits: rows });
+});
+
+app.post("/api/splits", requireClerkAuth, async (req, res) => {
+  const { userId } = getAuth(req);
+  const { transaction_id, category_id, amount, note } = req.body;
+  if (!transaction_id || amount == null) return res.status(400).json({ error: "transaction_id and amount required" });
+  const split = await createSplit(userId, transaction_id, category_id, amount, note);
+  res.json({ split });
+});
+
+app.delete("/api/splits/:id", requireClerkAuth, async (req, res) => {
+  const { userId } = getAuth(req);
+  const ok = await deleteSplit(userId, req.params.id);
+  res.json({ ok });
+});
+
+// ── Merchant overrides ────────────────────────────────────────────────────────
+app.get("/api/merchant-overrides", requireClerkAuth, async (req, res) => {
+  const { userId } = getAuth(req);
+  const rows = await getMerchantOverrides(userId);
+  res.json({ overrides: rows });
+});
+
+app.post("/api/merchant-overrides", requireClerkAuth, async (req, res) => {
+  const { userId } = getAuth(req);
+  const { transaction_id, merchant_name } = req.body;
+  if (!transaction_id || !merchant_name) return res.status(400).json({ error: "transaction_id and merchant_name required" });
+  await upsertMerchantOverride(userId, transaction_id, merchant_name);
+  res.json({ ok: true });
+});
+
 // ── Public config (safe to expose) ───────────────────────────────────────────
 app.get("/api/config", (_, res) => res.json({
   clerkPublishableKey: process.env.CLERK_PUBLISHABLE_KEY || "",
@@ -507,6 +591,51 @@ function buildMcpServer(clerkUserId) {
     if (!clerkUserId) return noAuth;
     const summary = await getSpendingByCategory(clerkUserId, { startDate: start_date, endDate: end_date });
     return { content: [{ type: "text", text: JSON.stringify(summary, null, 2) }] };
+  });
+
+  server.tool("categorize_transactions", "Assign a user category to one or more transactions", {
+    assignments: z.array(z.object({
+      transaction_id: z.string(),
+      category_id: z.string().describe("UUID of the category from list_categories"),
+    })).describe("Array of transaction → category pairs to assign"),
+  }, async ({ assignments }) => {
+    if (!clerkUserId) return noAuth;
+    for (const { transaction_id, category_id } of assignments) {
+      await upsertAssignment(clerkUserId, transaction_id, category_id);
+    }
+    return { content: [{ type: "text", text: `Assigned categories to ${assignments.length} transaction(s).` }] };
+  });
+
+  server.tool("list_categories", "List all user-defined categories", {}, async () => {
+    if (!clerkUserId) return noAuth;
+    const cats = await getCategories(clerkUserId);
+    if (!cats.length) return { content: [{ type: "text", text: "No categories defined yet. Create some in the app under the Categories view." }] };
+    return { content: [{ type: "text", text: JSON.stringify(cats, null, 2) }] };
+  });
+
+  server.tool("update_merchant_override", "Fix the display name for a transaction's merchant", {
+    transaction_id: z.string(),
+    merchant_name: z.string().describe("The corrected merchant name to display"),
+  }, async ({ transaction_id, merchant_name }) => {
+    if (!clerkUserId) return noAuth;
+    await upsertMerchantOverride(clerkUserId, transaction_id, merchant_name);
+    return { content: [{ type: "text", text: `Merchant name updated to "${merchant_name}" for transaction ${transaction_id}.` }] };
+  });
+
+  server.tool("split_transaction", "Split a transaction across multiple categories", {
+    transaction_id: z.string(),
+    splits: z.array(z.object({
+      category_id: z.string().optional().describe("UUID of the category (from list_categories)"),
+      amount: z.number().describe("Dollar amount for this split"),
+      note: z.string().optional().describe("Optional note for this split"),
+    })).describe("Split amounts — should sum to the transaction total"),
+  }, async ({ transaction_id, splits: splitRows }) => {
+    if (!clerkUserId) return noAuth;
+    await deleteSplitsForTransaction(clerkUserId, transaction_id);
+    for (const { category_id, amount, note } of splitRows) {
+      await createSplit(clerkUserId, transaction_id, category_id, amount, note);
+    }
+    return { content: [{ type: "text", text: `Created ${splitRows.length} splits for transaction ${transaction_id}.` }] };
   });
 
   return server;

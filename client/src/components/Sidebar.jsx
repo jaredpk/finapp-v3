@@ -5,6 +5,7 @@ const NAV = [
   { id: "dashboard",    label: "Dashboard",     icon: "◈" },
   { id: "accounts",     label: "Accounts",      icon: "▣" },
   { id: "transactions", label: "Transactions",  icon: "≡" },
+  { id: "categories",   label: "Categories",    icon: "◑" },
   { id: "budget",       label: "Budget",        icon: "◎" },
   { id: "cashflow",     label: "Cash Flow",     icon: "⇌" },
   { id: "settings",     label: "Settings",      icon: "⚙" },
