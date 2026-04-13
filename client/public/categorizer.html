@@ -91,7 +91,7 @@
     <input id="search" type="text" placeholder="Search merchant…" oninput="render()">
     <select id="fCat" onchange="render()"><option value="">All categories</option></select>
     <select id="fAcct" onchange="render()"><option value="">All accounts</option></select>
-    <button id="saveBtn" onclick="doSave()" disabled>Save (0)</button>
+    <button id="saveBtn" onclick="doSave()" disabled style="display:none">Save (0)</button>
   </div>
 
   <div class="table-wrap">
@@ -185,6 +185,7 @@ async function connect() {
 
     populateFilters();
     document.getElementById('hint').style.display = 'none';
+    localStorage.setItem('finapp_api_key', key);
     setStatus(`✓ ${txns.length} transactions · ${cats.length} categories`, 'ok');
     render();
   } catch (e) {
@@ -231,12 +232,33 @@ function getRows() {
     : sDir * (a.amount - b.amount));
 }
 
-function onCat(txnId, val) {
+async function onCat(txnId, val) {
   selState[txnId] = val;
   const row = document.querySelector(`tr[data-id="${CSS.escape(txnId)}"]`);
-  if (row) row.className = val !== origState[txnId] ? 'changed' : '';
   const sel = document.querySelector(`select[data-id="${CSS.escape(txnId)}"]`);
-  if (sel) sel.className = 'cat-sel' + (val !== origState[txnId] ? ' changed' : '');
+  if (sel) sel.disabled = true;
+
+  try {
+    const nameToId = {};
+    cats.forEach(c => { nameToId[c.name] = c.id; });
+    const categoryId = val ? (nameToId[val] || null) : null;
+    await apiFetch('/api/assignments', {
+      method: 'POST',
+      body: JSON.stringify({ transaction_id: txnId, category_id: categoryId }),
+    });
+    origState[txnId] = val;
+    if (row) row.className = '';
+    if (sel) sel.className = 'cat-sel';
+    setStatus(`✓ Saved`, 'ok');
+    setTimeout(() => setStatus(`✓ ${txns.length} transactions · ${cats.length} categories`, 'ok'), 1500);
+  } catch (e) {
+    // Revert on failure
+    selState[txnId] = origState[txnId];
+    if (sel) { sel.value = origState[txnId]; sel.className = 'cat-sel'; }
+    setStatus(`Save failed: ${e.message}`, 'err');
+  } finally {
+    if (sel) sel.disabled = false;
+  }
   updateBtn(); updateStats();
 }
 
@@ -337,6 +359,13 @@ function render() {
   });
 
   updateBtn(); updateStats();
+}
+
+// Persist API key in localStorage
+const savedKey = localStorage.getItem('finapp_api_key');
+if (savedKey) {
+  document.getElementById('apiKey').value = savedKey;
+  connect();
 }
 
 document.getElementById('apiKey').addEventListener('keydown', e => { if (e.key === 'Enter') connect(); });
