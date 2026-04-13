@@ -1,5 +1,41 @@
 import React, { useState } from "react";
-import { createCategoryApi, updateCategoryApi, deleteCategoryApi } from "../api.js";
+import { createCategoryApi, updateCategoryApi, deleteCategoryApi, seedCategoriesApi } from "../api.js";
+
+const PRESET_CATEGORIES = [
+  { name: "Auto - Gas & Fuel",       color: "#3b82f6" },
+  { name: "Auto - Other",            color: "#3b82f6" },
+  { name: "Auto - Payment",          color: "#3b82f6" },
+  { name: "Auto - Service & Parts",  color: "#3b82f6" },
+  { name: "Auto - Car Insurance",    color: "#3b82f6" },
+  { name: "Charity & Donations",     color: "#a855f7" },
+  { name: "Child Support",           color: "#ec4899" },
+  { name: "Condo Rent",              color: "#14b8a6" },
+  { name: "Credit Card Payment",     color: "#64748b" },
+  { name: "Education",               color: "#6366f1" },
+  { name: "Fees & Charges",          color: "#ef4444" },
+  { name: "Gifts",                   color: "#ec4899" },
+  { name: "Groceries",               color: "#22c55e" },
+  { name: "Health",                  color: "#22c55e" },
+  { name: "Home - Mortgage",         color: "#14b8a6" },
+  { name: "Home - Improvement",      color: "#14b8a6" },
+  { name: "Household Items",         color: "#f59e0b" },
+  { name: "Insurance",               color: "#f97316" },
+  { name: "Insurance - Home",        color: "#f97316" },
+  { name: "Insurance - Life",        color: "#f97316" },
+  { name: "Jared Savings",           color: "#6366f1" },
+  { name: "Kids",                    color: "#ec4899" },
+  { name: "Kids - Healthcare",       color: "#22c55e" },
+  { name: "Personal - Alta",         color: "#6366f1" },
+  { name: "Personal - Jared",        color: "#6366f1" },
+  { name: "Personal Income",         color: "#22c55e" },
+  { name: "Pets",                    color: "#f59e0b" },
+  { name: "Rec and Vacation",        color: "#f59e0b" },
+  { name: "Reimbursement",           color: "#22c55e" },
+  { name: "Taxes",                   color: "#ef4444" },
+  { name: "Transfer",                color: "#64748b" },
+  { name: "Utilities",               color: "#f97316" },
+  { name: "Utilities - Phone",       color: "#f97316" },
+];
 
 const PRESET_COLORS = [
   "#6366f1", "#22c55e", "#ef4444", "#f59e0b",
@@ -13,6 +49,8 @@ export default function Categories({ categories, setCategories }) {
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState(null); // { id, name, color }
   const [saving, setSaving] = useState(false);
+  const [seeding, setSeeding] = useState(false);
+  const [seedMsg, setSeedMsg] = useState("");
 
   async function handleCreate() {
     if (!newName.trim()) return;
@@ -45,6 +83,18 @@ export default function Categories({ categories, setCategories }) {
     }
   }
 
+  async function handleSeed() {
+    setSeeding(true);
+    setSeedMsg("");
+    try {
+      const res = await seedCategoriesApi(PRESET_CATEGORIES);
+      setCategories(res.categories || []);
+      setSeedMsg(res.created > 0 ? `Added ${res.created} categories.` : "All preset categories already exist.");
+    } finally {
+      setSeeding(false);
+    }
+  }
+
   async function handleDelete(id) {
     await deleteCategoryApi(id);
     setCategories((prev) => prev.filter((c) => c.id !== id));
@@ -53,6 +103,20 @@ export default function Categories({ categories, setCategories }) {
   return (
     <div style={styles.wrap}>
       <h1 className="fade-up" style={styles.heading}>Categories</h1>
+
+      {/* Preset seed */}
+      <div className="fade-up" style={styles.seedRow}>
+        <div>
+          <p style={styles.seedLabel}>Load your preset categories</p>
+          <p style={styles.seedHint}>Adds all 33 categories at once. Skips any that already exist.</p>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+          <button style={styles.seedBtn} onClick={handleSeed} disabled={seeding}>
+            {seeding ? "Loading…" : "Load Presets"}
+          </button>
+          {seedMsg && <p style={styles.seedMsg}>{seedMsg}</p>}
+        </div>
+      </div>
 
       {/* Create form */}
       <div className="fade-up" style={styles.card}>
@@ -204,4 +268,17 @@ const styles = {
     padding: "6px 10px", background: "none", border: "none",
     color: "var(--muted)", fontSize: 12, fontFamily: "var(--font-mono)", cursor: "pointer",
   },
+  seedRow: {
+    display: "flex", justifyContent: "space-between", alignItems: "center",
+    background: "var(--surface)", border: "1px solid var(--border)",
+    borderRadius: "var(--radius2)", padding: "18px 24px", marginBottom: 16,
+  },
+  seedLabel: { fontSize: 14, fontWeight: 600, color: "var(--text)", marginBottom: 4 },
+  seedHint: { fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-mono)" },
+  seedBtn: {
+    padding: "9px 20px", background: "var(--accent)", color: "#0c0d0f",
+    border: "none", borderRadius: "var(--radius)", fontFamily: "var(--font-display)",
+    fontWeight: 700, fontSize: 13, cursor: "pointer", whiteSpace: "nowrap",
+  },
+  seedMsg: { fontSize: 12, color: "var(--green, #22c55e)", fontFamily: "var(--font-mono)" },
 };

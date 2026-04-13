@@ -19,6 +19,7 @@ import {
   getTransactions, getSpendingByCategory,
   saveOAuthState, getOAuthState, deleteOAuthState,
   saveOAuthCode, getOAuthCode, deleteOAuthCode,
+  seedCategories,
   getCategories, createCategory, updateCategory, deleteCategory,
   getAssignments, upsertAssignment,
   getSplits, createSplit, deleteSplit, deleteSplitsForTransaction,
@@ -286,6 +287,15 @@ app.post("/api/sync", requireClerkAuth, async (req, res) => {
 app.get("/api/health", (_, res) => res.json({ ok: true }));
 
 // ── Categories ────────────────────────────────────────────────────────────────
+app.post("/api/categories/seed", requireClerkAuth, async (req, res) => {
+  const { userId } = getAuth(req);
+  const { categories } = req.body;
+  if (!Array.isArray(categories)) return res.status(400).json({ error: "categories array required" });
+  const created = await seedCategories(userId, categories);
+  const all = await getCategories(userId);
+  res.json({ created, categories: all });
+});
+
 app.get("/api/categories", requireClerkAuth, async (req, res) => {
   const { userId } = getAuth(req);
   const cats = await getCategories(userId);

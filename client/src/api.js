@@ -88,6 +88,15 @@ export async function deleteCategoryApi(id) {
   return r.json();
 }
 
+export async function seedCategoriesApi(categories) {
+  const r = await fetch(`${BASE}/categories/seed`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ categories }),
+  });
+  return r.json();
+}
+
 // ── Assignments ───────────────────────────────────────────────────────────────
 export async function fetchAssignments() {
   const r = await fetch(`${BASE}/assignments`, { headers: await authHeaders() });

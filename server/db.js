@@ -334,6 +334,25 @@ export async function deleteImportedTransactions(clerkUserId) {
 }
 
 // ── Categories ────────────────────────────────────────────────────────────────
+export async function seedCategories(clerkUserId, categories) {
+  const { rows: existing } = await pool.query(
+    "SELECT LOWER(name) AS name FROM categories WHERE clerk_user_id = $1",
+    [clerkUserId]
+  );
+  const existingNames = new Set(existing.map((r) => r.name));
+  let created = 0;
+  for (const { name, color } of categories) {
+    if (!existingNames.has(name.toLowerCase())) {
+      await pool.query(
+        "INSERT INTO categories (clerk_user_id, name, color) VALUES ($1, $2, $3)",
+        [clerkUserId, name, color]
+      );
+      created++;
+    }
+  }
+  return created;
+}
+
 export async function getCategories(clerkUserId) {
   const { rows } = await pool.query(
     "SELECT id, name, color, created_at FROM categories WHERE clerk_user_id = $1 ORDER BY name",
