@@ -156,7 +156,7 @@ async function connect() {
       apiFetch('/api/assignments'),
     ]);
 
-    txns = txnRes.transactions || [];
+    txns = (txnRes.transactions || []).map(t => ({ ...t, amount: parseFloat(t.amount) }));
     cats = catRes.categories || [];
 
     // assignment map: transaction_id → category_id
