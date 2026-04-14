@@ -229,7 +229,7 @@ const styles = {
   },
   colorPreview: { width: 28, height: 28, borderRadius: 6, flexShrink: 0, border: "1px solid var(--border)" },
   addBtn: {
-    padding: "9px 20px", background: "var(--accent)", color: "#0c0d0f",
+    padding: "9px 20px", background: "var(--accent)", color: "#fff",
     border: "none", borderRadius: "var(--radius)", fontFamily: "var(--font-display)",
     fontWeight: 700, fontSize: 13, cursor: "pointer", flexShrink: 0,
   },
@@ -260,7 +260,7 @@ const styles = {
   },
   miniColors: { display: "flex", gap: 4, flexWrap: "wrap" },
   saveCatBtn: {
-    padding: "6px 14px", background: "var(--accent)", color: "#0c0d0f",
+    padding: "6px 14px", background: "var(--accent)", color: "#fff",
     border: "none", borderRadius: "var(--radius)", fontFamily: "var(--font-display)",
     fontWeight: 700, fontSize: 12, cursor: "pointer",
   },
@@ -276,7 +276,7 @@ const styles = {
   seedLabel: { fontSize: 14, fontWeight: 600, color: "var(--text)", marginBottom: 4 },
   seedHint: { fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-mono)" },
   seedBtn: {
-    padding: "9px 20px", background: "var(--accent)", color: "#0c0d0f",
+    padding: "9px 20px", background: "var(--accent)", color: "#fff",
     border: "none", borderRadius: "var(--radius)", fontFamily: "var(--font-display)",
     fontWeight: 700, fontSize: 13, cursor: "pointer", whiteSpace: "nowrap",
   },

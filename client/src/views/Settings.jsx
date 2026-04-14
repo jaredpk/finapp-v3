@@ -310,7 +310,7 @@ const styles = {
   keyText: { flex: 1, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text)", wordBreak: "break-all" },
   generateBtn: {
     background: "var(--accent)",
-    color: "#0c0d0f",
+    color: "#fff",
     border: "none",
     borderRadius: 8,
     padding: "10px 20px",

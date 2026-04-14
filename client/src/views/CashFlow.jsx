@@ -207,7 +207,7 @@ function AccountTable({ account, onTogglePending, onEditAmount, onAddRow, onDele
             <span style={{ width: 50, textAlign: "center" }}>
               <button
                 onClick={() => onTogglePending(account.id, t.id)}
-                style={{ ...styles.pendingBtn, background: t.pending ? "var(--accent)" : "var(--border2)", color: t.pending ? "#0c0d0f" : "var(--muted)" }}
+                style={{ ...styles.pendingBtn, background: t.pending ? "var(--accent)" : "var(--border2)", color: t.pending ? "#fff" : "var(--muted)" }}
               >
                 {t.pending ? "Y" : "N"}
               </button>
@@ -493,5 +493,5 @@ const styles = {
   fieldSelect: { width: "100%", padding: "8px 12px", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius)", color: "var(--text)", fontSize: 13, fontFamily: "var(--font-mono)", outline: "none", marginTop: 4 },
   modalActions: { display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 6 },
   cancelBtn: { padding: "8px 18px", background: "none", border: "1px solid var(--border)", borderRadius: "var(--radius)", color: "var(--muted)", fontSize: 13, fontFamily: "var(--font-display)", cursor: "pointer" },
-  saveBtn: { padding: "8px 18px", background: "var(--accent)", border: "none", borderRadius: "var(--radius)", color: "#0c0d0f", fontSize: 13, fontWeight: 700, fontFamily: "var(--font-display)", cursor: "pointer" },
+  saveBtn: { padding: "8px 18px", background: "var(--accent)", border: "none", borderRadius: "var(--radius)", color: "#fff", fontSize: 13, fontWeight: 700, fontFamily: "var(--font-display)", cursor: "pointer" },
 };

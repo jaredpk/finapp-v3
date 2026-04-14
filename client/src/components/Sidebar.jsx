@@ -117,7 +117,7 @@ const styles = {
     width: "100%",
     padding: "11px 0",
     background: "var(--accent)",
-    color: "#0c0d0f",
+    color: "#fff",
     border: "none",
     borderRadius: "var(--radius)",
     fontFamily: "var(--font-display)",

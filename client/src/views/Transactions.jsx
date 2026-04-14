@@ -276,7 +276,7 @@ const styles = {
   },
   hint: { fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", marginTop: 6 },
   saveBtn: {
-    width: "100%", padding: "12px", background: "var(--accent)", color: "#0c0d0f",
+    width: "100%", padding: "12px", background: "var(--accent)", color: "#fff",
     border: "none", borderRadius: "var(--radius)", fontFamily: "var(--font-display)",
     fontWeight: 700, fontSize: 13, cursor: "pointer", marginTop: "auto",
   },
