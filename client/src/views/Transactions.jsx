@@ -250,14 +250,14 @@ const styles = {
 
   tableWrap: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", overflow: "hidden" },
   tableHeader: {
-    display: "grid", gridTemplateColumns: "80px 1fr 160px 100px 220px",
+    display: "grid", gridTemplateColumns: "76px minmax(0,1fr) minmax(0,150px) 96px minmax(0,210px)",
     padding: "10px 16px", background: "var(--surface2)",
     fontSize: 10, fontWeight: 600, letterSpacing: "0.1em",
     textTransform: "uppercase", color: "var(--muted)", fontFamily: "var(--font-mono)",
     borderBottom: "1px solid var(--border)",
   },
   row: {
-    display: "grid", gridTemplateColumns: "80px 1fr 160px 100px 220px",
+    display: "grid", gridTemplateColumns: "76px minmax(0,1fr) minmax(0,150px) 96px minmax(0,210px)",
     padding: "9px 16px", borderBottom: "1px solid var(--border)",
     alignItems: "center",
   },
