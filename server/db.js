@@ -3,7 +3,8 @@ import { randomBytes } from "crypto";
 
 const { Pool } = pg;
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+const connectionString = process.env.DATABASE_URL?.replace(/([?&])sslmode=[^&]*/g, '$1').replace(/[?&]$/, '');
+const pool = new Pool({ connectionString, ssl: { rejectUnauthorized: false } });
 
 export async function initDb() {
   // Migrate old integer-based schema if present
