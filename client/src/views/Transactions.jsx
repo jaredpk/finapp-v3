@@ -1,11 +1,25 @@
 import React, { useState, useMemo } from "react";
 import { saveAssignment, saveMerchantOverride } from "../api.js";
 
-const fmt = (n) =>
-  n == null ? "—" : (n < 0 ? "+" : "-") + "$" + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2 });
+const toNum = (n) => n == null ? null : parseFloat(n);
 
-const fmtRound = (n) =>
-  "$" + Math.round(Math.abs(n)).toLocaleString("en-US");
+const fmt = (n) => {
+  const v = toNum(n);
+  if (v == null || isNaN(v)) return "—";
+  return (v < 0 ? "+" : "-") + "$" + Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: 2 });
+};
+
+const fmtRound = (n) => {
+  const v = toNum(n);
+  if (v == null || isNaN(v)) return "—";
+  return "$" + Math.round(Math.abs(v)).toLocaleString("en-US");
+};
+
+const fmtDate = (d) => {
+  if (!d) return "—";
+  const s = typeof d === "string" ? d : d.toISOString();
+  return s.slice(5, 10).replace("-", "/");
+};
 
 export default function Transactions({
   accounts,
@@ -48,7 +62,7 @@ export default function Transactions({
 
   // Stats
   const stats = useMemo(() => {
-    const spend = transactions.filter((t) => t.amount > 0).reduce((s, t) => s + t.amount, 0);
+    const spend = transactions.filter((t) => toNum(t.amount) > 0).reduce((s, t) => s + toNum(t.amount), 0);
     const needsReview = transactions.filter((t) => !assignments?.[t.transaction_id]).length;
     return { total: transactions.length, spend, needsReview };
   }, [transactions, assignments]);
@@ -163,7 +177,7 @@ export default function Transactions({
                   background: unassigned ? "rgba(185,28,28,0.04)" : "transparent",
                 }}
               >
-                <span style={styles.date}>{t.date?.slice(5).replace("-", "/")}</span>
+                <span style={styles.date}>{fmtDate(t.date)}</span>
 
                 <span style={styles.merchantCell}>
                   {editingMerchant === t.transaction_id ? (
@@ -261,7 +275,7 @@ const styles = {
     padding: "9px 16px", borderBottom: "1px solid var(--border)",
     alignItems: "center",
   },
-  date:         { fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-mono)" },
+  date:         { fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-mono)", overflow: "hidden", whiteSpace: "nowrap" },
   merchantCell: { fontSize: 13, color: "var(--text)", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", paddingRight: 12 },
   merchantInput: {
     width: "100%", padding: "3px 7px",

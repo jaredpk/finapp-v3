@@ -110,6 +110,35 @@ export async function initDb() {
     `);
   }
 
+  // Deduplicate categories (keep oldest per name, remap assignments)
+  await pool.query(`
+    DO $$ BEGIN
+      IF EXISTS (
+        SELECT 1 FROM (
+          SELECT LOWER(name), COUNT(*) FROM categories GROUP BY LOWER(name) HAVING COUNT(*) > 1
+        ) dupes
+      ) THEN
+        -- Remap assignments from duplicate category IDs to the oldest one
+        UPDATE assignments a
+        SET category_id = keeper.id
+        FROM (
+          SELECT DISTINCT ON (LOWER(name)) id, LOWER(name) AS name_lower
+          FROM categories ORDER BY LOWER(name), created_at ASC
+        ) keeper
+        JOIN categories dupe ON LOWER(dupe.name) = keeper.name_lower AND dupe.id != keeper.id
+        WHERE a.category_id = dupe.id;
+
+        -- Delete duplicate categories (keep oldest)
+        DELETE FROM categories WHERE id IN (
+          SELECT id FROM (
+            SELECT id, ROW_NUMBER() OVER (PARTITION BY LOWER(name) ORDER BY created_at ASC) AS rn
+            FROM categories
+          ) ranked WHERE rn > 1
+        );
+      END IF;
+    END $$;
+  `);
+
   // Migrate assignments: drop clerk_user_id and fix primary key if needed
   await pool.query(`
     DO $$ BEGIN
