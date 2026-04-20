@@ -189,6 +189,11 @@ export async function initDb() {
     `);
   }
 
+  // Add updated_at to assignments if missing (created before this column existed)
+  await pool.query(`
+    ALTER TABLE assignments ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
+  `);
+
   // Trigger to silently block duplicate transaction inserts from any source
   await pool.query(`
     CREATE OR REPLACE FUNCTION prevent_duplicate_transactions()
@@ -621,8 +626,8 @@ export async function deduplicateTransactions() {
   for (const dupe of dupes) {
     for (const removeId of dupe.remove) {
       await pool.query(`
-        INSERT INTO assignments (transaction_id, category_id, updated_at)
-        SELECT $2, category_id, NOW() FROM assignments WHERE transaction_id = $1
+        INSERT INTO assignments (transaction_id, category_id)
+        SELECT $2, category_id FROM assignments WHERE transaction_id = $1
         ON CONFLICT (transaction_id) DO NOTHING
       `, [removeId, dupe.keep]);
       await pool.query(`
