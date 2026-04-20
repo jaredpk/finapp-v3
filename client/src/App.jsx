@@ -56,16 +56,19 @@ export default function App({ supabase }) {
 
 function LoginScreen({ supabase }) {
   const [loading, setLoading] = useState(false);
+  const [sent, setSent] = useState(false);
   const [error, setError] = useState(null);
 
-  async function handleGoogleLogin() {
+  async function handleMagicLink(e) {
+    e.preventDefault();
     setLoading(true);
     setError(null);
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider: "google",
-      options: { redirectTo: window.location.origin },
+    const { error } = await supabase.auth.signInWithOtp({
+      email: "jaredpk@gmail.com",
+      options: { emailRedirectTo: window.location.origin },
     });
     if (error) { setError(error.message); setLoading(false); }
+    else { setSent(true); setLoading(false); }
   }
 
   return (
@@ -75,9 +78,13 @@ function LoginScreen({ supabase }) {
           fin<span style={{ color: "var(--accent)" }}>app</span>
         </div>
         <p style={loginStyles.subtitle}>Personal Finance Dashboard</p>
-        <button onClick={handleGoogleLogin} disabled={loading} style={loginStyles.googleBtn}>
-          {loading ? "Redirecting…" : "Sign in with Google"}
-        </button>
+        {sent ? (
+          <p style={loginStyles.sent}>Check your email for a magic link.</p>
+        ) : (
+          <button onClick={handleMagicLink} disabled={loading} style={loginStyles.googleBtn}>
+            {loading ? "Sending…" : "Send Magic Link"}
+          </button>
+        )}
         {error && <p style={loginStyles.error}>{error}</p>}
       </div>
     </div>

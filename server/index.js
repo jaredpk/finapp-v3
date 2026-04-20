@@ -457,7 +457,7 @@ app.get("/oauth/authorize", async (req, res) => {
 <body>
   <div class="wordmark">fin<span>app</span></div>
   <p class="subtitle">Sign in to connect with Claude</p>
-  <button id="btn" class="btn">Sign in with Google</button>
+  <button id="btn" class="btn">Send Magic Link</button>
   <p id="status" class="status"></p>
 
   <script type="module">
@@ -488,18 +488,22 @@ app.get("/oauth/authorize", async (req, res) => {
       }
     }
 
-    // Check if returning from OAuth redirect
+    // Check if returning from magic link redirect
     supabase.auth.onAuthStateChange(async (event, session) => {
       if (session) await completeFlow(session);
     });
 
     document.getElementById("btn").addEventListener("click", async () => {
       document.getElementById("btn").disabled = true;
-      document.getElementById("status").textContent = "Redirecting to Google…";
-      await supabase.auth.signInWithOAuth({
-        provider: 'google',
-        options: { redirectTo: window.location.href },
+      document.getElementById("status").textContent = "Check your email for a magic link…";
+      const { error } = await supabase.auth.signInWithOtp({
+        email: "jaredpk@gmail.com",
+        options: { emailRedirectTo: window.location.href },
       });
+      if (error) {
+        document.getElementById("status").textContent = "Error: " + error.message;
+        document.getElementById("btn").disabled = false;
+      }
     });
   </script>
 </body>
