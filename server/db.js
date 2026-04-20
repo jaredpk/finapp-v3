@@ -86,6 +86,22 @@ export async function initDb() {
     );
   `);
 
+  // Add new transaction columns from Perplexity schema
+  await pool.query(`
+    ALTER TABLE transactions
+      ADD COLUMN IF NOT EXISTS authorized_date        DATE,
+      ADD COLUMN IF NOT EXISTS name                   TEXT,
+      ADD COLUMN IF NOT EXISTS primary_category       TEXT,
+      ADD COLUMN IF NOT EXISTS category_confidence    TEXT,
+      ADD COLUMN IF NOT EXISTS pending_transaction_id TEXT,
+      ADD COLUMN IF NOT EXISTS city                   TEXT,
+      ADD COLUMN IF NOT EXISTS state                  TEXT,
+      ADD COLUMN IF NOT EXISTS website                TEXT,
+      ADD COLUMN IF NOT EXISTS logo_url               TEXT,
+      ADD COLUMN IF NOT EXISTS original_description   TEXT,
+      ADD COLUMN IF NOT EXISTS suggested_category     TEXT;
+  `);
+
   // Migrate: rename clerk_user_id → user_ref in tables that still use a user identifier
   const renames = ['api_keys', 'user_items', 'link_sessions', 'oauth_codes'];
   for (const table of renames) {
@@ -302,11 +318,23 @@ export async function getTransactions({ limit = 100, startDate, endDate, categor
     `SELECT
        id AS transaction_id,
        date,
-       merchant AS name,
+       authorized_date,
        merchant AS merchant_name,
-       amount,
+       name,
+       amount::float,
+       currency,
        account AS account_id,
+       payment_channel,
        plaid_category AS category,
+       primary_category,
+       category_confidence,
+       pending_transaction_id,
+       city,
+       state,
+       website,
+       logo_url,
+       original_description,
+       suggested_category,
        (status = 'pending') AS pending,
        created_at
      FROM transactions ${where} ORDER BY date DESC LIMIT $${i}`,
@@ -328,6 +356,46 @@ export async function getSpendingByCategory({ startDate, endDate } = {}) {
     params
   );
   return rows;
+}
+
+export async function deleteRemovedTransactions(ids) {
+  if (!ids?.length) return 0;
+  const { rowCount } = await pool.query(
+    `DELETE FROM transactions WHERE id = ANY($1)`,
+    [ids]
+  );
+  return rowCount;
+}
+
+// Auto-assign suggested_category to unassigned transactions using live categories table
+export async function applySuggestedCategories() {
+  const { rows: cats } = await pool.query(
+    `SELECT id, LOWER(name) AS name_lower FROM categories`
+  );
+  const catMap = {};
+  cats.forEach(c => { catMap[c.name_lower] = c.id; });
+
+  const { rows: txns } = await pool.query(`
+    SELECT t.id, t.suggested_category
+    FROM transactions t
+    LEFT JOIN assignments a ON a.transaction_id = t.id
+    WHERE t.suggested_category IS NOT NULL AND a.transaction_id IS NULL
+  `);
+
+  let assigned = 0;
+  for (const t of txns) {
+    const catId = catMap[t.suggested_category.toLowerCase()];
+    if (catId) {
+      await pool.query(
+        `INSERT INTO assignments (transaction_id, category_id, updated_at)
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (transaction_id) DO NOTHING`,
+        [t.id, catId]
+      );
+      assigned++;
+    }
+  }
+  return assigned;
 }
 
 // ── OAuth ─────────────────────────────────────────────────────────────────────

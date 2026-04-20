@@ -223,7 +223,9 @@ export default function Transactions({
                       opacity: isSaving ? 0.5 : 1,
                     }}
                   >
-                    <option value="">— None —</option>
+                    <option value="">
+                      {unassigned && t.suggested_category ? `💡 ${t.suggested_category}` : "— None —"}
+                    </option>
                     {(categories || []).map((c) => (
                       <option key={c.id} value={c.id}>{c.name}</option>
                     ))}

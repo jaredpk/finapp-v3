@@ -17,6 +17,7 @@ import {
   getUserItems, upsertUserItem, removeUserItem,
   getCursor, saveCursor, upsertTransactions,
   getTransactions, getSpendingByCategory,
+  deleteRemovedTransactions, applySuggestedCategories,
   saveOAuthState, getOAuthState, deleteOAuthState,
   saveOAuthCode, getOAuthCode, deleteOAuthCode,
   seedCategories,
@@ -313,6 +314,17 @@ app.post("/api/sync", requireAuth, async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: "Sync failed" });
+  }
+});
+
+// ── Apply suggested categories (called after Perplexity sync) ─────────────────
+app.post("/api/apply-suggested-categories", requireApiKeyOrAuth, async (req, res) => {
+  try {
+    const assigned = await applySuggestedCategories();
+    res.json({ assigned });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to apply suggested categories" });
   }
 });
 
