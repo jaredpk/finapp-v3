@@ -82,6 +82,35 @@ export default function Transactions({
     return <span style={styles.sortActive}>{sort.dir === "asc" ? "↑" : "↓"}</span>;
   };
 
+  // Compute effective from/to from preset or custom inputs
+  const effectiveDateRange = useMemo(() => {
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = now.getMonth(); // 0-based
+    if (datePreset === "this_month") {
+      const from = `${y}-${String(m + 1).padStart(2, "0")}-01`;
+      const nextMonth = new Date(y, m + 1, 1);
+      const to = `${nextMonth.getFullYear()}-${String(nextMonth.getMonth() + 1).padStart(2, "0")}-01`;
+      return { from, to };
+    }
+    if (datePreset === "last_month") {
+      const lastMonth = new Date(y, m - 1, 1);
+      const from = `${lastMonth.getFullYear()}-${String(lastMonth.getMonth() + 1).padStart(2, "0")}-01`;
+      const to = `${y}-${String(m + 1).padStart(2, "0")}-01`;
+      return { from, to };
+    }
+    if (datePreset === "this_year") {
+      return { from: `${y}-01-01`, to: `${y + 1}-01-01` };
+    }
+    if (datePreset === "last_year") {
+      return { from: `${y - 1}-01-01`, to: `${y}-01-01` };
+    }
+    if (datePreset === "custom") {
+      return { from: dateFrom || null, to: dateTo || null };
+    }
+    return { from: null, to: null };
+  }, [datePreset, dateFrom, dateTo]);
+
   const filtered = useMemo(() => {
     const min = minAmount !== "" ? parseFloat(minAmount) : null;
     const max = maxAmount !== "" ? parseFloat(maxAmount) : null;
@@ -144,35 +173,6 @@ export default function Transactions({
     }
     setEditingMerchant(null);
   }
-
-  // Compute effective from/to from preset or custom inputs
-  const effectiveDateRange = useMemo(() => {
-    const now = new Date();
-    const y = now.getFullYear();
-    const m = now.getMonth(); // 0-based
-    if (datePreset === "this_month") {
-      const from = `${y}-${String(m + 1).padStart(2, "0")}-01`;
-      const nextMonth = new Date(y, m + 1, 1);
-      const to = `${nextMonth.getFullYear()}-${String(nextMonth.getMonth() + 1).padStart(2, "0")}-01`;
-      return { from, to };
-    }
-    if (datePreset === "last_month") {
-      const lastMonth = new Date(y, m - 1, 1);
-      const from = `${lastMonth.getFullYear()}-${String(lastMonth.getMonth() + 1).padStart(2, "0")}-01`;
-      const to = `${y}-${String(m + 1).padStart(2, "0")}-01`;
-      return { from, to };
-    }
-    if (datePreset === "this_year") {
-      return { from: `${y}-01-01`, to: `${y + 1}-01-01` };
-    }
-    if (datePreset === "last_year") {
-      return { from: `${y - 1}-01-01`, to: `${y}-01-01` };
-    }
-    if (datePreset === "custom") {
-      return { from: dateFrom || null, to: dateTo || null };
-    }
-    return { from: null, to: null };
-  }, [datePreset, dateFrom, dateTo]);
 
   const hasFilters = search || catFilter !== "all" || acctFilter !== "all" || minAmount || maxAmount || datePreset !== "all";
 
