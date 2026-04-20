@@ -151,6 +151,11 @@ export async function previewDuplicates() {
   return r.json();
 }
 
+export async function debugDuplicates() {
+  const r = await fetch(`${BASE}/deduplicate/debug`, { headers: await authHeaders() });
+  return r.json();
+}
+
 export async function runDeduplication() {
   const r = await fetch(`${BASE}/deduplicate`, {
     method: "POST",

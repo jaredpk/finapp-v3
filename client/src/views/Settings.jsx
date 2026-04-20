@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { getApiKey, generateApiKey, importTransactions, clearImportedTransactions, previewDuplicates, runDeduplication } from "../api.js";
+import { getApiKey, generateApiKey, importTransactions, clearImportedTransactions, previewDuplicates, runDeduplication, debugDuplicates } from "../api.js";
 
 // ── Simplifi CSV parser ───────────────────────────────────────────────────────
 const MONTHS = { Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12 };
@@ -72,6 +72,8 @@ export default function Settings({ reloadData, user }) {
   const [dupePreview, setDupePreview]     = useState(null); // { groups, toRemove, preview }
   const [dupeResult, setDupeResult]       = useState(null);
   const [previewing, setPreviewing]       = useState(false);
+  const [debugData, setDebugData]         = useState(null);
+  const [debugging, setDebugging]         = useState(false);
 
   useEffect(() => {
     getApiKey().then((data) => {
@@ -130,6 +132,16 @@ export default function Settings({ reloadData, user }) {
       if (reloadData) reloadData();
     } finally {
       setClearing(false);
+    }
+  }
+
+  async function handleDebug() {
+    setDebugging(true);
+    try {
+      const res = await debugDuplicates();
+      setDebugData(res);
+    } finally {
+      setDebugging(false);
     }
   }
 
@@ -350,6 +362,55 @@ export default function Settings({ reloadData, user }) {
         )}
 
         {dupeResult && <p style={styles.importSuccess}>{dupeResult}</p>}
+      </section>
+
+      {/* Debug */}
+      <section style={styles.card}>
+        <h2 style={styles.cardTitle}>Duplicate Diagnostics</h2>
+        <p style={styles.description}>Shows raw transaction ID formats and any same-date/same-amount groups to help diagnose why duplicates persist.</p>
+        <button style={styles.regenerateBtn} onClick={handleDebug} disabled={debugging}>
+          {debugging ? "Loading…" : "Run Diagnostic"}
+        </button>
+        {debugData && (
+          <div style={{ marginTop: 16 }}>
+            <p style={styles.muted}>
+              Total: <strong>{debugData.idStats?.total}</strong> &nbsp;|&nbsp;
+              Plaid IDs: <strong>{debugData.idStats?.plaid}</strong> &nbsp;|&nbsp;
+              UUIDs: <strong>{debugData.idStats?.uuid}</strong> &nbsp;|&nbsp;
+              Simplifi: <strong>{debugData.idStats?.simplifi}</strong>
+            </p>
+            <p style={{ ...styles.muted, marginTop: 8 }}>
+              Same date+amount groups: <strong>{debugData.dupeRows?.length ?? 0}</strong>
+            </p>
+            {debugData.dupeRows?.length > 0 && (
+              <div style={{ ...styles.dupeBox, marginTop: 8 }}>
+                {debugData.dupeRows.map((r, i) => (
+                  <div key={i} style={{ marginBottom: 10, fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--text)" }}>
+                    <strong>{r.date}</strong> ${parseFloat(r.abs_amount).toFixed(2)} ({r.cnt} rows)<br />
+                    {r.ids.map((id, j) => (
+                      <div key={j} style={{ paddingLeft: 12, color: id.startsWith("simplifi") ? "var(--red,#ef4444)" : "var(--green,#22c55e)" }}>
+                        {id} — {r.merchants[j]} — acct: {r.accounts[j]} — amt: {r.amounts[j]}
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            )}
+            <p style={{ ...styles.muted, marginTop: 12 }}>Recent transactions (newest first):</p>
+            <div style={{ ...styles.dupeBox, marginTop: 4 }}>
+              {debugData.sample?.map((t, i) => (
+                <div key={i} style={{ fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--text)", padding: "3px 0", borderBottom: "1px solid var(--border)" }}>
+                  <span style={{ color: "var(--muted)" }}>{t.date}</span> &nbsp;
+                  <span style={{ color: t.id?.startsWith("simplifi") ? "var(--red,#ef4444)" : t.id?.match(/^[0-9a-f-]{36}$/) ? "var(--accent)" : "var(--green,#22c55e)" }}>
+                    {t.id?.slice(0, 40)}
+                  </span> &nbsp;
+                  <span>{t.merchant}</span> &nbsp;
+                  <span style={{ color: "var(--muted)" }}>${Math.abs(t.amount).toFixed(2)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </section>
     </div>
   );
