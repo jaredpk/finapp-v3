@@ -144,3 +144,17 @@ export async function clearImportedTransactions() {
   });
   return r.json();
 }
+
+// ── Deduplication ─────────────────────────────────────────────────────────────
+export async function previewDuplicates() {
+  const r = await fetch(`${BASE}/deduplicate`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function runDeduplication() {
+  const r = await fetch(`${BASE}/deduplicate`, {
+    method: "POST",
+    headers: await authHeaders(),
+  });
+  return r.json();
+}

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { getApiKey, generateApiKey, importTransactions, clearImportedTransactions } from "../api.js";
+import { getApiKey, generateApiKey, importTransactions, clearImportedTransactions, previewDuplicates, runDeduplication } from "../api.js";
 
 // ── Simplifi CSV parser ───────────────────────────────────────────────────────
 const MONTHS = { Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12 };
@@ -67,6 +67,12 @@ export default function Settings({ reloadData, user }) {
   const [importResult, setImportResult] = useState(null); // "Imported 47 transactions"
   const [clearing, setClearing] = useState(false);
 
+  // Dedup state
+  const [deduping, setDeduping]           = useState(false);
+  const [dupePreview, setDupePreview]     = useState(null); // { groups, toRemove, preview }
+  const [dupeResult, setDupeResult]       = useState(null);
+  const [previewing, setPreviewing]       = useState(false);
+
   useEffect(() => {
     getApiKey().then((data) => {
       setApiKey(data.key || null);
@@ -124,6 +130,29 @@ export default function Settings({ reloadData, user }) {
       if (reloadData) reloadData();
     } finally {
       setClearing(false);
+    }
+  }
+
+  async function handleDedupePreview() {
+    setPreviewing(true);
+    setDupeResult(null);
+    try {
+      const res = await previewDuplicates();
+      setDupePreview(res);
+    } finally {
+      setPreviewing(false);
+    }
+  }
+
+  async function handleDedupe() {
+    setDeduping(true);
+    try {
+      const res = await runDeduplication();
+      setDupeResult(`Removed ${res.deleted} duplicate transaction${res.deleted !== 1 ? "s" : ""}.`);
+      setDupePreview(null);
+      if (reloadData) reloadData();
+    } finally {
+      setDeduping(false);
     }
   }
 
@@ -275,6 +304,53 @@ export default function Settings({ reloadData, user }) {
           </button>
         </div>
       </section>
+
+      {/* Deduplication */}
+      <section style={styles.card}>
+        <h2 style={styles.cardTitle}>Deduplicate Transactions</h2>
+        <p style={styles.description}>
+          Finds transactions with the same date and amount that appear more than once — common when Simplifi imports and Plaid syncs overlap. Keeps the best copy (Plaid-native over Simplifi) and removes the rest.
+        </p>
+
+        <button style={styles.generateBtn} onClick={handleDedupePreview} disabled={previewing || deduping}>
+          {previewing ? "Scanning…" : "Scan for Duplicates"}
+        </button>
+
+        {dupePreview && (
+          <div style={styles.dupeBox}>
+            {dupePreview.toRemove === 0 ? (
+              <p style={styles.muted}>No duplicates found.</p>
+            ) : (
+              <>
+                <p style={{ fontSize: 13, color: "var(--text)", marginBottom: 10 }}>
+                  Found <strong>{dupePreview.toRemove}</strong> duplicate row{dupePreview.toRemove !== 1 ? "s" : ""} across <strong>{dupePreview.groups}</strong> transaction group{dupePreview.groups !== 1 ? "s" : ""}.
+                </p>
+                <div style={styles.dupeTable}>
+                  <div style={styles.dupeHeader}>
+                    <span>Date</span><span>Amount</span><span>Keep</span><span>Remove</span>
+                  </div>
+                  {(dupePreview.preview || []).map((d, i) => (
+                    <div key={i} style={styles.dupeRow}>
+                      <span style={styles.dupeCell}>{d.date}</span>
+                      <span style={styles.dupeCell}>${d.amount.toFixed(2)}</span>
+                      <span style={{ ...styles.dupeCell, color: "var(--green, #22c55e)", fontSize: 11 }}>{d.keep}</span>
+                      <span style={{ ...styles.dupeCell, color: "var(--red, #ef4444)", fontSize: 11 }}>{d.remove.join(", ")}</span>
+                    </div>
+                  ))}
+                </div>
+                {dupePreview.groups > 20 && (
+                  <p style={{ ...styles.muted, marginTop: 8 }}>Showing first 20 of {dupePreview.groups} groups.</p>
+                )}
+                <button style={{ ...styles.generateBtn, marginTop: 14 }} onClick={handleDedupe} disabled={deduping}>
+                  {deduping ? "Removing…" : `Remove ${dupePreview.toRemove} Duplicate${dupePreview.toRemove !== 1 ? "s" : ""}`}
+                </button>
+              </>
+            )}
+          </div>
+        )}
+
+        {dupeResult && <p style={styles.importSuccess}>{dupeResult}</p>}
+      </section>
     </div>
   );
 }
@@ -354,4 +430,18 @@ const styles = {
   previewCount: { fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-mono)", margin: "8px 0 12px" },
   checkLabel: { display: "flex", alignItems: "center", fontSize: 13, color: "var(--text)", cursor: "pointer" },
   importSuccess: { marginTop: 12, fontSize: 13, color: "var(--green, #22c55e)", fontFamily: "var(--font-mono)" },
+  dupeBox: { marginTop: 16, padding: 16, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8 },
+  dupeTable: { borderRadius: 6, overflow: "hidden", border: "1px solid var(--border)" },
+  dupeHeader: {
+    display: "grid", gridTemplateColumns: "90px 90px 1fr 1fr",
+    padding: "6px 10px", background: "var(--surface2)",
+    fontSize: 10, fontWeight: 600, letterSpacing: "0.08em",
+    textTransform: "uppercase", color: "var(--muted)", fontFamily: "var(--font-mono)",
+  },
+  dupeRow: {
+    display: "grid", gridTemplateColumns: "90px 90px 1fr 1fr",
+    padding: "6px 10px", borderTop: "1px solid var(--border)",
+    alignItems: "center",
+  },
+  dupeCell: { fontSize: 12, fontFamily: "var(--font-mono)", color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", paddingRight: 8 },
 };

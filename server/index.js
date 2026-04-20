@@ -18,6 +18,7 @@ import {
   getCursor, saveCursor, upsertTransactions,
   getTransactions, getSpendingByCategory,
   deleteRemovedTransactions, populateSuggestedCategories, applySuggestedCategories,
+  findDuplicateTransactions, deduplicateTransactions,
   saveOAuthState, getOAuthState, deleteOAuthState,
   saveOAuthCode, getOAuthCode, deleteOAuthCode,
   seedCategories,
@@ -418,6 +419,18 @@ app.post("/api/import", requireAuth, async (req, res) => {
 
 app.delete("/api/import", requireAuth, async (req, res) => {
   const deleted = await deleteImportedTransactions();
+  res.json({ deleted });
+});
+
+// ── Deduplication ─────────────────────────────────────────────────────────────
+app.get("/api/deduplicate", requireAuth, async (req, res) => {
+  const dupes = await findDuplicateTransactions();
+  const toRemove = dupes.reduce((n, d) => n + d.remove.length, 0);
+  res.json({ groups: dupes.length, toRemove, preview: dupes.slice(0, 20) });
+});
+
+app.post("/api/deduplicate", requireAuth, async (req, res) => {
+  const deleted = await deduplicateTransactions();
   res.json({ deleted });
 });
 

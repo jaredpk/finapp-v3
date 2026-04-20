@@ -550,6 +550,66 @@ export async function upsertImportedTransaction(t) {
   );
 }
 
+export async function findDuplicateTransactions() {
+  // Group by (date, absolute amount rounded to 2dp, merchant) — same-day same-amount same-merchant = likely duplicate
+  // Falls back to (date, amount) grouping when merchants differ (e.g. Simplifi vs Plaid naming)
+  const { rows } = await pool.query(`
+    SELECT
+      date,
+      ROUND(ABS(amount)::numeric, 2) AS abs_amount,
+      COUNT(*) AS cnt,
+      array_agg(id ORDER BY
+        CASE WHEN id LIKE 'simplifi_%' THEN 1 ELSE 0 END ASC,
+        created_at ASC
+      ) AS ids,
+      array_agg(merchant ORDER BY
+        CASE WHEN id LIKE 'simplifi_%' THEN 1 ELSE 0 END ASC,
+        created_at ASC
+      ) AS merchants
+    FROM transactions
+    GROUP BY date, ROUND(ABS(amount)::numeric, 2)
+    HAVING COUNT(*) > 1
+    ORDER BY date DESC
+  `);
+  return rows.map(r => ({
+    date: r.date,
+    amount: parseFloat(r.abs_amount),
+    count: parseInt(r.cnt),
+    keep: r.ids[0],
+    remove: r.ids.slice(1),
+    merchants: r.merchants,
+  }));
+}
+
+export async function deduplicateTransactions() {
+  const dupes = await findDuplicateTransactions();
+  if (dupes.length === 0) return 0;
+
+  const toRemove = dupes.flatMap(d => d.remove);
+
+  // Migrate assignments from duplicate rows to the keeper before deleting
+  for (const dupe of dupes) {
+    for (const removeId of dupe.remove) {
+      await pool.query(`
+        INSERT INTO assignments (transaction_id, category_id, updated_at)
+        SELECT $2, category_id, NOW() FROM assignments WHERE transaction_id = $1
+        ON CONFLICT (transaction_id) DO NOTHING
+      `, [removeId, dupe.keep]);
+      await pool.query(`
+        INSERT INTO merchant_overrides (transaction_id, merchant_name, updated_at)
+        SELECT $2, merchant_name, NOW() FROM merchant_overrides WHERE transaction_id = $1
+        ON CONFLICT (transaction_id) DO NOTHING
+      `, [removeId, dupe.keep]);
+    }
+  }
+
+  const { rowCount } = await pool.query(
+    `DELETE FROM transactions WHERE id = ANY($1)`,
+    [toRemove]
+  );
+  return rowCount;
+}
+
 export async function deleteImportedTransactions() {
   const { rowCount } = await pool.query(
     "DELETE FROM transactions WHERE id LIKE 'simplifi_%'"
