@@ -33,11 +33,13 @@ export default function Transactions({
   const [search, setSearch]         = useState("");
   const [catFilter, setCatFilter]   = useState("all");
   const [acctFilter, setAcctFilter] = useState("all");
-  const [saving, setSaving]         = useState({}); // { transaction_id: true }
+  const [minAmount, setMinAmount]   = useState("");
+  const [maxAmount, setMaxAmount]   = useState("");
+  const [sort, setSort]             = useState({ col: "date", dir: "desc" });
+  const [saving, setSaving]         = useState({});
   const [editingMerchant, setEditingMerchant] = useState(null);
   const [merchantDraft, setMerchantDraft]     = useState("");
 
-  // Build account id → name lookup
   const acctMap = useMemo(() => {
     const m = {};
     (accounts || []).forEach((a) => {
@@ -46,7 +48,6 @@ export default function Transactions({
     return m;
   }, [accounts]);
 
-  // Unique account ids present in transactions
   const acctIds = useMemo(() => {
     return [...new Set(transactions.map((t) => t.account_id).filter(Boolean))].sort();
   }, [transactions]);
@@ -60,23 +61,63 @@ export default function Transactions({
   const getDisplayName = (t) =>
     merchantOverrides?.[t.transaction_id] || t.merchant_name || t.name || "Unknown";
 
-  // Stats
   const stats = useMemo(() => {
     const spend = transactions.filter((t) => toNum(t.amount) > 0).reduce((s, t) => s + toNum(t.amount), 0);
     const needsReview = transactions.filter((t) => !assignments?.[t.transaction_id]).length;
     return { total: transactions.length, spend, needsReview };
   }, [transactions, assignments]);
 
+  function toggleSort(col) {
+    setSort(prev => prev.col === col
+      ? { col, dir: prev.dir === "asc" ? "desc" : "asc" }
+      : { col, dir: col === "amount" ? "desc" : "desc" }
+    );
+  }
+
+  const sortIcon = (col) => {
+    if (sort.col !== col) return <span style={styles.sortNeutral}>⇅</span>;
+    return <span style={styles.sortActive}>{sort.dir === "asc" ? "↑" : "↓"}</span>;
+  };
+
   const filtered = useMemo(() => {
-    return transactions.filter((t) => {
+    const min = minAmount !== "" ? parseFloat(minAmount) : null;
+    const max = maxAmount !== "" ? parseFloat(maxAmount) : null;
+
+    let rows = transactions.filter((t) => {
       const name = getDisplayName(t).toLowerCase();
+      const amt = Math.abs(toNum(t.amount) ?? 0);
       if (search && !name.includes(search.toLowerCase())) return false;
       if (catFilter === "unassigned" && assignments?.[t.transaction_id]) return false;
       if (catFilter !== "all" && catFilter !== "unassigned" && assignments?.[t.transaction_id] !== catFilter) return false;
       if (acctFilter !== "all" && t.account_id !== acctFilter) return false;
+      if (min !== null && amt < min) return false;
+      if (max !== null && amt > max) return false;
       return true;
     });
-  }, [transactions, search, catFilter, acctFilter, assignments, merchantOverrides]);
+
+    rows = [...rows].sort((a, b) => {
+      let av, bv;
+      if (sort.col === "date") {
+        av = a.date || ""; bv = b.date || "";
+      } else if (sort.col === "amount") {
+        av = Math.abs(toNum(a.amount) ?? 0);
+        bv = Math.abs(toNum(b.amount) ?? 0);
+      } else if (sort.col === "merchant") {
+        av = getDisplayName(a).toLowerCase();
+        bv = getDisplayName(b).toLowerCase();
+      } else if (sort.col === "account") {
+        av = (acctMap[a.account_id] || a.account_id || "").toLowerCase();
+        bv = (acctMap[b.account_id] || b.account_id || "").toLowerCase();
+      } else {
+        av = ""; bv = "";
+      }
+      if (av < bv) return sort.dir === "asc" ? -1 : 1;
+      if (av > bv) return sort.dir === "asc" ? 1 : -1;
+      return 0;
+    });
+
+    return rows;
+  }, [transactions, search, catFilter, acctFilter, minAmount, maxAmount, sort, assignments, merchantOverrides, acctMap]);
 
   async function handleCategoryChange(txnId, categoryId) {
     setSaving((prev) => ({ ...prev, [txnId]: true }));
@@ -96,6 +137,8 @@ export default function Transactions({
     }
     setEditingMerchant(null);
   }
+
+  const hasFilters = search || catFilter !== "all" || acctFilter !== "all" || minAmount || maxAmount;
 
   return (
     <div style={styles.wrap}>
@@ -145,6 +188,28 @@ export default function Transactions({
             <option key={id} value={id}>{acctMap[id] || id}</option>
           ))}
         </select>
+        <input
+          type="number"
+          placeholder="Min $"
+          value={minAmount}
+          onChange={(e) => setMinAmount(e.target.value)}
+          style={{ ...styles.input, maxWidth: 90 }}
+        />
+        <input
+          type="number"
+          placeholder="Max $"
+          value={maxAmount}
+          onChange={(e) => setMaxAmount(e.target.value)}
+          style={{ ...styles.input, maxWidth: 90 }}
+        />
+        {hasFilters && (
+          <button
+            style={styles.clearBtn}
+            onClick={() => { setSearch(""); setCatFilter("all"); setAcctFilter("all"); setMinAmount(""); setMaxAmount(""); }}
+          >
+            Clear
+          </button>
+        )}
         <span style={styles.count}>{filtered.length} of {stats.total}</span>
       </div>
 
@@ -152,21 +217,29 @@ export default function Transactions({
       {filtered.length === 0 ? (
         <p style={styles.empty}>
           {transactions.length === 0
-            ? "Connect a bank account to see transactions."
+            ? "No transactions yet."
             : "No results match your filters."}
         </p>
       ) : (
         <div className="fade-up-2" style={styles.tableWrap}>
           <div style={styles.tableHeader}>
-            <span>Date</span>
-            <span>Merchant</span>
-            <span>Account</span>
-            <span style={{ textAlign: "right" }}>Amount</span>
+            <span style={styles.sortable} onClick={() => toggleSort("date")}>
+              Date {sortIcon("date")}
+            </span>
+            <span style={styles.sortable} onClick={() => toggleSort("merchant")}>
+              Merchant {sortIcon("merchant")}
+            </span>
+            <span style={styles.sortable} onClick={() => toggleSort("account")}>
+              Account {sortIcon("account")}
+            </span>
+            <span style={{ ...styles.sortable, textAlign: "right" }} onClick={() => toggleSort("amount")}>
+              Amount {sortIcon("amount")}
+            </span>
             <span>Category</span>
           </div>
           {filtered.map((t) => {
             const assigned   = assignments?.[t.transaction_id];
-            const isCredit   = t.amount < 0;
+            const isCredit   = toNum(t.amount) < 0;
             const unassigned = !assigned;
             const isSaving   = saving[t.transaction_id];
             return (
@@ -249,9 +322,9 @@ const styles = {
   statLabel: { fontSize: 10, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontFamily: "var(--font-mono)", marginBottom: 6 },
   statVal:   { fontSize: 22, fontWeight: 700, color: "var(--text)" },
 
-  toolbar: { display: "flex", alignItems: "center", gap: 10, marginBottom: 14 },
+  toolbar: { display: "flex", alignItems: "center", gap: 8, marginBottom: 14, flexWrap: "wrap" },
   input: {
-    flex: 1, maxWidth: 260, padding: "8px 12px",
+    flex: 1, maxWidth: 220, padding: "8px 12px",
     background: "var(--surface)", border: "1px solid var(--border)",
     borderRadius: "var(--radius)", color: "var(--text)", fontSize: 13,
     fontFamily: "var(--font-mono)", outline: "none",
@@ -260,6 +333,11 @@ const styles = {
     padding: "8px 12px", background: "var(--surface)", border: "1px solid var(--border)",
     borderRadius: "var(--radius)", color: "var(--text)", fontSize: 13,
     fontFamily: "var(--font-mono)", outline: "none", cursor: "pointer",
+  },
+  clearBtn: {
+    padding: "8px 12px", background: "none", border: "1px solid var(--border)",
+    borderRadius: "var(--radius)", color: "var(--muted)", fontSize: 12,
+    fontFamily: "var(--font-mono)", cursor: "pointer",
   },
   count: { fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", marginLeft: "auto" },
   empty: { color: "var(--muted)", fontSize: 13, fontFamily: "var(--font-mono)", textAlign: "center", padding: "48px 0" },
@@ -272,6 +350,9 @@ const styles = {
     textTransform: "uppercase", color: "var(--muted)", fontFamily: "var(--font-mono)",
     borderBottom: "1px solid var(--border)",
   },
+  sortable: { cursor: "pointer", userSelect: "none", display: "flex", alignItems: "center", gap: 4 },
+  sortNeutral: { opacity: 0.3, fontSize: 10 },
+  sortActive:  { color: "var(--accent)", fontSize: 10 },
   row: {
     display: "grid", gridTemplateColumns: "76px minmax(0,1fr) minmax(0,150px) 96px minmax(0,210px)",
     padding: "9px 16px", borderBottom: "1px solid var(--border)",
