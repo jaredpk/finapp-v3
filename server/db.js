@@ -86,27 +86,37 @@ export async function initDb() {
     );
   `);
 
-  // Migrate old clerk_user_id tables if they exist
+  // Migrate: rename clerk_user_id → user_ref in tables that still use a user identifier
+  const renames = ['api_keys', 'user_items', 'link_sessions', 'oauth_codes'];
+  for (const table of renames) {
+    await pool.query(`
+      DO $$ BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='${table}' AND column_name='clerk_user_id') THEN
+          ALTER TABLE ${table} RENAME COLUMN clerk_user_id TO user_ref;
+        END IF;
+      END $$;
+    `);
+  }
+
+  // Migrate: drop clerk_user_id from single-user tables
+  const drops = ['categories', 'splits', 'merchant_overrides'];
+  for (const table of drops) {
+    await pool.query(`
+      DO $$ BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='${table}' AND column_name='clerk_user_id') THEN
+          ALTER TABLE ${table} DROP COLUMN clerk_user_id;
+        END IF;
+      END $$;
+    `);
+  }
+
+  // Migrate assignments: drop clerk_user_id and fix primary key if needed
   await pool.query(`
     DO $$ BEGIN
-      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='categories' AND column_name='clerk_user_id') THEN
-        ALTER TABLE categories DROP COLUMN IF EXISTS clerk_user_id;
-      END IF;
-    END $$;
-    DO $$ BEGIN
       IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='assignments' AND column_name='clerk_user_id') THEN
-        ALTER TABLE assignments DROP COLUMN IF EXISTS clerk_user_id;
-        -- rebuild primary key without clerk_user_id if needed
-      END IF;
-    END $$;
-    DO $$ BEGIN
-      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='splits' AND column_name='clerk_user_id') THEN
-        ALTER TABLE splits DROP COLUMN IF EXISTS clerk_user_id;
-      END IF;
-    END $$;
-    DO $$ BEGIN
-      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='merchant_overrides' AND column_name='clerk_user_id') THEN
-        ALTER TABLE merchant_overrides DROP COLUMN IF EXISTS clerk_user_id;
+        ALTER TABLE assignments DROP CONSTRAINT IF EXISTS assignments_pkey;
+        ALTER TABLE assignments DROP COLUMN clerk_user_id;
+        ALTER TABLE assignments ADD PRIMARY KEY (transaction_id);
       END IF;
     END $$;
   `);
