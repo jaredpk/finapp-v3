@@ -1,31 +1,32 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { ClerkProvider } from "@clerk/clerk-react";
+import { createClient } from "@supabase/supabase-js";
 import App from "./App.jsx";
 import "./index.css";
 
 async function init() {
-  // Fetch publishable key from server at runtime (avoids Vite build-time env var issues)
-  let publishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
+  let supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+  let supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-  if (!publishableKey) {
+  if (!supabaseUrl || !supabaseAnonKey) {
     try {
       const res = await fetch("/api/config");
       const data = await res.json();
-      publishableKey = data.clerkPublishableKey;
+      supabaseUrl = data.supabaseUrl;
+      supabaseAnonKey = data.supabaseAnonKey;
     } catch (_) {}
   }
 
-  if (!publishableKey) {
-    document.body.innerHTML = '<p style="color:red;padding:2rem">Configuration error: Clerk publishable key is missing. Check server environment variables.</p>';
+  if (!supabaseUrl || !supabaseAnonKey) {
+    document.body.innerHTML = '<p style="color:red;padding:2rem">Configuration error: Supabase keys missing.</p>';
     return;
   }
 
+  const supabase = createClient(supabaseUrl, supabaseAnonKey);
+
   ReactDOM.createRoot(document.getElementById("root")).render(
     <React.StrictMode>
-      <ClerkProvider publishableKey={publishableKey}>
-        <App />
-      </ClerkProvider>
+      <App supabase={supabase} />
     </React.StrictMode>
   );
 }

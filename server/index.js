@@ -3,8 +3,8 @@ import cors from "cors";
 import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
-import { createHash } from "crypto";
-import { clerkMiddleware, getAuth } from "@clerk/express";
+import { createHash, randomBytes } from "crypto";
+import { createClient } from "@supabase/supabase-js";
 import { Configuration, PlaidApi, PlaidEnvironments, Products, CountryCode } from "plaid";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -32,11 +32,17 @@ dotenv.config();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isProd = process.env.NODE_ENV === "production";
 const APP_URL = process.env.APP_URL || "http://localhost:3001";
+const ALLOWED_EMAIL = "jaredpk@gmail.com";
+
+// ── Supabase admin client (for JWT verification) ──────────────────────────────
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
+);
 
 const app = express();
 app.use(cors({
   origin: (origin, cb) => {
-    // Allow requests from Claude.ai, localhost in dev, and no-origin (curl/server-to-server)
     const allowed = !origin || origin.includes("claude.ai") || origin.includes("localhost") || origin.includes("anthropic.com");
     cb(null, allowed ? origin || "*" : false);
   },
@@ -45,7 +51,6 @@ app.use(cors({
   credentials: true,
 }));
 app.use(express.json());
-app.use(clerkMiddleware());
 
 if (isProd) {
   app.use(express.static(path.join(__dirname, "../client/dist")));
@@ -64,15 +69,15 @@ const plaidConfig = new Configuration({
 const plaidClient = new PlaidApi(plaidConfig);
 
 // ── Sync transactions for a user ──────────────────────────────────────────────
-async function syncTransactions(clerkUserId) {
-  const items = await getUserItems(clerkUserId);
+async function syncTransactions() {
+  const items = await getUserItems();
   for (const { accessToken, itemId } of items) {
     let cursor = await getCursor(itemId);
     let hasMore = true;
     while (hasMore) {
       const r = await plaidClient.transactionsSync({ access_token: accessToken, cursor });
-      await upsertTransactions(clerkUserId, r.data.added);
-      await upsertTransactions(clerkUserId, r.data.modified);
+      await upsertTransactions(r.data.added);
+      await upsertTransactions(r.data.modified);
       cursor = r.data.next_cursor;
       hasMore = r.data.has_more;
     }
@@ -81,58 +86,73 @@ async function syncTransactions(clerkUserId) {
 }
 
 // ── Auth helpers ──────────────────────────────────────────────────────────────
-function requireClerkAuth(req, res, next) {
-  const { userId } = getAuth(req);
-  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+async function requireAuth(req, res, next) {
+  const authHeader = req.headers["authorization"];
+  const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  if (!token) return res.status(401).json({ error: "Unauthorized" });
+
+  const { data: { user }, error } = await supabase.auth.getUser(token);
+  if (error || !user) return res.status(401).json({ error: "Unauthorized" });
+  if (user.email !== ALLOWED_EMAIL) return res.status(403).json({ error: "Access denied" });
+
+  req._user = user;
   next();
 }
 
-// Accepts either a Clerk JWT (from the React app) or an API key (from the widget/MCP)
-async function requireApiKeyOrClerkAuth(req, res, next) {
-  // Try x-api-key header first (avoids Clerk middleware consuming the Authorization header)
+async function requireApiKeyOrAuth(req, res, next) {
+  // Try API key first
   const directKey = req.headers["x-api-key"] || req.query.key;
   if (directKey) {
-    const uid = await getClerkUserIdByApiKey(directKey);
-    if (uid) { req._userId = uid; return next(); }
+    const ref = await getClerkUserIdByApiKey(directKey);
+    if (ref) { req._user = { id: ref, email: ALLOWED_EMAIL }; return next(); }
   }
-  // Try Clerk JWT
-  const { userId } = getAuth(req);
-  if (userId) { req._userId = userId; return next(); }
-  // Try Authorization: Bearer as last resort
   const authHeader = req.headers["authorization"];
   const bearerKey = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
   if (bearerKey) {
-    const uid = await getClerkUserIdByApiKey(bearerKey);
-    if (uid) { req._userId = uid; return next(); }
+    // Try as API key first
+    const ref = await getClerkUserIdByApiKey(bearerKey);
+    if (ref) { req._user = { id: ref, email: ALLOWED_EMAIL }; return next(); }
+    // Try as Supabase JWT
+    const { data: { user }, error } = await supabase.auth.getUser(bearerKey);
+    if (!error && user && user.email === ALLOWED_EMAIL) {
+      req._user = user;
+      return next();
+    }
   }
   return res.status(401).json({ error: "Unauthorized" });
 }
 
 // ── User API key management ───────────────────────────────────────────────────
-app.get("/api/user/api-key", requireClerkAuth, async (req, res) => {
-  const { userId } = getAuth(req);
-  const key = await getApiKeyForUser(userId);
+app.get("/api/user/api-key", requireAuth, async (req, res) => {
+  const key = await getApiKeyForUser();
   res.json({ key });
 });
 
-app.post("/api/user/api-key", requireClerkAuth, async (req, res) => {
-  const { userId } = getAuth(req);
-  const key = await createApiKey(userId);
+app.post("/api/user/api-key", requireAuth, async (req, res) => {
+  const key = await createApiKey();
   res.json({ key });
 });
 
-// ── Plaid Link page (opened from MCP bank link URL) ───────────────────────────
+// ── Public config ─────────────────────────────────────────────────────────────
+app.get("/api/config", (_, res) => res.json({
+  supabaseUrl: process.env.SUPABASE_URL || "",
+  supabaseAnonKey: process.env.SUPABASE_ANON_KEY || "",
+}));
+
+// ── Health ────────────────────────────────────────────────────────────────────
+app.get("/api/health", (_, res) => res.json({ ok: true }));
+
+// ── Plaid Link page ───────────────────────────────────────────────────────────
 app.get("/link", async (req, res) => {
   const { session } = req.query;
   if (!session) return res.status(400).send("Missing session");
-
   const linkSession = await getLinkSession(session);
-  if (!linkSession) return res.status(400).send("Invalid or expired session. Please generate a new link URL from Claude.");
+  if (!linkSession) return res.status(400).send("Invalid or expired session.");
 
   let linkToken;
   try {
     const r = await plaidClient.linkTokenCreate({
-      user: { client_user_id: linkSession.clerk_user_id },
+      user: { client_user_id: 'jared' },
       client_name: "FinApp",
       products: [Products.Transactions, Products.Auth],
       country_codes: [CountryCode.Us],
@@ -208,12 +228,11 @@ app.get("/link", async (req, res) => {
 </html>`);
 });
 
-// ── Create link token (from web app, uses Clerk auth) ─────────────────────────
-app.post("/api/create_link_token", requireClerkAuth, async (req, res) => {
-  const { userId } = getAuth(req);
+// ── Create link token (from web app) ─────────────────────────────────────────
+app.post("/api/create_link_token", requireAuth, async (req, res) => {
   try {
     const response = await plaidClient.linkTokenCreate({
-      user: { client_user_id: userId },
+      user: { client_user_id: 'jared' },
       client_name: "FinApp",
       products: [Products.Transactions, Products.Auth],
       country_codes: [CountryCode.Us],
@@ -229,23 +248,14 @@ app.post("/api/create_link_token", requireClerkAuth, async (req, res) => {
 // ── Exchange public token ─────────────────────────────────────────────────────
 app.post("/api/exchange_public_token", async (req, res) => {
   const { public_token, session } = req.body;
-
-  let clerkUserId;
   if (session) {
     const linkSession = await getLinkSession(session);
     if (!linkSession) return res.status(400).json({ error: "Invalid or expired session" });
-    clerkUserId = linkSession.clerk_user_id;
     await deleteLinkSession(session);
-  } else {
-    const auth = getAuth(req);
-    if (!auth.userId) return res.status(401).json({ error: "Unauthorized" });
-    clerkUserId = auth.userId;
   }
-
   try {
     const r = await plaidClient.itemPublicTokenExchange({ public_token });
     const { access_token, item_id } = r.data;
-
     let institutionName = null;
     try {
       const itemResp = await plaidClient.itemGet({ access_token });
@@ -255,9 +265,8 @@ app.post("/api/exchange_public_token", async (req, res) => {
         institutionName = instResp.data.institution.name;
       }
     } catch (_) {}
-
-    await upsertUserItem(clerkUserId, access_token, item_id, institutionName);
-    await syncTransactions(clerkUserId);
+    await upsertUserItem(access_token, item_id, institutionName);
+    await syncTransactions();
     res.json({ success: true });
   } catch (err) {
     console.error(err.response?.data || err.message);
@@ -266,9 +275,8 @@ app.post("/api/exchange_public_token", async (req, res) => {
 });
 
 // ── Accounts ──────────────────────────────────────────────────────────────────
-app.get("/api/accounts", requireClerkAuth, async (req, res) => {
-  const { userId } = getAuth(req);
-  const items = await getUserItems(userId);
+app.get("/api/accounts", requireAuth, async (req, res) => {
+  const items = await getUserItems();
   try {
     const allAccounts = await Promise.all(
       items.map(async ({ accessToken, itemId, institutionName }) => {
@@ -283,11 +291,10 @@ app.get("/api/accounts", requireClerkAuth, async (req, res) => {
 });
 
 // ── Transactions ──────────────────────────────────────────────────────────────
-app.get("/api/transactions", requireApiKeyOrClerkAuth, async (req, res) => {
-  const userId = req._userId;
+app.get("/api/transactions", requireApiKeyOrAuth, async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit) || 200, 1000);
-    const transactions = await getTransactions(userId, {
+    const transactions = await getTransactions({
       limit,
       startDate: req.query.start_date,
       endDate: req.query.end_date,
@@ -300,129 +307,106 @@ app.get("/api/transactions", requireApiKeyOrClerkAuth, async (req, res) => {
 });
 
 // ── Sync ──────────────────────────────────────────────────────────────────────
-app.post("/api/sync", requireClerkAuth, async (req, res) => {
-  const { userId } = getAuth(req);
+app.post("/api/sync", requireAuth, async (req, res) => {
   try {
-    await syncTransactions(userId);
+    await syncTransactions();
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: "Sync failed" });
   }
 });
 
-// ── Health ────────────────────────────────────────────────────────────────────
-app.get("/api/health", (_, res) => res.json({ ok: true }));
-
 // ── Categories ────────────────────────────────────────────────────────────────
-app.post("/api/categories/seed", requireClerkAuth, async (req, res) => {
-  const { userId } = getAuth(req);
+app.post("/api/categories/seed", requireAuth, async (req, res) => {
   const { categories } = req.body;
   if (!Array.isArray(categories)) return res.status(400).json({ error: "categories array required" });
-  const created = await seedCategories(userId, categories);
-  const all = await getCategories(userId);
+  const created = await seedCategories(categories);
+  const all = await getCategories();
   res.json({ created, categories: all });
 });
 
-app.get("/api/categories", requireApiKeyOrClerkAuth, async (req, res) => {
-  const userId = req._userId;
-  const cats = await getCategories(userId);
+app.get("/api/categories", requireApiKeyOrAuth, async (req, res) => {
+  const cats = await getCategories();
   res.json({ categories: cats });
 });
 
-app.post("/api/categories", requireClerkAuth, async (req, res) => {
-  const { userId } = getAuth(req);
+app.post("/api/categories", requireAuth, async (req, res) => {
   const { name, color } = req.body;
   if (!name) return res.status(400).json({ error: "name required" });
-  const cat = await createCategory(userId, name, color);
+  const cat = await createCategory(name, color);
   res.json({ category: cat });
 });
 
-app.put("/api/categories/:id", requireClerkAuth, async (req, res) => {
-  const { userId } = getAuth(req);
+app.put("/api/categories/:id", requireAuth, async (req, res) => {
   const { name, color } = req.body;
-  const cat = await updateCategory(userId, req.params.id, name, color);
+  const cat = await updateCategory(req.params.id, name, color);
   if (!cat) return res.status(404).json({ error: "not found" });
   res.json({ category: cat });
 });
 
-app.delete("/api/categories/:id", requireClerkAuth, async (req, res) => {
-  const { userId } = getAuth(req);
-  const ok = await deleteCategory(userId, req.params.id);
+app.delete("/api/categories/:id", requireAuth, async (req, res) => {
+  const ok = await deleteCategory(req.params.id);
   res.json({ ok });
 });
 
 // ── Assignments ───────────────────────────────────────────────────────────────
-app.get("/api/assignments", requireApiKeyOrClerkAuth, async (req, res) => {
-  const userId = req._userId;
-  const rows = await getAssignments(userId);
+app.get("/api/assignments", requireApiKeyOrAuth, async (req, res) => {
+  const rows = await getAssignments();
   res.json({ assignments: rows });
 });
 
-app.post("/api/assignments", requireApiKeyOrClerkAuth, async (req, res) => {
-  const userId = req._userId;
+app.post("/api/assignments", requireApiKeyOrAuth, async (req, res) => {
   const { transaction_id, category_id } = req.body;
   if (!transaction_id) return res.status(400).json({ error: "transaction_id required" });
-  await upsertAssignment(userId, transaction_id, category_id);
+  await upsertAssignment(transaction_id, category_id);
   res.json({ ok: true });
 });
 
 // ── Splits ────────────────────────────────────────────────────────────────────
-app.get("/api/splits", requireClerkAuth, async (req, res) => {
-  const { userId } = getAuth(req);
-  const rows = await getSplits(userId);
+app.get("/api/splits", requireAuth, async (req, res) => {
+  const rows = await getSplits();
   res.json({ splits: rows });
 });
 
-app.post("/api/splits", requireClerkAuth, async (req, res) => {
-  const { userId } = getAuth(req);
+app.post("/api/splits", requireAuth, async (req, res) => {
   const { transaction_id, category_id, amount, note } = req.body;
   if (!transaction_id || amount == null) return res.status(400).json({ error: "transaction_id and amount required" });
-  const split = await createSplit(userId, transaction_id, category_id, amount, note);
+  const split = await createSplit(transaction_id, category_id, amount, note);
   res.json({ split });
 });
 
-app.delete("/api/splits/:id", requireClerkAuth, async (req, res) => {
-  const { userId } = getAuth(req);
-  const ok = await deleteSplit(userId, req.params.id);
+app.delete("/api/splits/:id", requireAuth, async (req, res) => {
+  const ok = await deleteSplit(req.params.id);
   res.json({ ok });
 });
 
 // ── CSV Import ────────────────────────────────────────────────────────────────
-app.post("/api/import", requireClerkAuth, async (req, res) => {
-  const { userId } = getAuth(req);
+app.post("/api/import", requireAuth, async (req, res) => {
   const { transactions: rows } = req.body;
   if (!Array.isArray(rows)) return res.status(400).json({ error: "transactions array required" });
   for (const t of rows) {
-    await upsertImportedTransaction(userId, t);
+    await upsertImportedTransaction(t);
   }
   res.json({ imported: rows.length });
 });
 
-app.delete("/api/import", requireClerkAuth, async (req, res) => {
-  const { userId } = getAuth(req);
-  const deleted = await deleteImportedTransactions(userId);
+app.delete("/api/import", requireAuth, async (req, res) => {
+  const deleted = await deleteImportedTransactions();
   res.json({ deleted });
 });
 
 // ── Merchant overrides ────────────────────────────────────────────────────────
-app.get("/api/merchant-overrides", requireClerkAuth, async (req, res) => {
-  const { userId } = getAuth(req);
-  const rows = await getMerchantOverrides(userId);
+app.get("/api/merchant-overrides", requireAuth, async (req, res) => {
+  const rows = await getMerchantOverrides();
   res.json({ overrides: rows });
 });
 
-app.post("/api/merchant-overrides", requireClerkAuth, async (req, res) => {
-  const { userId } = getAuth(req);
+app.post("/api/merchant-overrides", requireAuth, async (req, res) => {
   const { transaction_id, merchant_name } = req.body;
   if (!transaction_id || !merchant_name) return res.status(400).json({ error: "transaction_id and merchant_name required" });
-  await upsertMerchantOverride(userId, transaction_id, merchant_name);
+  await upsertMerchantOverride(transaction_id, merchant_name);
   res.json({ ok: true });
 });
-
-// ── Public config (safe to expose) ───────────────────────────────────────────
-app.get("/api/config", (_, res) => res.json({
-  clerkPublishableKey: process.env.CLERK_PUBLISHABLE_KEY || "",
-}));
 
 // ── OAuth metadata ────────────────────────────────────────────────────────────
 app.get("/.well-known/oauth-authorization-server", (_, res) => {
@@ -443,14 +427,15 @@ app.get("/.well-known/oauth-protected-resource", (_, res) => {
   });
 });
 
-// ── OAuth authorize — serves browser login page ───────────────────────────────
+// ── OAuth authorize ───────────────────────────────────────────────────────────
 app.get("/oauth/authorize", async (req, res) => {
   const { state, redirect_uri, code_challenge, code_challenge_method } = req.query;
   if (!state || !redirect_uri) return res.status(400).send("Missing state or redirect_uri");
 
   await saveOAuthState(state, redirect_uri, code_challenge, code_challenge_method);
 
-  const publishableKey = process.env.CLERK_PUBLISHABLE_KEY || "";
+  const supabaseUrl = process.env.SUPABASE_URL || "";
+  const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || "";
 
   res.send(`<!DOCTYPE html>
 <html lang="en">
@@ -464,48 +449,33 @@ app.get("/oauth/authorize", async (req, res) => {
     .wordmark { font-size: 2rem; font-weight: 800; letter-spacing: -0.04em; }
     .wordmark span { color: #6366f1; }
     .subtitle { color: #94a3b8; font-size: 0.9rem; }
-    #clerk-signin { width: 100%; max-width: 420px; }
+    .btn { background: #6366f1; color: white; border: none; border-radius: 10px; padding: 14px 32px; font-size: 1rem; font-weight: 600; cursor: pointer; min-width: 280px; }
+    .btn:disabled { background: #334155; cursor: not-allowed; }
     .status { color: #94a3b8; font-size: 0.9rem; }
   </style>
 </head>
 <body>
   <div class="wordmark">fin<span>app</span></div>
   <p class="subtitle">Sign in to connect with Claude</p>
-  <div id="clerk-signin"></div>
+  <button id="btn" class="btn">Sign in with Google</button>
   <p id="status" class="status"></p>
 
-  <script>
-    const PUBLISHABLE_KEY = ${JSON.stringify(publishableKey)};
+  <script type="module">
+    import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
+
+    const SUPABASE_URL = ${JSON.stringify(supabaseUrl)};
+    const SUPABASE_ANON_KEY = ${JSON.stringify(supabaseAnonKey)};
     const STATE = ${JSON.stringify(state)};
 
-    async function loadClerk() {
-      const script = document.createElement("script");
-      script.src = "https://cdn.jsdelivr.net/npm/@clerk/clerk-js@latest/dist/clerk.browser.js";
-      script.crossOrigin = "anonymous";
-      document.head.appendChild(script);
-      await new Promise((resolve, reject) => { script.onload = resolve; script.onerror = reject; });
+    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-      const clerk = new window.Clerk(PUBLISHABLE_KEY);
-      await clerk.load();
-
-      if (clerk.user) {
-        await completeFlow(clerk);
-      } else {
-        clerk.mountSignIn(document.getElementById("clerk-signin"), {
-          appearance: { variables: { colorBackground: "#1e293b", colorText: "#f8fafc", colorPrimary: "#6366f1" } },
-        });
-        clerk.addListener(({ user }) => { if (user) completeFlow(clerk); });
-      }
-    }
-
-    async function completeFlow(clerk) {
+    async function completeFlow(session) {
       document.getElementById("status").textContent = "Completing sign in…";
       try {
-        const token = await clerk.session.getToken();
         const resp = await fetch("/oauth/complete", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ token, state: STATE }),
+          body: JSON.stringify({ token: session.access_token, state: STATE }),
         });
         const data = await resp.json();
         if (data.redirect_to) {
@@ -518,13 +488,25 @@ app.get("/oauth/authorize", async (req, res) => {
       }
     }
 
-    loadClerk().catch(console.error);
+    // Check if returning from OAuth redirect
+    supabase.auth.onAuthStateChange(async (event, session) => {
+      if (session) await completeFlow(session);
+    });
+
+    document.getElementById("btn").addEventListener("click", async () => {
+      document.getElementById("btn").disabled = true;
+      document.getElementById("status").textContent = "Redirecting to Google…";
+      await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: { redirectTo: window.location.href },
+      });
+    });
   </script>
 </body>
 </html>`);
 });
 
-// ── OAuth complete — called by browser after Clerk sign-in ────────────────────
+// ── OAuth complete ────────────────────────────────────────────────────────────
 app.post("/oauth/complete", async (req, res) => {
   const { token, state } = req.body;
   if (!token || !state) return res.status(400).json({ error: "Missing token or state" });
@@ -532,20 +514,12 @@ app.post("/oauth/complete", async (req, res) => {
   const oauthState = await getOAuthState(state);
   if (!oauthState) return res.status(400).json({ error: "Invalid or expired state" });
 
-  // Verify the Clerk token and get user ID
-  let clerkUserId;
-  try {
-    const { createClerkClient } = await import("@clerk/express");
-    const clerkClient = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
-    const { sub } = await clerkClient.verifyToken(token);
-    clerkUserId = sub;
-  } catch (err) {
-    console.error("Token verification failed:", err.message);
-    return res.status(401).json({ error: "Invalid token" });
-  }
+  const { data: { user }, error } = await supabase.auth.getUser(token);
+  if (error || !user) return res.status(401).json({ error: "Invalid token" });
+  if (user.email !== ALLOWED_EMAIL) return res.status(403).json({ error: "Access denied" });
 
   const code = randomBytes(32).toString("hex");
-  await saveOAuthCode(code, clerkUserId, oauthState.redirect_uri, oauthState.code_challenge);
+  await saveOAuthCode(code, oauthState.redirect_uri, oauthState.code_challenge);
   await deleteOAuthState(state);
 
   const redirectUrl = new URL(oauthState.redirect_uri);
@@ -555,9 +529,9 @@ app.post("/oauth/complete", async (req, res) => {
   res.json({ redirect_to: redirectUrl.toString() });
 });
 
-// ── OAuth token — exchange code for access token ──────────────────────────────
+// ── OAuth token ───────────────────────────────────────────────────────────────
 app.post("/oauth/token", express.urlencoded({ extended: true }), async (req, res) => {
-  const { code, redirect_uri, code_verifier, grant_type } = req.body;
+  const { code, code_verifier, grant_type } = req.body;
 
   if (grant_type !== "authorization_code") {
     return res.status(400).json({ error: "unsupported_grant_type" });
@@ -566,7 +540,6 @@ app.post("/oauth/token", express.urlencoded({ extended: true }), async (req, res
   const oauthCode = await getOAuthCode(code);
   if (!oauthCode) return res.status(400).json({ error: "invalid_grant" });
 
-  // Verify PKCE
   if (oauthCode.code_challenge && code_verifier) {
     const hash = createHash("sha256").update(code_verifier).digest("base64url");
     if (hash !== oauthCode.code_challenge) {
@@ -574,9 +547,8 @@ app.post("/oauth/token", express.urlencoded({ extended: true }), async (req, res
     }
   }
 
-  // Get or create API key (used as the access token)
-  let apiKey = await getApiKeyForUser(oauthCode.clerk_user_id);
-  if (!apiKey) apiKey = await createApiKey(oauthCode.clerk_user_id);
+  let apiKey = await getApiKeyForUser();
+  if (!apiKey) apiKey = await createApiKey();
 
   await deleteOAuthCode(code);
 
@@ -588,38 +560,32 @@ app.post("/oauth/token", express.urlencoded({ extended: true }), async (req, res
 });
 
 // ── MCP server factory ────────────────────────────────────────────────────────
-function buildMcpServer(clerkUserId) {
+function buildMcpServer() {
   const server = new McpServer({ name: "finapp", version: "3.0.0" });
-  const noAuth = { content: [{ type: "text", text: "Not authenticated. Connect via OAuth to use this tool." }] };
 
   server.tool("get_bank_link_url", "Generate a URL to connect a bank account via Plaid", {}, async () => {
-    if (!clerkUserId) return noAuth;
-    const sessionId = await createLinkSession(clerkUserId);
-    return { content: [{ type: "text", text: `Open this URL in your browser to connect a bank:\n\n${APP_URL}/link?session=${sessionId}\n\nExpires in 30 minutes. After connecting, ask me to sync your transactions.` }] };
+    const sessionId = await createLinkSession();
+    return { content: [{ type: "text", text: `Open this URL in your browser to connect a bank:\n\n${APP_URL}/link?session=${sessionId}\n\nExpires in 30 minutes.` }] };
   });
 
   server.tool("list_linked_banks", "List all linked bank accounts", {}, async () => {
-    if (!clerkUserId) return noAuth;
-    const items = await getUserItems(clerkUserId);
-    if (!items.length) return { content: [{ type: "text", text: "No banks linked yet. Use get_bank_link_url to connect one." }] };
+    const items = await getUserItems();
+    if (!items.length) return { content: [{ type: "text", text: "No banks linked yet." }] };
     return { content: [{ type: "text", text: JSON.stringify(items.map(i => ({ itemId: i.itemId, institution: i.institutionName })), null, 2) }] };
   });
 
   server.tool("remove_bank", "Remove a linked bank account", { item_id: z.string() }, async ({ item_id }) => {
-    if (!clerkUserId) return noAuth;
-    const removed = await removeUserItem(clerkUserId, item_id);
+    const removed = await removeUserItem(item_id);
     return { content: [{ type: "text", text: removed ? `Bank ${item_id} removed.` : "Bank not found." }] };
   });
 
   server.tool("sync_transactions", "Pull latest transactions from Plaid", {}, async () => {
-    if (!clerkUserId) return noAuth;
-    await syncTransactions(clerkUserId);
+    await syncTransactions();
     return { content: [{ type: "text", text: "Sync complete." }] };
   });
 
   server.tool("get_balances", "Get current balances for all linked accounts", {}, async () => {
-    if (!clerkUserId) return noAuth;
-    const items = await getUserItems(clerkUserId);
+    const items = await getUserItems();
     if (!items.length) return { content: [{ type: "text", text: "No banks linked yet." }] };
     const accounts = (await Promise.all(items.map(async ({ accessToken, institutionName }) => {
       const r = await plaidClient.accountsBalanceGet({ access_token: accessToken });
@@ -634,8 +600,7 @@ function buildMcpServer(clerkUserId) {
     end_date: z.string().optional().describe("YYYY-MM-DD"),
     category: z.string().optional(),
   }, async ({ limit = 50, start_date, end_date, category }) => {
-    if (!clerkUserId) return noAuth;
-    const txns = await getTransactions(clerkUserId, { limit, startDate: start_date, endDate: end_date, category });
+    const txns = await getTransactions({ limit, startDate: start_date, endDate: end_date, category });
     return { content: [{ type: "text", text: JSON.stringify(txns, null, 2) }] };
   });
 
@@ -643,8 +608,7 @@ function buildMcpServer(clerkUserId) {
     start_date: z.string().optional().describe("YYYY-MM-DD"),
     end_date: z.string().optional().describe("YYYY-MM-DD"),
   }, async ({ start_date, end_date }) => {
-    if (!clerkUserId) return noAuth;
-    const summary = await getSpendingByCategory(clerkUserId, { startDate: start_date, endDate: end_date });
+    const summary = await getSpendingByCategory({ startDate: start_date, endDate: end_date });
     return { content: [{ type: "text", text: JSON.stringify(summary, null, 2) }] };
   });
 
@@ -652,51 +616,47 @@ function buildMcpServer(clerkUserId) {
     assignments: z.array(z.object({
       transaction_id: z.string(),
       category_id: z.string().describe("UUID of the category from list_categories"),
-    })).describe("Array of transaction → category pairs to assign"),
+    })),
   }, async ({ assignments }) => {
-    if (!clerkUserId) return noAuth;
     for (const { transaction_id, category_id } of assignments) {
-      await upsertAssignment(clerkUserId, transaction_id, category_id);
+      await upsertAssignment(transaction_id, category_id);
     }
     return { content: [{ type: "text", text: `Assigned categories to ${assignments.length} transaction(s).` }] };
   });
 
   server.tool("list_categories", "List all user-defined categories", {}, async () => {
-    if (!clerkUserId) return noAuth;
-    const cats = await getCategories(clerkUserId);
-    if (!cats.length) return { content: [{ type: "text", text: "No categories defined yet. Create some in the app under the Categories view." }] };
+    const cats = await getCategories();
+    if (!cats.length) return { content: [{ type: "text", text: "No categories defined yet." }] };
     return { content: [{ type: "text", text: JSON.stringify(cats, null, 2) }] };
   });
 
   server.tool("update_merchant_override", "Fix the display name for a transaction's merchant", {
     transaction_id: z.string(),
-    merchant_name: z.string().describe("The corrected merchant name to display"),
+    merchant_name: z.string(),
   }, async ({ transaction_id, merchant_name }) => {
-    if (!clerkUserId) return noAuth;
-    await upsertMerchantOverride(clerkUserId, transaction_id, merchant_name);
-    return { content: [{ type: "text", text: `Merchant name updated to "${merchant_name}" for transaction ${transaction_id}.` }] };
+    await upsertMerchantOverride(transaction_id, merchant_name);
+    return { content: [{ type: "text", text: `Merchant name updated to "${merchant_name}".` }] };
   });
 
   server.tool("split_transaction", "Split a transaction across multiple categories", {
     transaction_id: z.string(),
     splits: z.array(z.object({
-      category_id: z.string().optional().describe("UUID of the category (from list_categories)"),
-      amount: z.number().describe("Dollar amount for this split"),
-      note: z.string().optional().describe("Optional note for this split"),
-    })).describe("Split amounts — should sum to the transaction total"),
+      category_id: z.string().optional(),
+      amount: z.number(),
+      note: z.string().optional(),
+    })),
   }, async ({ transaction_id, splits: splitRows }) => {
-    if (!clerkUserId) return noAuth;
-    await deleteSplitsForTransaction(clerkUserId, transaction_id);
+    await deleteSplitsForTransaction(transaction_id);
     for (const { category_id, amount, note } of splitRows) {
-      await createSplit(clerkUserId, transaction_id, category_id, amount, note);
+      await createSplit(transaction_id, category_id, amount, note);
     }
-    return { content: [{ type: "text", text: `Created ${splitRows.length} splits for transaction ${transaction_id}.` }] };
+    return { content: [{ type: "text", text: `Created ${splitRows.length} splits.` }] };
   });
 
   return server;
 }
 
-// ── Auth helper for MCP ───────────────────────────────────────────────────────
+// ── MCP auth helper ───────────────────────────────────────────────────────────
 async function resolveMcpUser(req) {
   const authHeader = req.headers["authorization"];
   const apiKey = authHeader?.startsWith("Bearer ")
@@ -712,55 +672,44 @@ function unauthorizedMcp(res) {
     .json({ error: "Unauthorized" });
 }
 
-// ── SSE sessions store ────────────────────────────────────────────────────────
+// ── SSE sessions ──────────────────────────────────────────────────────────────
 const sseSessions = new Map();
 
-// ── MCP — SSE transport on /sse (for claude.ai) ───────────────────────────────
 app.get("/sse", async (req, res) => {
-  const clerkUserId = await resolveMcpUser(req);
-  if (!clerkUserId) return unauthorizedMcp(res);
-
+  const ref = await resolveMcpUser(req);
+  if (!ref) return unauthorizedMcp(res);
   const transport = new SSEServerTransport("/messages", res);
   sseSessions.set(transport.sessionId, transport);
   transport.onclose = () => sseSessions.delete(transport.sessionId);
-
-  const server = buildMcpServer(clerkUserId);
+  const server = buildMcpServer();
   await server.connect(transport);
 });
 
 app.post("/messages", async (req, res) => {
-  const sessionId = req.query.sessionId;
-  const session = sseSessions.get(sessionId);
+  const session = sseSessions.get(req.query.sessionId);
   if (!session) return res.status(404).json({ error: "Session not found" });
   await session.handlePostMessage(req, res, req.body);
 });
 
-// ── MCP — SSE transport on /mcp (GET) ────────────────────────────────────────
 app.get("/mcp", async (req, res) => {
-  const clerkUserId = await resolveMcpUser(req);
-  if (!clerkUserId) return unauthorizedMcp(res);
-
+  const ref = await resolveMcpUser(req);
+  if (!ref) return unauthorizedMcp(res);
   const transport = new SSEServerTransport("/messages", res);
   sseSessions.set(transport.sessionId, transport);
   transport.onclose = () => sseSessions.delete(transport.sessionId);
-
-  const server = buildMcpServer(clerkUserId);
+  const server = buildMcpServer();
   await server.connect(transport);
 });
 
-// ── MCP — Streamable HTTP (POST) ──────────────────────────────────────────────
 app.post("/mcp", async (req, res) => {
   const sessionId = req.query.sessionId;
-
   if (sessionId && sseSessions.has(sessionId)) {
     return sseSessions.get(sessionId).handlePostMessage(req, res, req.body);
   }
-
-  const clerkUserId = await resolveMcpUser(req);
-  if (!clerkUserId) return unauthorizedMcp(res);
-
+  const ref = await resolveMcpUser(req);
+  if (!ref) return unauthorizedMcp(res);
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-  const server = buildMcpServer(clerkUserId);
+  const server = buildMcpServer();
   await server.connect(transport);
   await transport.handleRequest(req, res, req.body);
 });

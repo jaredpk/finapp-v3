@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef } from "react";
-import { useUser } from "@clerk/clerk-react";
 import { getApiKey, generateApiKey, importTransactions, clearImportedTransactions } from "../api.js";
 
 // ── Simplifi CSV parser ───────────────────────────────────────────────────────
@@ -54,8 +53,7 @@ function parseSimplifiCsv(text) {
   return rows;
 }
 
-export default function Settings({ reloadData }) {
-  const { user } = useUser();
+export default function Settings({ reloadData, user }) {
   const [apiKey, setApiKey] = useState(null);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
@@ -155,11 +153,11 @@ export default function Settings({ reloadData }) {
         <h2 style={styles.cardTitle}>Account</h2>
         <div style={styles.row}>
           <span style={styles.label}>Name</span>
-          <span style={styles.value}>{user?.fullName || "—"}</span>
+          <span style={styles.value}>{user?.user_metadata?.full_name || "—"}</span>
         </div>
         <div style={styles.row}>
           <span style={styles.label}>Email</span>
-          <span style={styles.value}>{user?.primaryEmailAddress?.emailAddress || "—"}</span>
+          <span style={styles.value}>{user?.email || "—"}</span>
         </div>
       </section>
 

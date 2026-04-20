@@ -1,5 +1,4 @@
 import React from "react";
-import { useClerk, useUser } from "@clerk/clerk-react";
 
 const NAV = [
   { id: "dashboard",    label: "Dashboard",     icon: "◈" },
@@ -11,9 +10,9 @@ const NAV = [
   { id: "settings",     label: "Settings",      icon: "⚙" },
 ];
 
-export default function Sidebar({ active, setActive, onConnect, connecting }) {
-  const { signOut } = useClerk();
-  const { user } = useUser();
+export default function Sidebar({ active, setActive, onConnect, connecting, user, onSignOut }) {
+  const displayName = user?.user_metadata?.full_name || user?.email || "Account";
+  const avatarUrl = user?.user_metadata?.avatar_url;
 
   return (
     <aside style={styles.aside}>
@@ -58,14 +57,12 @@ export default function Sidebar({ active, setActive, onConnect, connecting }) {
 
       <div style={styles.userRow}>
         <div style={styles.userInfo}>
-          {user?.imageUrl && (
-            <img src={user.imageUrl} alt="" style={styles.avatar} />
+          {avatarUrl && (
+            <img src={avatarUrl} alt="" style={styles.avatar} />
           )}
-          <span style={styles.userName}>
-            {user?.firstName || user?.primaryEmailAddress?.emailAddress || "Account"}
-          </span>
+          <span style={styles.userName}>{displayName}</span>
         </div>
-        <button style={styles.signOutBtn} onClick={() => signOut()} title="Sign out">
+        <button style={styles.signOutBtn} onClick={onSignOut} title="Sign out">
           ↩
         </button>
       </div>

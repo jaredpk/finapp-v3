@@ -7,26 +7,10 @@ const connectionString = process.env.DATABASE_URL?.replace(/([?&])sslmode=[^&]*/
 const pool = new Pool({ connectionString, ssl: { rejectUnauthorized: false } });
 
 export async function initDb() {
-  // Migrate old integer-based schema if present
-  const { rows } = await pool.query(`
-    SELECT data_type FROM information_schema.columns
-    WHERE table_name = 'user_items' AND column_name = 'user_id'
-  `);
-  if (rows.length > 0 && rows[0].data_type === "integer") {
-    await pool.query(`
-      DROP TABLE IF EXISTS transactions CASCADE;
-      DROP TABLE IF EXISTS transaction_cursors CASCADE;
-      DROP TABLE IF EXISTS link_sessions CASCADE;
-      DROP TABLE IF EXISTS user_items CASCADE;
-      DROP TABLE IF EXISTS users CASCADE;
-      DROP TABLE IF EXISTS api_keys CASCADE;
-    `);
-  }
-
   await pool.query(`
     CREATE TABLE IF NOT EXISTS api_keys (
       id SERIAL PRIMARY KEY,
-      clerk_user_id TEXT NOT NULL,
+      user_ref TEXT NOT NULL DEFAULT 'jared',
       key TEXT UNIQUE NOT NULL,
       name TEXT DEFAULT 'Default',
       created_at TIMESTAMP DEFAULT NOW()
@@ -34,7 +18,7 @@ export async function initDb() {
 
     CREATE TABLE IF NOT EXISTS user_items (
       id SERIAL PRIMARY KEY,
-      clerk_user_id TEXT NOT NULL,
+      user_ref TEXT NOT NULL DEFAULT 'jared',
       access_token TEXT NOT NULL,
       item_id TEXT UNIQUE NOT NULL,
       institution_name TEXT,
@@ -43,7 +27,7 @@ export async function initDb() {
 
     CREATE TABLE IF NOT EXISTS link_sessions (
       id TEXT PRIMARY KEY,
-      clerk_user_id TEXT NOT NULL,
+      user_ref TEXT NOT NULL DEFAULT 'jared',
       expires_at TIMESTAMP NOT NULL,
       created_at TIMESTAMP DEFAULT NOW()
     );
@@ -52,20 +36,6 @@ export async function initDb() {
       item_id TEXT PRIMARY KEY,
       cursor TEXT,
       updated_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS transactions (
-      id SERIAL PRIMARY KEY,
-      clerk_user_id TEXT NOT NULL,
-      transaction_id TEXT UNIQUE NOT NULL,
-      account_id TEXT NOT NULL,
-      amount NUMERIC NOT NULL,
-      date DATE NOT NULL,
-      name TEXT,
-      merchant_name TEXT,
-      category TEXT,
-      pending BOOLEAN DEFAULT FALSE,
-      created_at TIMESTAMP DEFAULT NOW()
     );
 
     CREATE TABLE IF NOT EXISTS oauth_states (
@@ -79,7 +49,7 @@ export async function initDb() {
 
     CREATE TABLE IF NOT EXISTS oauth_codes (
       code TEXT PRIMARY KEY,
-      clerk_user_id TEXT NOT NULL,
+      user_ref TEXT NOT NULL DEFAULT 'jared',
       redirect_uri TEXT NOT NULL,
       code_challenge TEXT,
       expires_at TIMESTAMP NOT NULL,
@@ -88,7 +58,6 @@ export async function initDb() {
 
     CREATE TABLE IF NOT EXISTS categories (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      clerk_user_id TEXT NOT NULL,
       name TEXT NOT NULL,
       color TEXT DEFAULT '#6366f1',
       created_at TIMESTAMP DEFAULT NOW()
@@ -96,16 +65,14 @@ export async function initDb() {
 
     CREATE TABLE IF NOT EXISTS assignments (
       transaction_id TEXT NOT NULL,
-      clerk_user_id TEXT NOT NULL,
       category_id UUID REFERENCES categories(id) ON DELETE SET NULL,
       updated_at TIMESTAMP DEFAULT NOW(),
-      PRIMARY KEY (transaction_id, clerk_user_id)
+      PRIMARY KEY (transaction_id)
     );
 
     CREATE TABLE IF NOT EXISTS splits (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       transaction_id TEXT NOT NULL,
-      clerk_user_id TEXT NOT NULL,
       category_id UUID REFERENCES categories(id) ON DELETE SET NULL,
       amount NUMERIC(12,2) NOT NULL,
       note TEXT,
@@ -113,59 +80,71 @@ export async function initDb() {
     );
 
     CREATE TABLE IF NOT EXISTS merchant_overrides (
-      transaction_id TEXT NOT NULL,
-      clerk_user_id TEXT NOT NULL,
+      transaction_id TEXT PRIMARY KEY,
       merchant_name TEXT NOT NULL,
-      updated_at TIMESTAMP DEFAULT NOW(),
-      PRIMARY KEY (transaction_id, clerk_user_id)
+      updated_at TIMESTAMP DEFAULT NOW()
     );
+  `);
+
+  // Migrate old clerk_user_id tables if they exist
+  await pool.query(`
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='categories' AND column_name='clerk_user_id') THEN
+        ALTER TABLE categories DROP COLUMN IF EXISTS clerk_user_id;
+      END IF;
+    END $$;
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='assignments' AND column_name='clerk_user_id') THEN
+        ALTER TABLE assignments DROP COLUMN IF EXISTS clerk_user_id;
+        -- rebuild primary key without clerk_user_id if needed
+      END IF;
+    END $$;
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='splits' AND column_name='clerk_user_id') THEN
+        ALTER TABLE splits DROP COLUMN IF EXISTS clerk_user_id;
+      END IF;
+    END $$;
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='merchant_overrides' AND column_name='clerk_user_id') THEN
+        ALTER TABLE merchant_overrides DROP COLUMN IF EXISTS clerk_user_id;
+      END IF;
+    END $$;
   `);
 }
 
 // ── API Keys ──────────────────────────────────────────────────────────────────
-export async function getApiKeyForUser(clerkUserId) {
+export async function getApiKeyForUser() {
   const { rows } = await pool.query(
-    "SELECT key FROM api_keys WHERE clerk_user_id = $1 ORDER BY created_at DESC LIMIT 1",
-    [clerkUserId]
+    "SELECT key FROM api_keys ORDER BY created_at DESC LIMIT 1"
   );
   return rows[0]?.key || null;
 }
 
-export async function createApiKey(clerkUserId) {
+export async function createApiKey() {
   const key = randomBytes(32).toString("hex");
-  await pool.query(
-    `DELETE FROM api_keys WHERE clerk_user_id = $1`,
-    [clerkUserId]
-  );
-  await pool.query(
-    `INSERT INTO api_keys (clerk_user_id, key) VALUES ($1, $2)`,
-    [clerkUserId, key]
-  );
+  await pool.query("DELETE FROM api_keys");
+  await pool.query("INSERT INTO api_keys (user_ref, key) VALUES ('jared', $1)", [key]);
   return key;
 }
 
 export async function getClerkUserIdByApiKey(key) {
-  const { rows } = await pool.query(
-    "SELECT clerk_user_id FROM api_keys WHERE key = $1",
-    [key]
-  );
-  return rows[0]?.clerk_user_id || null;
+  const { rows } = await pool.query("SELECT user_ref FROM api_keys WHERE key = $1", [key]);
+  return rows[0]?.user_ref || null;
 }
 
 // ── Link sessions ─────────────────────────────────────────────────────────────
-export async function createLinkSession(clerkUserId) {
+export async function createLinkSession() {
   const id = randomBytes(16).toString("hex");
   await pool.query(
-    `INSERT INTO link_sessions (id, clerk_user_id, expires_at)
-     VALUES ($1, $2, NOW() + INTERVAL '30 minutes')`,
-    [id, clerkUserId]
+    "INSERT INTO link_sessions (id, user_ref, expires_at) VALUES ($1, 'jared', NOW() + INTERVAL '30 minutes')",
+    [id]
   );
   return id;
 }
 
 export async function getLinkSession(id) {
   const { rows } = await pool.query(
-    "SELECT clerk_user_id FROM link_sessions WHERE id = $1 AND expires_at > NOW()",
+    "SELECT user_ref FROM link_sessions WHERE id = $1 AND expires_at > NOW()",
     [id]
   );
   return rows[0] || null;
@@ -176,28 +155,27 @@ export async function deleteLinkSession(id) {
 }
 
 // ── User items (banks) ────────────────────────────────────────────────────────
-export async function getUserItems(clerkUserId) {
+export async function getUserItems() {
   const { rows } = await pool.query(
     `SELECT access_token AS "accessToken", item_id AS "itemId", institution_name AS "institutionName"
-     FROM user_items WHERE clerk_user_id = $1`,
-    [clerkUserId]
+     FROM user_items`
   );
   return rows;
 }
 
-export async function upsertUserItem(clerkUserId, accessToken, itemId, institutionName) {
+export async function upsertUserItem(accessToken, itemId, institutionName) {
   await pool.query(
-    `INSERT INTO user_items (clerk_user_id, access_token, item_id, institution_name)
-     VALUES ($1, $2, $3, $4)
-     ON CONFLICT (item_id) DO UPDATE SET institution_name = $4`,
-    [clerkUserId, accessToken, itemId, institutionName || null]
+    `INSERT INTO user_items (user_ref, access_token, item_id, institution_name)
+     VALUES ('jared', $1, $2, $3)
+     ON CONFLICT (item_id) DO UPDATE SET institution_name = $3`,
+    [accessToken, itemId, institutionName || null]
   );
 }
 
-export async function removeUserItem(clerkUserId, itemId) {
+export async function removeUserItem(itemId) {
   const { rowCount } = await pool.query(
-    "DELETE FROM user_items WHERE clerk_user_id = $1 AND item_id = $2",
-    [clerkUserId, itemId]
+    "DELETE FROM user_items WHERE item_id = $1",
+    [itemId]
   );
   return rowCount > 0;
 }
@@ -220,54 +198,60 @@ export async function saveCursor(itemId, cursor) {
   );
 }
 
-// ── Transactions ──────────────────────────────────────────────────────────────
-export async function upsertTransactions(clerkUserId, transactions) {
+// ── Transactions (Perplexity schema) ──────────────────────────────────────────
+// Perplexity columns: id, date, merchant, amount, currency, account, payment_channel, plaid_category, status, created_at
+
+export async function upsertTransactions(transactions) {
   for (const t of transactions) {
+    const txnId = t.transaction_id || t.id;
+    const merchant = t.merchant_name || t.name || t.merchant || null;
+    const category = t.personal_finance_category?.primary || t.category?.[0] || t.plaid_category || null;
+    const status = t.pending ? 'pending' : 'posted';
     await pool.query(
-      `INSERT INTO transactions
-         (clerk_user_id, transaction_id, account_id, amount, date, name, merchant_name, category, pending)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       ON CONFLICT (transaction_id) DO UPDATE SET amount = $4, pending = $9`,
-      [
-        clerkUserId,
-        t.transaction_id,
-        t.account_id,
-        t.amount,
-        t.date,
-        t.name,
-        t.merchant_name || null,
-        t.personal_finance_category?.primary || t.category?.[0] || null,
-        t.pending,
-      ]
+      `INSERT INTO transactions (id, date, merchant, amount, account, plaid_category, status, currency)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'USD')
+       ON CONFLICT (id) DO UPDATE SET amount = $4, status = $7`,
+      [txnId, t.date, merchant, t.amount, t.account_id || t.account || 'unknown', category, status]
     );
   }
 }
 
-export async function getTransactions(clerkUserId, { limit = 100, startDate, endDate, category } = {}) {
-  const conditions = ["clerk_user_id = $1"];
-  const params = [clerkUserId];
-  let i = 2;
+export async function getTransactions({ limit = 100, startDate, endDate, category } = {}) {
+  const conditions = [];
+  const params = [];
+  let i = 1;
   if (startDate) { conditions.push(`date >= $${i++}`); params.push(startDate); }
   if (endDate)   { conditions.push(`date <= $${i++}`); params.push(endDate); }
-  if (category)  { conditions.push(`LOWER(category) = LOWER($${i++})`); params.push(category); }
+  if (category)  { conditions.push(`LOWER(plaid_category) = LOWER($${i++})`); params.push(category); }
   params.push(limit);
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const { rows } = await pool.query(
-    `SELECT * FROM transactions WHERE ${conditions.join(" AND ")} ORDER BY date DESC LIMIT $${i}`,
+    `SELECT
+       id AS transaction_id,
+       date,
+       merchant AS name,
+       merchant AS merchant_name,
+       amount,
+       account AS account_id,
+       plaid_category AS category,
+       (status = 'pending') AS pending,
+       created_at
+     FROM transactions ${where} ORDER BY date DESC LIMIT $${i}`,
     params
   );
   return rows;
 }
 
-export async function getSpendingByCategory(clerkUserId, { startDate, endDate } = {}) {
-  const conditions = ["clerk_user_id = $1", "pending = false", "amount > 0"];
-  const params = [clerkUserId];
-  let i = 2;
+export async function getSpendingByCategory({ startDate, endDate } = {}) {
+  const conditions = ["status != 'pending'", "amount > 0"];
+  const params = [];
+  let i = 1;
   if (startDate) { conditions.push(`date >= $${i++}`); params.push(startDate); }
   if (endDate)   { conditions.push(`date <= $${i++}`); params.push(endDate); }
   const { rows } = await pool.query(
-    `SELECT category, SUM(amount)::numeric AS total, COUNT(*)::int AS count
+    `SELECT plaid_category AS category, SUM(amount)::numeric AS total, COUNT(*)::int AS count
      FROM transactions WHERE ${conditions.join(" AND ")}
-     GROUP BY category ORDER BY total DESC`,
+     GROUP BY plaid_category ORDER BY total DESC`,
     params
   );
   return rows;
@@ -295,11 +279,11 @@ export async function deleteOAuthState(state) {
   await pool.query("DELETE FROM oauth_states WHERE state = $1", [state]);
 }
 
-export async function saveOAuthCode(code, clerkUserId, redirectUri, codeChallenge) {
+export async function saveOAuthCode(code, redirectUri, codeChallenge) {
   await pool.query(
-    `INSERT INTO oauth_codes (code, clerk_user_id, redirect_uri, code_challenge, expires_at)
-     VALUES ($1, $2, $3, $4, NOW() + INTERVAL '5 minutes')`,
-    [code, clerkUserId, redirectUri, codeChallenge || null]
+    `INSERT INTO oauth_codes (code, user_ref, redirect_uri, code_challenge, expires_at)
+     VALUES ($1, 'jared', $2, $3, NOW() + INTERVAL '5 minutes')`,
+    [code, redirectUri, codeChallenge || null]
   );
 }
 
@@ -316,37 +300,37 @@ export async function deleteOAuthCode(code) {
 }
 
 // ── CSV Import ────────────────────────────────────────────────────────────────
-export async function upsertImportedTransaction(clerkUserId, t) {
+export async function upsertImportedTransaction(t) {
   await pool.query(
-    `INSERT INTO transactions
-       (clerk_user_id, transaction_id, account_id, amount, date, name, merchant_name, category, pending)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, false)
-     ON CONFLICT (transaction_id) DO UPDATE SET amount = $4, category = $8`,
-    [clerkUserId, t.transaction_id, t.account_id, t.amount, t.date, t.name, t.merchant_name, t.category || null]
+    `DELETE FROM transactions WHERE id = $1`,
+    [t.transaction_id]
+  );
+  await pool.query(
+    `INSERT INTO transactions (id, date, merchant, amount, account, plaid_category, status, currency)
+     VALUES ($1, $2, $3, $4, $5, $6, 'posted', 'USD')`,
+    [t.transaction_id, t.date, t.merchant_name || t.name, t.amount, t.account_id || 'imported', t.category || null]
   );
 }
 
-export async function deleteImportedTransactions(clerkUserId) {
+export async function deleteImportedTransactions() {
   const { rowCount } = await pool.query(
-    "DELETE FROM transactions WHERE clerk_user_id = $1 AND transaction_id LIKE 'simplifi_%'",
-    [clerkUserId]
+    "DELETE FROM transactions WHERE id LIKE 'simplifi_%'"
   );
   return rowCount;
 }
 
 // ── Categories ────────────────────────────────────────────────────────────────
-export async function seedCategories(clerkUserId, categories) {
+export async function seedCategories(categories) {
   const { rows: existing } = await pool.query(
-    "SELECT LOWER(name) AS name FROM categories WHERE clerk_user_id = $1",
-    [clerkUserId]
+    "SELECT LOWER(name) AS name FROM categories"
   );
   const existingNames = new Set(existing.map((r) => r.name));
   let created = 0;
   for (const { name, color } of categories) {
     if (!existingNames.has(name.toLowerCase())) {
       await pool.query(
-        "INSERT INTO categories (clerk_user_id, name, color) VALUES ($1, $2, $3)",
-        [clerkUserId, name, color]
+        "INSERT INTO categories (name, color) VALUES ($1, $2)",
+        [name, color]
       );
       created++;
     }
@@ -354,110 +338,97 @@ export async function seedCategories(clerkUserId, categories) {
   return created;
 }
 
-export async function getCategories(clerkUserId) {
+export async function getCategories() {
   const { rows } = await pool.query(
-    "SELECT id, name, color, created_at FROM categories WHERE clerk_user_id = $1 ORDER BY name",
-    [clerkUserId]
+    "SELECT id, name, color, created_at FROM categories ORDER BY name"
   );
   return rows;
 }
 
-export async function createCategory(clerkUserId, name, color = "#6366f1") {
+export async function createCategory(name, color = "#6366f1") {
   const { rows } = await pool.query(
-    `INSERT INTO categories (clerk_user_id, name, color) VALUES ($1, $2, $3) RETURNING *`,
-    [clerkUserId, name, color]
+    "INSERT INTO categories (name, color) VALUES ($1, $2) RETURNING *",
+    [name, color]
   );
   return rows[0];
 }
 
-export async function updateCategory(clerkUserId, id, name, color) {
+export async function updateCategory(id, name, color) {
   const { rows } = await pool.query(
-    `UPDATE categories SET name = $3, color = $4 WHERE id = $1 AND clerk_user_id = $2 RETURNING *`,
-    [id, clerkUserId, name, color]
+    "UPDATE categories SET name = $2, color = $3 WHERE id = $1 RETURNING *",
+    [id, name, color]
   );
   return rows[0] || null;
 }
 
-export async function deleteCategory(clerkUserId, id) {
-  const { rowCount } = await pool.query(
-    "DELETE FROM categories WHERE id = $1 AND clerk_user_id = $2",
-    [id, clerkUserId]
-  );
+export async function deleteCategory(id) {
+  const { rowCount } = await pool.query("DELETE FROM categories WHERE id = $1", [id]);
   return rowCount > 0;
 }
 
 // ── Assignments ───────────────────────────────────────────────────────────────
-export async function getAssignments(clerkUserId) {
+export async function getAssignments() {
   const { rows } = await pool.query(
-    "SELECT transaction_id, category_id FROM assignments WHERE clerk_user_id = $1",
-    [clerkUserId]
+    "SELECT transaction_id, category_id FROM assignments"
   );
   return rows;
 }
 
-export async function upsertAssignment(clerkUserId, transactionId, categoryId) {
+export async function upsertAssignment(transactionId, categoryId) {
   await pool.query(
-    `INSERT INTO assignments (transaction_id, clerk_user_id, category_id, updated_at)
-     VALUES ($1, $2, $3, NOW())
-     ON CONFLICT (transaction_id, clerk_user_id) DO UPDATE SET category_id = $3, updated_at = NOW()`,
-    [transactionId, clerkUserId, categoryId || null]
+    `INSERT INTO assignments (transaction_id, category_id, updated_at)
+     VALUES ($1, $2, NOW())
+     ON CONFLICT (transaction_id) DO UPDATE SET category_id = $2, updated_at = NOW()`,
+    [transactionId, categoryId || null]
   );
 }
 
 // ── Splits ────────────────────────────────────────────────────────────────────
-export async function getSplits(clerkUserId) {
+export async function getSplits() {
   const { rows } = await pool.query(
     `SELECT s.id, s.transaction_id, s.category_id, s.amount, s.note,
             c.name AS category_name, c.color AS category_color
      FROM splits s
      LEFT JOIN categories c ON s.category_id = c.id
-     WHERE s.clerk_user_id = $1
-     ORDER BY s.transaction_id, s.created_at`,
-    [clerkUserId]
+     ORDER BY s.transaction_id, s.created_at`
   );
   return rows;
 }
 
-export async function createSplit(clerkUserId, transactionId, categoryId, amount, note) {
+export async function createSplit(transactionId, categoryId, amount, note) {
   const { rows } = await pool.query(
-    `INSERT INTO splits (transaction_id, clerk_user_id, category_id, amount, note)
-     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-    [transactionId, clerkUserId, categoryId || null, amount, note || null]
+    "INSERT INTO splits (transaction_id, category_id, amount, note) VALUES ($1, $2, $3, $4) RETURNING *",
+    [transactionId, categoryId || null, amount, note || null]
   );
   return rows[0];
 }
 
-export async function deleteSplit(clerkUserId, splitId) {
-  const { rowCount } = await pool.query(
-    "DELETE FROM splits WHERE id = $1 AND clerk_user_id = $2",
-    [splitId, clerkUserId]
-  );
+export async function deleteSplit(splitId) {
+  const { rowCount } = await pool.query("DELETE FROM splits WHERE id = $1", [splitId]);
   return rowCount > 0;
 }
 
-export async function deleteSplitsForTransaction(clerkUserId, transactionId) {
+export async function deleteSplitsForTransaction(transactionId) {
   const { rowCount } = await pool.query(
-    "DELETE FROM splits WHERE transaction_id = $1 AND clerk_user_id = $2",
-    [transactionId, clerkUserId]
+    "DELETE FROM splits WHERE transaction_id = $1", [transactionId]
   );
   return rowCount;
 }
 
 // ── Merchant Overrides ────────────────────────────────────────────────────────
-export async function getMerchantOverrides(clerkUserId) {
+export async function getMerchantOverrides() {
   const { rows } = await pool.query(
-    "SELECT transaction_id, merchant_name FROM merchant_overrides WHERE clerk_user_id = $1",
-    [clerkUserId]
+    "SELECT transaction_id, merchant_name FROM merchant_overrides"
   );
   return rows;
 }
 
-export async function upsertMerchantOverride(clerkUserId, transactionId, merchantName) {
+export async function upsertMerchantOverride(transactionId, merchantName) {
   await pool.query(
-    `INSERT INTO merchant_overrides (transaction_id, clerk_user_id, merchant_name, updated_at)
-     VALUES ($1, $2, $3, NOW())
-     ON CONFLICT (transaction_id, clerk_user_id) DO UPDATE SET merchant_name = $3, updated_at = NOW()`,
-    [transactionId, clerkUserId, merchantName]
+    `INSERT INTO merchant_overrides (transaction_id, merchant_name, updated_at)
+     VALUES ($1, $2, NOW())
+     ON CONFLICT (transaction_id) DO UPDATE SET merchant_name = $2, updated_at = NOW()`,
+    [transactionId, merchantName]
   );
 }
 

@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { SignedIn, SignedOut, SignIn, useAuth } from "@clerk/clerk-react";
 import Sidebar from "./components/Sidebar.jsx";
 import Dashboard from "./views/Dashboard.jsx";
 import Accounts from "./views/Accounts.jsx";
@@ -14,34 +13,89 @@ import {
   fetchCategories, fetchAssignments, fetchMerchantOverrides,
 } from "./api.js";
 
-export default function App() {
-  return (
-    <>
-      <SignedOut>
-        <div style={loginStyles.container}>
-          <SignIn routing="hash" afterSignInUrl="/" afterSignUpUrl="/" />
+const ALLOWED_EMAIL = "jaredpk@gmail.com";
+
+export default function App({ supabase }) {
+  const [session, setSession] = useState(undefined); // undefined = loading
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+    });
+    return () => subscription.unsubscribe();
+  }, [supabase]);
+
+  if (session === undefined) {
+    return (
+      <div style={loginStyles.container}>
+        <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 13 }}>Loading…</span>
+      </div>
+    );
+  }
+
+  if (!session) {
+    return <LoginScreen supabase={supabase} />;
+  }
+
+  if (session.user.email !== ALLOWED_EMAIL) {
+    return (
+      <div style={loginStyles.container}>
+        <div style={{ textAlign: "center" }}>
+          <p style={{ color: "var(--muted)", marginBottom: 16 }}>Access restricted.</p>
+          <button onClick={() => supabase.auth.signOut()} style={loginStyles.signOutBtn}>Sign out</button>
         </div>
-      </SignedOut>
-      <SignedIn>
-        <AuthenticatedApp />
-      </SignedIn>
-    </>
+      </div>
+    );
+  }
+
+  return <AuthenticatedApp supabase={supabase} session={session} />;
+}
+
+function LoginScreen({ supabase }) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  async function handleGoogleLogin() {
+    setLoading(true);
+    setError(null);
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: { redirectTo: window.location.origin },
+    });
+    if (error) { setError(error.message); setLoading(false); }
+  }
+
+  return (
+    <div style={loginStyles.container}>
+      <div style={loginStyles.card}>
+        <div style={loginStyles.wordmark}>
+          fin<span style={{ color: "var(--accent)" }}>app</span>
+        </div>
+        <p style={loginStyles.subtitle}>Personal Finance Dashboard</p>
+        <button onClick={handleGoogleLogin} disabled={loading} style={loginStyles.googleBtn}>
+          {loading ? "Redirecting…" : "Sign in with Google"}
+        </button>
+        {error && <p style={loginStyles.error}>{error}</p>}
+      </div>
+    </div>
   );
 }
 
-function AuthenticatedApp() {
-  const { getToken } = useAuth();
+function AuthenticatedApp({ supabase, session }) {
   const [view, setView] = useState("dashboard");
   const [accounts, setAccounts] = useState([]);
   const [transactions, setTransactions] = useState([]);
   const [categories, setCategories] = useState([]);
-  const [assignments, setAssignments] = useState({}); // { transaction_id: category_id }
-  const [merchantOverrides, setMerchantOverrides] = useState({}); // { transaction_id: merchant_name }
+  const [assignments, setAssignments] = useState({});
+  const [merchantOverrides, setMerchantOverrides] = useState({});
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    setTokenGetter(getToken);
-  }, [getToken]);
+    setTokenGetter(async () => session.access_token);
+  }, [session]);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -87,6 +141,7 @@ function AuthenticatedApp() {
     setAssignments,
     setMerchantOverrides,
     reloadData: loadData,
+    user: session.user,
   };
 
   const VIEWS = {
@@ -107,6 +162,8 @@ function AuthenticatedApp() {
         setActive={setView}
         onConnect={openPlaid}
         connecting={connecting}
+        user={session.user}
+        onSignOut={() => supabase.auth.signOut()}
       />
       <main style={styles.main}>
         {loading && accounts.length === 0 && transactions.length === 0 ? (
@@ -130,11 +187,15 @@ const styles = {
 };
 
 const loginStyles = {
-  container: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    minHeight: "100vh",
-    background: "var(--bg)",
+  container: { display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", background: "var(--bg)" },
+  card: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 16, padding: "48px 40px", maxWidth: 400, width: "90%", textAlign: "center" },
+  wordmark: { fontSize: "2rem", fontWeight: 800, letterSpacing: "-0.04em", marginBottom: 8 },
+  subtitle: { color: "var(--muted)", fontSize: 14, marginBottom: 32 },
+  googleBtn: {
+    width: "100%", padding: "12px 24px", background: "var(--accent)", color: "#fff",
+    border: "none", borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer",
+    fontFamily: "var(--font-display)",
   },
+  error: { color: "#f87171", fontSize: 13, marginTop: 12 },
+  signOutBtn: { padding: "8px 16px", background: "var(--surface2)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 8, cursor: "pointer" },
 };
