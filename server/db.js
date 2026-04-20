@@ -367,6 +367,102 @@ export async function deleteRemovedTransactions(ids) {
   return rowCount;
 }
 
+// ── Category suggestion logic ─────────────────────────────────────────────────
+
+const PLAID_CATEGORY_MAP = {
+  TRANSFER_IN:                              "Transfer",
+  TRANSFER_OUT:                             "Transfer",
+  TRANSFER_DEBIT:                           "Transfer",
+  TRANSFER_CREDIT:                          "Transfer",
+  LOAN_PAYMENTS:                            "Credit Card Payment",
+  CREDIT_CARD_PAYMENT:                      "Credit Card Payment",
+  BANK_FEES:                                "Fees & Charges",
+  INCOME_WAGES:                             "Personal Income",
+  INCOME_OTHER_INCOME:                      "Personal Income",
+  FOOD_AND_DRINK_GROCERIES:                 "Groceries",
+  FOOD_AND_DRINK_RESTAURANTS:               "Dining Out",
+  FOOD_AND_DRINK_FAST_FOOD:                 "Dining Out",
+  TRANSPORTATION_GAS_STATION:               "Auto - Gas & Fuel",
+  TRANSPORTATION_PARKING:                   "Fees & Charges",
+  TRANSPORTATION_PUBLIC_TRANSIT:            "Auto - Other",
+  TRANSPORTATION_TAXIS:                     "Auto - Other",
+  RENT_AND_UTILITIES_GAS_AND_ELECTRICITY:   "Utilities",
+  RENT_AND_UTILITIES_INTERNET_AND_CABLE:    "Utilities",
+  RENT_AND_UTILITIES_TELEPHONE:             "Utilities - Phone",
+  RENT_AND_UTILITIES_RENT:                  "Home - Mortgage",
+  MEDICAL:                                  "Health",
+  PERSONAL_CARE:                            "Health",
+  ENTERTAINMENT:                            "Entertainment",
+  TRAVEL:                                   "Rec and Vacation",
+  GENERAL_MERCHANDISE:                      "Shopping",
+  SUBSCRIPTION:                             "Subscriptions",
+};
+
+const KEYWORD_RULES = [
+  { keywords: ["TRANSFER IN", "TRANSFER OUT"],                   category: "Transfer" },
+  { keywords: ["AUTOPAY", "AUTO PAY"],                           category: "Credit Card Payment" },
+  { keywords: ["PAYROLL", "DIRECT DEP", "DIRECT DEPOSIT", "SALARY", "PAYCHECK"], category: "Personal Income" },
+  { keywords: ["MORTGAGE"],                                      category: "Home - Mortgage" },
+  { keywords: ["NETFLIX", "HULU", "SPOTIFY", "DISNEY", "HBO", "APPLE.COM/BILL", "YOUTUBE PREMIUM", "PEACOCK", "PARAMOUNT"], category: "Subscriptions" },
+  { keywords: ["AMAZON"],                                        category: "Shopping" },
+  { keywords: ["COSTCO", "WALMART", "TARGET", "SMITH'S", "SMITHS", "KROGER", "WHOLE FOODS", "TRADER JOE", "WINCO", "HARMONS", "ALBERTSONS"], category: "Groceries" },
+  { keywords: ["DOORDASH", "GRUBHUB", "UBER EATS"],             category: "Dining Out" },
+  { keywords: ["UBER", "LYFT"],                                  category: "Auto - Other" },
+  { keywords: ["CHEVRON", "SHELL", "EXXON", "MAVERICK", "LOVES", "SINCLAIR", "PHILLIPS 66"], category: "Auto - Gas & Fuel" },
+  { keywords: ["DELTA", "UNITED AIRLINES", "SOUTHWEST", "AMERICAN AIR", "AIRBNB", "MARRIOTT", "HILTON", "HYATT"], category: "Rec and Vacation" },
+];
+
+function suggestCategoryForTx(tx) {
+  const searchStr = [tx.merchant, tx.name, tx.original_description]
+    .filter(Boolean)
+    .join(" ")
+    .toUpperCase();
+
+  // 1. Keyword rules first
+  for (const rule of KEYWORD_RULES) {
+    if (rule.keywords.some((k) => searchStr.includes(k))) return rule.category;
+  }
+
+  // 2. Plaid primary_category
+  if (tx.primary_category) {
+    const key = tx.primary_category.toUpperCase().replace(/\./g, "_");
+    if (PLAID_CATEGORY_MAP[key]) return PLAID_CATEGORY_MAP[key];
+    const prefix = Object.keys(PLAID_CATEGORY_MAP).find((k) => key.startsWith(k));
+    if (prefix) return PLAID_CATEGORY_MAP[prefix];
+  }
+
+  // 3. plaid_category fallback
+  if (tx.plaid_category) {
+    const detailed = tx.plaid_category.toUpperCase().replace(/\./g, "_");
+    const match = Object.keys(PLAID_CATEGORY_MAP).find((k) => detailed.includes(k));
+    if (match) return PLAID_CATEGORY_MAP[match];
+  }
+
+  return null;
+}
+
+// Populate suggested_category on transactions that don't have one yet
+export async function populateSuggestedCategories() {
+  const { rows: txns } = await pool.query(`
+    SELECT id, merchant, name, original_description, primary_category, plaid_category
+    FROM transactions
+    WHERE suggested_category IS NULL
+  `);
+
+  let updated = 0;
+  for (const tx of txns) {
+    const suggestion = suggestCategoryForTx(tx);
+    if (suggestion) {
+      await pool.query(
+        `UPDATE transactions SET suggested_category = $1 WHERE id = $2`,
+        [suggestion, tx.id]
+      );
+      updated++;
+    }
+  }
+  return updated;
+}
+
 // Auto-assign suggested_category to unassigned transactions using live categories table
 export async function applySuggestedCategories() {
   const { rows: cats } = await pool.query(
