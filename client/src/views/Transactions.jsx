@@ -36,6 +36,9 @@ export default function Transactions({
   const [minAmount, setMinAmount]   = useState("");
   const [maxAmount, setMaxAmount]   = useState("");
   const [sort, setSort]             = useState({ col: "date", dir: "desc" });
+  const [datePreset, setDatePreset] = useState("all");
+  const [dateFrom, setDateFrom]     = useState("");
+  const [dateTo, setDateTo]         = useState("");
   const [saving, setSaving]         = useState({});
   const [editingMerchant, setEditingMerchant] = useState(null);
   const [merchantDraft, setMerchantDraft]     = useState("");
@@ -83,6 +86,8 @@ export default function Transactions({
     const min = minAmount !== "" ? parseFloat(minAmount) : null;
     const max = maxAmount !== "" ? parseFloat(maxAmount) : null;
 
+    const { from: dFrom, to: dTo } = effectiveDateRange;
+
     let rows = transactions.filter((t) => {
       const name = getDisplayName(t).toLowerCase();
       const amt = Math.abs(toNum(t.amount) ?? 0);
@@ -92,6 +97,8 @@ export default function Transactions({
       if (acctFilter !== "all" && t.account_id !== acctFilter) return false;
       if (min !== null && amt < min) return false;
       if (max !== null && amt > max) return false;
+      if (dFrom && t.date < dFrom) return false;
+      if (dTo && t.date >= dTo) return false;
       return true;
     });
 
@@ -117,7 +124,7 @@ export default function Transactions({
     });
 
     return rows;
-  }, [transactions, search, catFilter, acctFilter, minAmount, maxAmount, sort, assignments, merchantOverrides, acctMap]);
+  }, [transactions, search, catFilter, acctFilter, minAmount, maxAmount, sort, assignments, merchantOverrides, acctMap, effectiveDateRange]);
 
   async function handleCategoryChange(txnId, categoryId) {
     setSaving((prev) => ({ ...prev, [txnId]: true }));
@@ -138,7 +145,36 @@ export default function Transactions({
     setEditingMerchant(null);
   }
 
-  const hasFilters = search || catFilter !== "all" || acctFilter !== "all" || minAmount || maxAmount;
+  // Compute effective from/to from preset or custom inputs
+  const effectiveDateRange = useMemo(() => {
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = now.getMonth(); // 0-based
+    if (datePreset === "this_month") {
+      const from = `${y}-${String(m + 1).padStart(2, "0")}-01`;
+      const nextMonth = new Date(y, m + 1, 1);
+      const to = `${nextMonth.getFullYear()}-${String(nextMonth.getMonth() + 1).padStart(2, "0")}-01`;
+      return { from, to };
+    }
+    if (datePreset === "last_month") {
+      const lastMonth = new Date(y, m - 1, 1);
+      const from = `${lastMonth.getFullYear()}-${String(lastMonth.getMonth() + 1).padStart(2, "0")}-01`;
+      const to = `${y}-${String(m + 1).padStart(2, "0")}-01`;
+      return { from, to };
+    }
+    if (datePreset === "this_year") {
+      return { from: `${y}-01-01`, to: `${y + 1}-01-01` };
+    }
+    if (datePreset === "last_year") {
+      return { from: `${y - 1}-01-01`, to: `${y}-01-01` };
+    }
+    if (datePreset === "custom") {
+      return { from: dateFrom || null, to: dateTo || null };
+    }
+    return { from: null, to: null };
+  }, [datePreset, dateFrom, dateTo]);
+
+  const hasFilters = search || catFilter !== "all" || acctFilter !== "all" || minAmount || maxAmount || datePreset !== "all";
 
   return (
     <div style={styles.wrap}>
@@ -188,6 +224,31 @@ export default function Transactions({
             <option key={id} value={id}>{acctMap[id] || id}</option>
           ))}
         </select>
+        <select value={datePreset} onChange={(e) => setDatePreset(e.target.value)} style={styles.select}>
+          <option value="all">All dates</option>
+          <option value="this_month">This month</option>
+          <option value="last_month">Last month</option>
+          <option value="this_year">This year</option>
+          <option value="last_year">Last year</option>
+          <option value="custom">Custom range…</option>
+        </select>
+        {datePreset === "custom" && (
+          <>
+            <input
+              type="date"
+              value={dateFrom}
+              onChange={(e) => setDateFrom(e.target.value)}
+              style={{ ...styles.input, maxWidth: 140 }}
+            />
+            <span style={{ color: "var(--muted)", fontSize: 12 }}>–</span>
+            <input
+              type="date"
+              value={dateTo}
+              onChange={(e) => setDateTo(e.target.value)}
+              style={{ ...styles.input, maxWidth: 140 }}
+            />
+          </>
+        )}
         <input
           type="number"
           placeholder="Min $"
@@ -205,7 +266,7 @@ export default function Transactions({
         {hasFilters && (
           <button
             style={styles.clearBtn}
-            onClick={() => { setSearch(""); setCatFilter("all"); setAcctFilter("all"); setMinAmount(""); setMaxAmount(""); }}
+            onClick={() => { setSearch(""); setCatFilter("all"); setAcctFilter("all"); setMinAmount(""); setMaxAmount(""); setDatePreset("all"); setDateFrom(""); setDateTo(""); }}
           >
             Clear
           </button>

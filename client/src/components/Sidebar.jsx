@@ -40,21 +40,6 @@ export default function Sidebar({ active, setActive, onConnect, connecting, user
 
       <div style={styles.spacer} />
 
-      <button
-        onClick={onConnect}
-        disabled={connecting}
-        style={styles.connectBtn}
-      >
-        {connecting ? (
-          <span className="pulse">Connecting…</span>
-        ) : (
-          <>
-            <span style={{ fontSize: 18 }}>+</span>
-            <span>Connect Bank</span>
-          </>
-        )}
-      </button>
-
       <div style={styles.userRow}>
         <div style={styles.userInfo}>
           {avatarUrl && (
@@ -106,25 +91,6 @@ const styles = {
   navIcon: { fontSize: 16, width: 20, textAlign: "center" },
   activeDot: { position: "absolute", right: 10, width: 6, height: 6, borderRadius: "50%", background: "var(--accent)" },
   spacer: { flex: 1 },
-  connectBtn: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-    width: "100%",
-    padding: "11px 0",
-    background: "var(--accent)",
-    color: "#fff",
-    border: "none",
-    borderRadius: "var(--radius)",
-    fontFamily: "var(--font-display)",
-    fontWeight: 700,
-    fontSize: 13,
-    letterSpacing: "0.02em",
-    cursor: "pointer",
-    transition: "opacity 0.15s",
-    marginBottom: 16,
-  },
   userRow: {
     display: "flex",
     alignItems: "center",
