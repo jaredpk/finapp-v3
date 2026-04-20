@@ -296,11 +296,12 @@ export async function upsertTransactions(transactions) {
     const merchant = t.merchant_name || t.name || t.merchant || null;
     const category = t.personal_finance_category?.primary || t.category?.[0] || t.plaid_category || null;
     const status = t.pending ? 'pending' : 'posted';
+    const pendingTxnId = t.pending_transaction_id || null;
     await pool.query(
-      `INSERT INTO transactions (id, date, merchant, amount, account, plaid_category, status, currency)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'USD')
-       ON CONFLICT (id) DO UPDATE SET amount = $4, status = $7`,
-      [txnId, t.date, merchant, t.amount, t.account_id || t.account || 'unknown', category, status]
+      `INSERT INTO transactions (id, date, merchant, amount, account, plaid_category, status, currency, pending_transaction_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'USD', $8)
+       ON CONFLICT (id) DO UPDATE SET amount = $4, status = $7, pending_transaction_id = $8`,
+      [txnId, t.date, merchant, t.amount, t.account_id || t.account || 'unknown', category, status, pendingTxnId]
     );
   }
 }

@@ -77,8 +77,21 @@ async function syncTransactions() {
     let hasMore = true;
     while (hasMore) {
       const r = await plaidClient.transactionsSync({ access_token: accessToken, cursor });
-      await upsertTransactions(r.data.added);
-      await upsertTransactions(r.data.modified);
+
+      // 1. Delete transactions Plaid says are removed
+      const removedIds = (r.data.removed || []).map((t) => t.transaction_id).filter(Boolean);
+      if (removedIds.length > 0) await deleteRemovedTransactions(removedIds);
+
+      // 2. Delete stale pending rows that have now posted (avoid duplicates)
+      const stalePendingIds = [...(r.data.added || []), ...(r.data.modified || [])]
+        .map((t) => t.pending_transaction_id)
+        .filter(Boolean);
+      if (stalePendingIds.length > 0) await deleteRemovedTransactions(stalePendingIds);
+
+      // 3. Upsert added and modified
+      await upsertTransactions(r.data.added || []);
+      await upsertTransactions(r.data.modified || []);
+
       cursor = r.data.next_cursor;
       hasMore = r.data.has_more;
     }
