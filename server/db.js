@@ -189,9 +189,10 @@ export async function initDb() {
     `);
   }
 
-  // Add updated_at to assignments if missing (created before this column existed)
+  // Add updated_at to tables if missing (created before this column existed)
   await pool.query(`
     ALTER TABLE assignments ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
+    ALTER TABLE merchant_overrides ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
   `);
 
   // Trigger to silently block duplicate transaction inserts from any source
@@ -631,8 +632,8 @@ export async function deduplicateTransactions() {
         ON CONFLICT (transaction_id) DO NOTHING
       `, [removeId, dupe.keep]);
       await pool.query(`
-        INSERT INTO merchant_overrides (transaction_id, merchant_name, updated_at)
-        SELECT $2, merchant_name, NOW() FROM merchant_overrides WHERE transaction_id = $1
+        INSERT INTO merchant_overrides (transaction_id, merchant_name)
+        SELECT $2, merchant_name FROM merchant_overrides WHERE transaction_id = $1
         ON CONFLICT (transaction_id) DO NOTHING
       `, [removeId, dupe.keep]);
     }
