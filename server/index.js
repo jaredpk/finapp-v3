@@ -28,6 +28,7 @@ import {
   getMerchantOverrides, upsertMerchantOverride,
   upsertImportedTransaction, deleteImportedTransactions,
 } from "./db.js";
+import pool from "./db.js";
 
 dotenv.config();
 
@@ -423,6 +424,30 @@ app.delete("/api/import", requireAuth, async (req, res) => {
 });
 
 // ── Deduplication ─────────────────────────────────────────────────────────────
+app.get("/api/deduplicate/debug", requireAuth, async (req, res) => {
+  const [sample, idStats, dupeRows] = await Promise.all([
+    pool.query(`SELECT id, date, amount::float, merchant, account, created_at FROM transactions ORDER BY date DESC, created_at DESC LIMIT 20`),
+    pool.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE id LIKE 'simplifi_%') AS simplifi,
+        COUNT(*) FILTER (WHERE id ~ '^[0-9a-f-]{36}$') AS uuid,
+        COUNT(*) FILTER (WHERE id NOT LIKE 'simplifi_%' AND id !~ '^[0-9a-f-]{36}$') AS plaid,
+        COUNT(*) AS total
+      FROM transactions`),
+    pool.query(`
+      SELECT date, ROUND(ABS(amount)::numeric,2) AS abs_amount, COUNT(*) AS cnt,
+             array_agg(id ORDER BY created_at) AS ids,
+             array_agg(merchant ORDER BY created_at) AS merchants,
+             array_agg(account ORDER BY created_at) AS accounts,
+             array_agg(amount::float ORDER BY created_at) AS amounts
+      FROM transactions
+      GROUP BY date, ROUND(ABS(amount)::numeric,2)
+      HAVING COUNT(*) > 1
+      ORDER BY date DESC LIMIT 20`),
+  ]);
+  res.json({ sample: sample.rows, idStats: idStats.rows[0], dupeRows: dupeRows.rows });
+});
+
 app.get("/api/deduplicate", requireAuth, async (req, res) => {
   const dupes = await findDuplicateTransactions();
   const toRemove = dupes.reduce((n, d) => n + d.remove.length, 0);
