@@ -139,6 +139,40 @@ export async function initDb() {
     END $$;
   `);
 
+  // Merge duplicate/redundant categories (idempotent)
+  const categoryMerges = [
+    // Clear hyphen-based duplicates
+    ['Car Insurance',      'Auto - Car Insurance'],
+    ['Car Payment',        'Auto - Payment'],
+    ['Gas & Fuel',         'Auto - Gas & Fuel'],
+    ['Home Improvement',   'Home - Improvement'],
+    ['Home Insurance',     'Insurance - Home'],
+    ['Kids Healthcare',    'Kids - Healthcare'],
+    ['Life Insurance',     'Insurance - Life'],
+    ['Mortgage',           'Home - Mortgage'],
+    ['Service & Parts',    'Auto - Service & Parts'],
+    // Additional drops
+    ['Auto & Transport',   'Auto - Other'],
+    ['Parking',            'Fees & Charges'],
+    ['Registration Fees',  'Fees & Charges'],
+  ];
+  for (const [from, to] of categoryMerges) {
+    await pool.query(`
+      DO $$ BEGIN
+        IF EXISTS (SELECT 1 FROM categories WHERE name = '${from}')
+        AND EXISTS (SELECT 1 FROM categories WHERE name = '${to}') THEN
+          UPDATE assignments
+            SET category_id = (SELECT id FROM categories WHERE name = '${to}')
+            WHERE category_id = (SELECT id FROM categories WHERE name = '${from}');
+          UPDATE splits
+            SET category_id = (SELECT id FROM categories WHERE name = '${to}')
+            WHERE category_id = (SELECT id FROM categories WHERE name = '${from}');
+          DELETE FROM categories WHERE name = '${from}';
+        END IF;
+      END $$;
+    `);
+  }
+
   // Migrate assignments: drop clerk_user_id and fix primary key if needed
   await pool.query(`
     DO $$ BEGIN
