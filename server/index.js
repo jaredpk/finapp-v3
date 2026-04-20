@@ -788,6 +788,8 @@ if (isProd) {
 }
 
 const PORT = process.env.PORT || 3001;
-initDb().then(() => {
+initDb().then(async () => {
+  const removed = await deduplicateTransactions();
+  if (removed > 0) console.log(`Startup dedup: removed ${removed} duplicate transactions`);
   app.listen(PORT, () => console.log(`FinApp server running on :${PORT}`));
 });

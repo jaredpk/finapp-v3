@@ -189,6 +189,36 @@ export async function initDb() {
     `);
   }
 
+  // Trigger to silently block duplicate transaction inserts from any source
+  await pool.query(`
+    CREATE OR REPLACE FUNCTION prevent_duplicate_transactions()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM transactions
+        WHERE date = NEW.date
+          AND ROUND(ABS(amount)::numeric, 2) = ROUND(ABS(NEW.amount)::numeric, 2)
+          AND account = NEW.account
+          AND id != NEW.id
+      ) THEN
+        RETURN NULL;
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+  `);
+  await pool.query(`
+    DO $$ BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger WHERE tgname = 'check_duplicate_transactions'
+      ) THEN
+        CREATE TRIGGER check_duplicate_transactions
+        BEFORE INSERT ON transactions
+        FOR EACH ROW EXECUTE FUNCTION prevent_duplicate_transactions();
+      END IF;
+    END $$;
+  `);
+
   // Migrate assignments: drop clerk_user_id and fix primary key if needed
   await pool.query(`
     DO $$ BEGIN
