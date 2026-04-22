@@ -197,11 +197,17 @@ export default function Settings({ reloadData, user }) {
     setCsvImporting(true);
     try {
       const res = await importCsvTransactions(csvText);
-      setCsvImportResult(`Imported ${res.imported} transactions.`);
-      setCsvText(null);
-      setCsvRowCount(0);
-      if (csvFileRef.current) csvFileRef.current.value = "";
-      if (reloadData) reloadData();
+      if (res.error) {
+        setCsvImportResult(`Error: ${res.error}`);
+      } else {
+        setCsvImportResult(`Imported ${res.imported} transactions.`);
+        setCsvText(null);
+        setCsvRowCount(0);
+        if (csvFileRef.current) csvFileRef.current.value = "";
+        if (reloadData) reloadData();
+      }
+    } catch (err) {
+      setCsvImportResult(`Error: ${err.message}`);
     } finally {
       setCsvImporting(false);
     }
@@ -330,7 +336,9 @@ export default function Settings({ reloadData, user }) {
         )}
 
         {csvImportResult && (
-          <p style={styles.importSuccess}>{csvImportResult}</p>
+          <p style={csvImportResult.startsWith("Error") ? styles.importError : styles.importSuccess}>
+            {csvImportResult}
+          </p>
         )}
       </section>
 
@@ -564,6 +572,7 @@ const styles = {
   previewCount: { fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-mono)", margin: "8px 0 12px" },
   checkLabel: { display: "flex", alignItems: "center", fontSize: 13, color: "var(--text)", cursor: "pointer" },
   importSuccess: { marginTop: 12, fontSize: 13, color: "var(--green, #22c55e)", fontFamily: "var(--font-mono)" },
+  importError:   { marginTop: 12, fontSize: 13, color: "var(--red, #ef4444)",   fontFamily: "var(--font-mono)" },
   dupeBox: { marginTop: 16, padding: 16, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8 },
   dupeTable: { borderRadius: 6, overflow: "hidden", border: "1px solid var(--border)" },
   dupeHeader: {

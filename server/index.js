@@ -426,13 +426,18 @@ app.delete("/api/import", requireAuth, async (req, res) => {
 
 // ── CSV Import (Perplexity 90-day export) ─────────────────────────────────────
 app.post("/api/import-csv", requireApiKeyOrAuth, async (req, res) => {
-  const { csv } = req.body;
-  if (!csv || typeof csv !== "string") return res.status(400).json({ error: "csv string required" });
-  const rows = parseCsvText(csv);
-  for (const row of rows) {
-    await upsertCsvTransaction(row);
+  try {
+    const { csv } = req.body;
+    if (!csv || typeof csv !== "string") return res.status(400).json({ error: "csv string required" });
+    const rows = parseCsvText(csv);
+    for (const row of rows) {
+      await upsertCsvTransaction(row);
+    }
+    res.json({ imported: rows.length });
+  } catch (err) {
+    console.error("CSV import error:", err);
+    res.status(500).json({ error: err.message });
   }
-  res.json({ imported: rows.length });
 });
 
 // ── Deduplication ─────────────────────────────────────────────────────────────
