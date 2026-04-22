@@ -1,5 +1,5 @@
 import pg from "pg";
-import { randomBytes } from "crypto";
+import { randomBytes, createHash } from "crypto";
 
 const { Pool } = pg;
 
@@ -195,17 +195,22 @@ export async function initDb() {
     ALTER TABLE merchant_overrides ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
   `);
 
-  // Trigger to silently block duplicate transaction inserts from any source
+  // Trigger to silently block duplicate transaction inserts from any source.
+  // csv_ rows are deduplicated by occurrence-index hash before insert, so skip the check for them.
   await pool.query(`
     CREATE OR REPLACE FUNCTION prevent_duplicate_transactions()
     RETURNS TRIGGER AS $$
     BEGIN
+      IF NEW.id LIKE 'csv_%' THEN
+        RETURN NEW;
+      END IF;
       IF EXISTS (
         SELECT 1 FROM transactions
         WHERE date = NEW.date
           AND ROUND(ABS(amount)::numeric, 2) = ROUND(ABS(NEW.amount)::numeric, 2)
           AND account = NEW.account
           AND id != NEW.id
+          AND id NOT LIKE 'csv_%'
       ) THEN
         RETURN NULL;
       END IF;
@@ -573,7 +578,48 @@ export async function deleteOAuthCode(code) {
   await pool.query("DELETE FROM oauth_codes WHERE code = $1", [code]);
 }
 
-// ── CSV Import ────────────────────────────────────────────────────────────────
+// ── CSV Import (Perplexity export format) ─────────────────────────────────────
+// Parses the CSV text exported by Perplexity and returns rows with stable hash IDs.
+// Identical rows on the same day get an occurrence index so two $1.50 hotdogs
+// on the same day produce two distinct hashes rather than collapsing into one.
+export function parseCsvText(csvText) {
+  const lines = csvText.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+  const dataLines = lines.slice(1); // skip header row
+
+  const counts = new Map();
+  const rows = [];
+
+  for (const line of dataLines) {
+    const parts = line.split(',');
+    if (parts.length < 5) continue;
+    const [dateRaw, merchantRaw, categoryRaw, amountRaw, ...accountParts] = parts;
+    const date = dateRaw.trim();
+    const merchant = merchantRaw.trim() || null;
+    const category = categoryRaw.trim() || null;
+    const amount = parseFloat(amountRaw.trim());
+    const account = accountParts.join(',').trim();
+    if (!date || isNaN(amount)) continue;
+
+    const key = `${date}|${merchant}|${category}|${amount}|${account}`;
+    const idx = counts.get(key) ?? 0;
+    counts.set(key, idx + 1);
+
+    const id = 'csv_' + createHash('sha256').update(`${key}|${idx}`).digest('hex').slice(0, 16);
+    rows.push({ id, date, merchant, category, amount, account });
+  }
+
+  return rows;
+}
+
+export async function upsertCsvTransaction(t) {
+  await pool.query(
+    `INSERT INTO transactions (id, date, merchant, amount, account, plaid_category, status, currency)
+     VALUES ($1, $2, $3, $4, $5, $6, 'posted', 'USD')
+     ON CONFLICT (id) DO UPDATE SET merchant = $3, amount = $4, plaid_category = $6`,
+    [t.id, t.date, t.merchant, t.amount, t.account, t.category]
+  );
+}
+
 export async function upsertImportedTransaction(t) {
   await pool.query(
     `DELETE FROM transactions WHERE id = $1`,
@@ -648,7 +694,7 @@ export async function deduplicateTransactions() {
 
 export async function deleteImportedTransactions() {
   const { rowCount } = await pool.query(
-    "DELETE FROM transactions WHERE id LIKE 'simplifi_%'"
+    "DELETE FROM transactions WHERE id LIKE 'simplifi_%' OR id LIKE 'csv_%'"
   );
   return rowCount;
 }

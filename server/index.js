@@ -26,6 +26,7 @@ import {
   getAssignments, upsertAssignment,
   getSplits, createSplit, deleteSplit, deleteSplitsForTransaction,
   getMerchantOverrides, upsertMerchantOverride,
+  parseCsvText, upsertCsvTransaction,
   upsertImportedTransaction, deleteImportedTransactions,
 } from "./db.js";
 import pool from "./db.js";
@@ -423,6 +424,17 @@ app.delete("/api/import", requireAuth, async (req, res) => {
   res.json({ deleted });
 });
 
+// ── CSV Import (Perplexity 90-day export) ─────────────────────────────────────
+app.post("/api/import-csv", requireApiKeyOrAuth, async (req, res) => {
+  const { csv } = req.body;
+  if (!csv || typeof csv !== "string") return res.status(400).json({ error: "csv string required" });
+  const rows = parseCsvText(csv);
+  for (const row of rows) {
+    await upsertCsvTransaction(row);
+  }
+  res.json({ imported: rows.length });
+});
+
 // ── Deduplication ─────────────────────────────────────────────────────────────
 app.get("/api/deduplicate/debug", requireAuth, async (req, res) => {
   const [sample, idStats, dupeRows] = await Promise.all([
@@ -719,6 +731,16 @@ function buildMcpServer() {
       await createSplit(transaction_id, category_id, amount, note);
     }
     return { content: [{ type: "text", text: `Created ${splitRows.length} splits.` }] };
+  });
+
+  server.tool("import_csv", "Import transactions from a Perplexity CSV export. Each call is safe to repeat — identical rows get the same hash and are upserted without duplication. Same-day identical transactions (e.g. two $1.50 charges at the same merchant) are preserved via occurrence-index hashing.", {
+    csv: z.string().describe("Full text of the Perplexity CSV export (including the # Date Range header line)"),
+  }, async ({ csv }) => {
+    const rows = parseCsvText(csv);
+    for (const row of rows) {
+      await upsertCsvTransaction(row);
+    }
+    return { content: [{ type: "text", text: `Imported ${rows.length} transactions. Re-running with the same CSV is safe — duplicates are ignored.` }] };
   });
 
   return server;
