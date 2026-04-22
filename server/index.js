@@ -159,33 +159,6 @@ app.get("/api/config", (_, res) => res.json({
 // ── Health ────────────────────────────────────────────────────────────────────
 app.get("/api/health", (_, res) => res.json({ ok: true }));
 
-// ── Temporary: diagnose transactions table schema (no auth — remove after fix) ─
-app.get("/api/debug/schema", async (req, res) => {
-  try {
-    const [constraints, columns, statuses] = await Promise.all([
-      pool.query(`
-        SELECT conname, pg_get_constraintdef(c.oid) AS definition
-        FROM pg_constraint c JOIN pg_class t ON c.conrelid = t.oid
-        WHERE t.relname = 'transactions'
-        ORDER BY conname
-      `),
-      pool.query(`
-        SELECT column_name, data_type, is_nullable, column_default
-        FROM information_schema.columns
-        WHERE table_name = 'transactions'
-        ORDER BY ordinal_position
-      `),
-      pool.query(`SELECT DISTINCT status, COUNT(*) FROM transactions GROUP BY status`),
-    ]);
-    res.json({
-      constraints: constraints.rows,
-      columns: columns.rows,
-      existingStatuses: statuses.rows,
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
 
 // ── Plaid Link page ───────────────────────────────────────────────────────────
 app.get("/link", async (req, res) => {
