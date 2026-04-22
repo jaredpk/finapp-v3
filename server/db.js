@@ -336,7 +336,7 @@ export async function upsertTransactions(transactions) {
     const txnId = t.transaction_id || t.id;
     const merchant = t.merchant_name || t.name || t.merchant || null;
     const category = t.personal_finance_category?.primary || t.category?.[0] || t.plaid_category || null;
-    const status = t.pending ? 'pending' : 'posted';
+    const status = t.pending ? 'pending' : 'cleared';
     const pendingTxnId = t.pending_transaction_id || null;
     await pool.query(
       `INSERT INTO transactions (id, date, merchant, amount, account, plaid_category, status, currency, pending_transaction_id)
@@ -614,7 +614,7 @@ export function parseCsvText(csvText) {
 export async function upsertCsvTransaction(t) {
   await pool.query(
     `INSERT INTO transactions (id, date, merchant, amount, account, plaid_category, status, currency)
-     VALUES ($1, $2, $3, $4, $5, $6, 'posted', 'USD')
+     VALUES ($1, $2, $3, $4, $5, $6, 'cleared', 'USD')
      ON CONFLICT (id) DO UPDATE SET merchant = $3, amount = $4, plaid_category = $6`,
     [t.id, t.date, t.merchant, t.amount, t.account, t.category]
   );
@@ -627,7 +627,7 @@ export async function upsertImportedTransaction(t) {
   );
   await pool.query(
     `INSERT INTO transactions (id, date, merchant, amount, account, plaid_category, status, currency)
-     VALUES ($1, $2, $3, $4, $5, $6, 'posted', 'USD')`,
+     VALUES ($1, $2, $3, $4, $5, $6, 'cleared', 'USD')`,
     [t.transaction_id, t.date, t.merchant_name || t.name, t.amount, t.account_id || 'imported', t.category || null]
   );
 }
