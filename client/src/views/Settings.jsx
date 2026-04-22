@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { getApiKey, generateApiKey, importTransactions, clearImportedTransactions, previewDuplicates, runDeduplication, debugDuplicates } from "../api.js";
+import { getApiKey, generateApiKey, importCsvTransactions, importTransactions, clearImportedTransactions, previewDuplicates, runDeduplication, debugDuplicates } from "../api.js";
 
 // ── Simplifi CSV parser ───────────────────────────────────────────────────────
 const MONTHS = { Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12 };
@@ -59,13 +59,20 @@ export default function Settings({ reloadData, user }) {
   const [generating, setGenerating] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  // CSV import state
+  // CSV import state (Simplifi)
   const fileRef = useRef(null);
   const [parsed, setParsed] = useState(null);       // parsed rows
   const [skipExcluded, setSkipExcluded] = useState(true);
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState(null); // "Imported 47 transactions"
   const [clearing, setClearing] = useState(false);
+
+  // Perplexity CSV import state
+  const csvFileRef = useRef(null);
+  const [csvText, setCsvText] = useState(null);
+  const [csvRowCount, setCsvRowCount] = useState(0);
+  const [csvImporting, setCsvImporting] = useState(false);
+  const [csvImportResult, setCsvImportResult] = useState(null);
 
   // Dedup state
   const [deduping, setDeduping]           = useState(false);
@@ -168,6 +175,38 @@ export default function Settings({ reloadData, user }) {
     }
   }
 
+  function handleCsvFileChange(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const text = ev.target.result;
+      const count = text.split('\n')
+        .map(l => l.trim())
+        .filter(l => l && !l.startsWith('#'))
+        .slice(1).length; // skip header row
+      setCsvText(text);
+      setCsvRowCount(count);
+      setCsvImportResult(null);
+    };
+    reader.readAsText(file);
+  }
+
+  async function handleCsvImport() {
+    if (!csvText) return;
+    setCsvImporting(true);
+    try {
+      const res = await importCsvTransactions(csvText);
+      setCsvImportResult(`Imported ${res.imported} transactions.`);
+      setCsvText(null);
+      setCsvRowCount(0);
+      if (csvFileRef.current) csvFileRef.current.value = "";
+      if (reloadData) reloadData();
+    } finally {
+      setCsvImporting(false);
+    }
+  }
+
   const sseUrl = apiKey ? `${window.location.origin}/sse?key=${apiKey}` : null;
 
   const mcpConfig = apiKey ? JSON.stringify({
@@ -261,6 +300,40 @@ export default function Settings({ reloadData, user }) {
           </div>
         </section>
       )}
+      {/* Perplexity CSV Import */}
+      <section style={styles.card}>
+        <h2 style={styles.cardTitle}>Import Transactions (Perplexity Export)</h2>
+        <p style={styles.description}>
+          Export your transactions from Perplexity as a CSV and upload it here. Re-uploading the same file is safe — identical transactions are skipped automatically.
+        </p>
+
+        <input
+          ref={csvFileRef}
+          type="file"
+          accept=".csv"
+          style={{ display: "none" }}
+          onChange={handleCsvFileChange}
+        />
+        <button style={styles.generateBtn} onClick={() => csvFileRef.current?.click()}>
+          Select CSV File
+        </button>
+
+        {csvText && (
+          <div style={styles.importPreview}>
+            <p style={styles.previewText}>
+              Found <strong>{csvRowCount}</strong> transactions ready to import.
+            </p>
+            <button style={styles.generateBtn} onClick={handleCsvImport} disabled={csvImporting}>
+              {csvImporting ? "Importing…" : "Import Now"}
+            </button>
+          </div>
+        )}
+
+        {csvImportResult && (
+          <p style={styles.importSuccess}>{csvImportResult}</p>
+        )}
+      </section>
+
       {/* CSV Import */}
       <section style={styles.card}>
         <h2 style={styles.cardTitle}>Import from Simplifi</h2>

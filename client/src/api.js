@@ -128,6 +128,15 @@ export async function saveMerchantOverride(transaction_id, merchant_name) {
 }
 
 // ── CSV Import ────────────────────────────────────────────────────────────────
+export async function importCsvTransactions(csvText) {
+  const r = await fetch(`${BASE}/import-csv`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ csv: csvText }),
+  });
+  return r.json();
+}
+
 export async function importTransactions(transactions) {
   const r = await fetch(`${BASE}/import`, {
     method: "POST",
