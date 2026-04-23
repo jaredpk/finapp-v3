@@ -62,7 +62,7 @@ export default function Transactions({
   }, [categories]);
 
   const getDisplayName = (t) =>
-    merchantOverrides?.[t.transaction_id] || t.merchant_name || t.name || "Unknown";
+    merchantOverrides?.[t.transaction_id] || t.merchant_name || t.name || t.suggested_category || "Unknown";
 
   const stats = useMemo(() => {
     const spend = transactions.filter((t) => toNum(t.amount) > 0).reduce((s, t) => s + toNum(t.amount), 0);
