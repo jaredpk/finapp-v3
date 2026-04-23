@@ -612,12 +612,21 @@ export function parseCsvText(csvText) {
 }
 
 export async function upsertCsvTransaction(t) {
-  await pool.query(
+  // Skip if a Plaid-native row already covers this date+amount; avoids needing manual dedup after import.
+  const { rowCount } = await pool.query(
     `INSERT INTO transactions (id, date, merchant, amount, account, plaid_category, status, currency)
-     VALUES ($1, $2, $3, $4, $5, $6, 'reviewed', 'USD')
+     SELECT $1, $2, $3, $4, $5, $6, 'reviewed', 'USD'
+     WHERE NOT EXISTS (
+       SELECT 1 FROM transactions
+       WHERE date = $2::date
+         AND ROUND(ABS(amount)::numeric, 2) = ROUND(ABS($4::numeric), 2)
+         AND id NOT LIKE 'csv_%'
+         AND id NOT LIKE 'simplifi_%'
+     )
      ON CONFLICT (id) DO UPDATE SET merchant = $3, amount = $4, plaid_category = $6`,
     [t.id, t.date, t.merchant, t.amount, t.account, t.category]
   );
+  return rowCount > 0;
 }
 
 export async function upsertImportedTransaction(t) {

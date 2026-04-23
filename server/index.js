@@ -432,10 +432,11 @@ app.post("/api/import-csv", requireApiKeyOrAuth, async (req, res) => {
     const { csv } = req.body;
     if (!csv || typeof csv !== "string") return res.status(400).json({ error: "csv string required" });
     const rows = parseCsvText(csv);
+    let imported = 0;
     for (const row of rows) {
-      await upsertCsvTransaction(row);
+      if (await upsertCsvTransaction(row)) imported++;
     }
-    res.json({ imported: rows.length });
+    res.json({ imported, skipped: rows.length - imported });
   } catch (err) {
     console.error("CSV import error:", err);
     res.status(500).json({ error: err.message });
@@ -741,14 +742,19 @@ function buildMcpServer() {
     return { content: [{ type: "text", text: `Created ${splitRows.length} splits.` }] };
   });
 
-  server.tool("import_csv", "Import transactions from a Perplexity CSV export. Each call is safe to repeat — identical rows get the same hash and are upserted without duplication. Same-day identical transactions (e.g. two $1.50 charges at the same merchant) are preserved via occurrence-index hashing.", {
+  server.tool("import_csv", "Import transactions from a Perplexity CSV export. Safe to re-run — identical rows produce the same hash ID and are upserted without duplication. Rows already covered by a Plaid-synced transaction (same date + amount) are silently skipped, so no manual dedup is needed afterward.", {
     csv: z.string().describe("Full text of the Perplexity CSV export (including the # Date Range header line)"),
   }, async ({ csv }) => {
     const rows = parseCsvText(csv);
+    let imported = 0;
     for (const row of rows) {
-      await upsertCsvTransaction(row);
+      if (await upsertCsvTransaction(row)) imported++;
     }
-    return { content: [{ type: "text", text: `Imported ${rows.length} transactions. Re-running with the same CSV is safe — duplicates are ignored.` }] };
+    const skipped = rows.length - imported;
+    const msg = skipped > 0
+      ? `Imported ${imported} transactions (skipped ${skipped} already covered by Plaid). Re-running with the same CSV is safe.`
+      : `Imported ${imported} transactions. Re-running with the same CSV is safe.`;
+    return { content: [{ type: "text", text: msg }] };
   });
 
   return server;
