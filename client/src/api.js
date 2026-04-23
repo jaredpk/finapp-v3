@@ -165,10 +165,11 @@ export async function debugDuplicates() {
   return r.json();
 }
 
-export async function runDeduplication() {
+export async function runDeduplication(groups) {
   const r = await fetch(`${BASE}/deduplicate`, {
     method: "POST",
     headers: await authHeaders(),
+    body: JSON.stringify(groups ? { groups } : {}),
   });
   return r.json();
 }

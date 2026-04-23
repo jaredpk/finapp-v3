@@ -79,6 +79,7 @@ export default function Settings({ reloadData, user }) {
   const [dupePreview, setDupePreview]     = useState(null); // { groups, toRemove, preview }
   const [dupeResult, setDupeResult]       = useState(null);
   const [previewing, setPreviewing]       = useState(false);
+  const [checkedDupes, setCheckedDupes]   = useState(new Set()); // indices of checked groups
   const [debugData, setDebugData]         = useState(null);
   const [debugging, setDebugging]         = useState(false);
 
@@ -158,15 +159,25 @@ export default function Settings({ reloadData, user }) {
     try {
       const res = await previewDuplicates();
       setDupePreview(res);
+      setCheckedDupes(new Set((res.preview || []).map((_, i) => i)));
     } finally {
       setPreviewing(false);
     }
   }
 
+  function toggleDupe(i) {
+    setCheckedDupes(prev => {
+      const next = new Set(prev);
+      next.has(i) ? next.delete(i) : next.add(i);
+      return next;
+    });
+  }
+
   async function handleDedupe() {
     setDeduping(true);
     try {
-      const res = await runDeduplication();
+      const selected = (dupePreview.preview || []).filter((_, i) => checkedDupes.has(i));
+      const res = await runDeduplication(selected);
       setDupeResult(`Removed ${res.deleted} duplicate transaction${res.deleted !== 1 ? "s" : ""}.`);
       setDupePreview(null);
       if (reloadData) reloadData();
@@ -419,11 +430,17 @@ export default function Settings({ reloadData, user }) {
                   Found <strong>{dupePreview.toRemove}</strong> duplicate row{dupePreview.toRemove !== 1 ? "s" : ""} across <strong>{dupePreview.groups}</strong> transaction group{dupePreview.groups !== 1 ? "s" : ""}.
                 </p>
                 <div style={styles.dupeTable}>
-                  <div style={styles.dupeHeader}>
-                    <span>Date</span><span>Amount</span><span>Keep</span><span>Remove</span>
+                  <div style={{ ...styles.dupeHeader, gridTemplateColumns: "28px 90px 90px 1fr 1fr" }}>
+                    <span></span><span>Date</span><span>Amount</span><span>Keep</span><span>Remove</span>
                   </div>
                   {(dupePreview.preview || []).map((d, i) => (
-                    <div key={i} style={styles.dupeRow}>
+                    <div key={i} style={{ ...styles.dupeRow, gridTemplateColumns: "28px 90px 90px 1fr 1fr", opacity: checkedDupes.has(i) ? 1 : 0.4 }}>
+                      <input
+                        type="checkbox"
+                        checked={checkedDupes.has(i)}
+                        onChange={() => toggleDupe(i)}
+                        style={{ cursor: "pointer" }}
+                      />
                       <span style={styles.dupeCell}>{d.date}</span>
                       <span style={styles.dupeCell}>${d.amount.toFixed(2)}</span>
                       <span style={{ ...styles.dupeCell, color: "var(--green, #22c55e)", fontSize: 11 }}>{d.keep}</span>
@@ -431,8 +448,12 @@ export default function Settings({ reloadData, user }) {
                     </div>
                   ))}
                 </div>
-                <button style={{ ...styles.generateBtn, marginTop: 14 }} onClick={handleDedupe} disabled={deduping}>
-                  {deduping ? "Removing…" : `Remove ${dupePreview.toRemove} Duplicate${dupePreview.toRemove !== 1 ? "s" : ""}`}
+                <button
+                  style={{ ...styles.generateBtn, marginTop: 14 }}
+                  onClick={handleDedupe}
+                  disabled={deduping || checkedDupes.size === 0}
+                >
+                  {deduping ? "Removing…" : `Remove ${checkedDupes.size} of ${dupePreview.groups} Duplicate${checkedDupes.size !== 1 ? "s" : ""}`}
                 </button>
               </>
             )}

@@ -699,8 +699,9 @@ export async function findDuplicateTransactions() {
   return [...sameDateResults, ...crossDateResults];
 }
 
-export async function deduplicateTransactions() {
-  const dupes = await findDuplicateTransactions();
+// selectedGroups: optional array of { keep, remove[] } — if omitted, removes all found duplicates
+export async function deduplicateTransactions(selectedGroups) {
+  const dupes = selectedGroups ?? await findDuplicateTransactions();
   if (dupes.length === 0) return 0;
 
   const toRemove = dupes.flatMap(d => d.remove);

@@ -473,7 +473,8 @@ app.get("/api/deduplicate", requireAuth, async (req, res) => {
 });
 
 app.post("/api/deduplicate", requireAuth, async (req, res) => {
-  const deleted = await deduplicateTransactions();
+  const { groups } = req.body || {};
+  const deleted = await deduplicateTransactions(groups ?? undefined);
   res.json({ deleted });
 });
 
