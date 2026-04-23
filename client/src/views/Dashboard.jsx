@@ -88,8 +88,41 @@ export default function Dashboard({ accounts, transactions, categories, assignme
         <StatCard label="Transactions" value={transactions.length || "—"} sub="last 90 days" delay={0.18} />
       </div>
 
+      {/* Accounts */}
+      {accounts.length > 0 && (
+        <div className="fade-up-2" style={styles.accountsCard}>
+          <p style={styles.chartTitle}>Accounts</p>
+          <div style={styles.accountList}>
+            {accounts.map((a) => {
+              const isLiability = a.type === "credit" || a.type === "loan";
+              const bal = a.balances?.current ?? null;
+              const avail = a.balances?.available ?? null;
+              const showAvail = avail != null && avail !== bal;
+              return (
+                <div key={a.account_id} style={styles.accountRow}>
+                  <div style={styles.accountLeft}>
+                    <span style={styles.accountName}>{a.name || a.official_name}</span>
+                    <span style={styles.accountSub}>
+                      {a.institutionName && `${a.institutionName} · `}{a.subtype || a.type}
+                    </span>
+                  </div>
+                  <div style={styles.accountRight}>
+                    <span style={{ ...styles.accountBal, color: isLiability ? "var(--red, #ef4444)" : "var(--text)" }}>
+                      {bal != null ? fmt(bal) : "—"}
+                    </span>
+                    {showAvail && (
+                      <span style={styles.accountAvail}>{fmt(avail)} avail</span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Chart */}
-      <div className="fade-up-2" style={styles.chartCard}>
+      <div className="fade-up-3" style={styles.chartCard}>
         <p style={styles.chartTitle}>Daily Spending — Last 30 Days</p>
         {transactions.length === 0 ? (
           <Empty />
@@ -117,7 +150,7 @@ export default function Dashboard({ accounts, transactions, categories, assignme
       </div>
 
       {/* Categories */}
-      <div className="fade-up-3" style={styles.catCard}>
+      <div className="fade-up-4" style={styles.catCard}>
         <p style={styles.chartTitle}>Top Spending Categories</p>
         {spendByCategory.length === 0 ? <Empty /> : (
           <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 8 }}>
@@ -147,6 +180,18 @@ const styles = {
   wrap: { padding: "36px 40px", maxWidth: 960 },
   heading: { fontSize: 32, fontWeight: 800, letterSpacing: "-0.04em", marginBottom: 28, color: "var(--text)" },
   stats: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 14, marginBottom: 24 },
+  accountsCard: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", padding: "22px 24px", marginBottom: 16 },
+  accountList: { display: "flex", flexDirection: "column" },
+  accountRow: {
+    display: "flex", justifyContent: "space-between", alignItems: "center",
+    padding: "11px 0", borderBottom: "1px solid var(--border)",
+  },
+  accountLeft: { display: "flex", flexDirection: "column", gap: 3 },
+  accountName: { fontSize: 13, fontWeight: 600, color: "var(--text)" },
+  accountSub: { fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", textTransform: "capitalize" },
+  accountRight: { display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 },
+  accountBal: { fontSize: 14, fontWeight: 700, fontFamily: "var(--font-mono)" },
+  accountAvail: { fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)" },
   chartCard: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", padding: "22px 24px", marginBottom: 16 },
   catCard: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", padding: "22px 24px" },
   chartTitle: { fontSize: 11, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--muted)", fontFamily: "var(--font-mono)", marginBottom: 16 },
