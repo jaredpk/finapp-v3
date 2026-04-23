@@ -633,9 +633,8 @@ export async function upsertImportedTransaction(t) {
 }
 
 export async function findDuplicateTransactions() {
-  // Group by (date, absolute amount rounded to 2dp, merchant) — same-day same-amount same-merchant = likely duplicate
-  // Falls back to (date, amount) grouping when merchants differ (e.g. Simplifi vs Plaid naming)
-  const { rows } = await pool.query(`
+  // Same-date duplicates: group by (date, amount)
+  const { rows: sameDateRows } = await pool.query(`
     SELECT
       date,
       ROUND(ABS(amount)::numeric, 2) AS abs_amount,
@@ -653,7 +652,29 @@ export async function findDuplicateTransactions() {
     HAVING COUNT(*) > 1
     ORDER BY date DESC
   `);
-  return rows.map(r => ({
+
+  // Cross-date duplicates: simplifi vs non-simplifi, same merchant+amount, dates 1 day apart.
+  // Targets the specific case where Simplifi recorded the pending date and Plaid recorded the posted date.
+  const { rows: crossDateRows } = await pool.query(`
+    SELECT
+      t2.id AS keep_id,
+      t1.id AS remove_id,
+      t2.date AS date,
+      ROUND(ABS(t1.amount)::numeric, 2) AS abs_amount,
+      t2.merchant AS keep_merchant,
+      t1.merchant AS remove_merchant
+    FROM transactions t1
+    JOIN transactions t2
+      ON t1.id LIKE 'simplifi_%'
+      AND t2.id NOT LIKE 'simplifi_%'
+      AND ROUND(ABS(t1.amount)::numeric, 2) = ROUND(ABS(t2.amount)::numeric, 2)
+      AND LOWER(TRIM(t1.merchant)) = LOWER(TRIM(t2.merchant))
+      AND ABS(t1.date - t2.date) = 1
+    ORDER BY t2.date DESC
+  `);
+
+  const sameDateIds = new Set(sameDateRows.flatMap(r => r.ids));
+  const sameDateResults = sameDateRows.map(r => ({
     date: r.date,
     amount: parseFloat(r.abs_amount),
     count: parseInt(r.cnt),
@@ -661,6 +682,20 @@ export async function findDuplicateTransactions() {
     remove: r.ids.slice(1),
     merchants: r.merchants,
   }));
+
+  // Exclude any IDs already covered by the same-date pass to avoid double-counting
+  const crossDateResults = crossDateRows
+    .filter(r => !sameDateIds.has(r.keep_id) && !sameDateIds.has(r.remove_id))
+    .map(r => ({
+      date: r.date,
+      amount: parseFloat(r.abs_amount),
+      count: 2,
+      keep: r.keep_id,
+      remove: [r.remove_id],
+      merchants: [r.keep_merchant, r.remove_merchant],
+    }));
+
+  return [...sameDateResults, ...crossDateResults];
 }
 
 export async function deduplicateTransactions() {
