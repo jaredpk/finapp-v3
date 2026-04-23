@@ -665,8 +665,9 @@ export async function findDuplicateTransactions() {
       t1.merchant AS remove_merchant
     FROM transactions t1
     JOIN transactions t2
-      ON t1.id LIKE 'simplifi_%'
+      ON (t1.id LIKE 'simplifi_%' OR t1.id LIKE 'csv_%')
       AND t2.id NOT LIKE 'simplifi_%'
+      AND t2.id NOT LIKE 'csv_%'
       AND ROUND(ABS(t1.amount)::numeric, 2) = ROUND(ABS(t2.amount)::numeric, 2)
       AND LOWER(TRIM(t1.merchant)) = LOWER(TRIM(t2.merchant))
       AND ABS(t1.date - t2.date) = 1
