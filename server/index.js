@@ -375,7 +375,8 @@ app.put("/api/categories/:id", requireAuth, async (req, res) => {
 });
 
 app.delete("/api/categories/:id", requireAuth, async (req, res) => {
-  const ok = await deleteCategory(req.params.id);
+  const { replacementId } = req.body || {};
+  const ok = await deleteCategory(req.params.id, replacementId || null);
   res.json({ ok });
 });
 

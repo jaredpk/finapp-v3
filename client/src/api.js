@@ -80,10 +80,11 @@ export async function updateCategoryApi(id, name, color) {
   return r.json();
 }
 
-export async function deleteCategoryApi(id) {
+export async function deleteCategoryApi(id, replacementId) {
   const r = await fetch(`${BASE}/categories/${id}`, {
     method: "DELETE",
     headers: await authHeaders(),
+    body: JSON.stringify({ replacementId: replacementId || null }),
   });
   return r.json();
 }

@@ -778,7 +778,13 @@ export async function updateCategory(id, name, color) {
   return rows[0] || null;
 }
 
-export async function deleteCategory(id) {
+export async function deleteCategory(id, replacementId) {
+  if (replacementId) {
+    await pool.query(
+      `UPDATE assignments SET category_id = $1, updated_at = NOW() WHERE category_id = $2`,
+      [replacementId, id]
+    );
+  }
   const { rowCount } = await pool.query("DELETE FROM categories WHERE id = $1", [id]);
   return rowCount > 0;
 }

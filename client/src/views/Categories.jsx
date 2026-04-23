@@ -53,6 +53,9 @@ export default function Categories({ categories, setCategories }) {
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState(null); // { id, name, color }
   const [saving, setSaving] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(null); // category being deleted
+  const [replacementId, setReplacementId] = useState("");
+  const [deleting, setDeleting] = useState(false);
   const [seeding, setSeeding] = useState(false);
   const [seedMsg, setSeedMsg] = useState("");
 
@@ -99,9 +102,22 @@ export default function Categories({ categories, setCategories }) {
     }
   }
 
-  async function handleDelete(id) {
-    await deleteCategoryApi(id);
-    setCategories((prev) => prev.filter((c) => c.id !== id));
+  function startDelete(cat) {
+    setDeleteTarget(cat);
+    setReplacementId("");
+    setEditing(null);
+  }
+
+  async function confirmDelete() {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      await deleteCategoryApi(deleteTarget.id, replacementId || null);
+      setCategories((prev) => prev.filter((c) => c.id !== deleteTarget.id));
+      setDeleteTarget(null);
+    } finally {
+      setDeleting(false);
+    }
   }
 
   return (
@@ -196,6 +212,25 @@ export default function Categories({ categories, setCategories }) {
                 </button>
                 <button style={styles.cancelBtn} onClick={() => setEditing(null)}>Cancel</button>
               </div>
+            ) : deleteTarget?.id === cat.id ? (
+              <div key={cat.id} style={styles.deleteRow}>
+                <div style={{ ...styles.dot, background: cat.color, flexShrink: 0 }} />
+                <span style={{ ...styles.catName, color: "var(--red,#ef4444)" }}>Delete "{cat.name}"</span>
+                <select
+                  value={replacementId}
+                  onChange={(e) => setReplacementId(e.target.value)}
+                  style={styles.select}
+                >
+                  <option value="">— leave uncategorized —</option>
+                  {(categories || []).filter((c) => c.id !== cat.id).map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+                <button style={styles.saveCatBtn} onClick={confirmDelete} disabled={deleting}>
+                  {deleting ? "Deleting…" : "Confirm"}
+                </button>
+                <button style={styles.cancelBtn} onClick={() => setDeleteTarget(null)}>Cancel</button>
+              </div>
             ) : (
               <div key={cat.id} style={styles.catRow}>
                 <div style={{ ...styles.dot, background: cat.color }} />
@@ -207,7 +242,7 @@ export default function Categories({ categories, setCategories }) {
                   >
                     Edit
                   </button>
-                  <button style={styles.deleteBtn} onClick={() => handleDelete(cat.id)}>
+                  <button style={styles.deleteBtn} onClick={() => startDelete(cat)}>
                     Delete
                   </button>
                 </div>
@@ -263,6 +298,16 @@ const styles = {
     fontFamily: "var(--font-mono)", cursor: "pointer",
   },
   miniColors: { display: "flex", gap: 4, flexWrap: "wrap" },
+  deleteRow: {
+    display: "flex", alignItems: "center", gap: 10, padding: "10px 16px",
+    borderBottom: "1px solid var(--border)", flexWrap: "wrap",
+    background: "var(--bg)",
+  },
+  select: {
+    flex: 1, padding: "7px 10px", background: "var(--bg)",
+    border: "1px solid var(--border)", borderRadius: "var(--radius)",
+    color: "var(--text)", fontSize: 13, fontFamily: "var(--font-mono)", outline: "none",
+  },
   saveCatBtn: {
     padding: "6px 14px", background: "var(--accent)", color: "#fff",
     border: "none", borderRadius: "var(--radius)", fontFamily: "var(--font-display)",
