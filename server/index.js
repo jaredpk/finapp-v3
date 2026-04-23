@@ -469,7 +469,7 @@ app.get("/api/deduplicate/debug", requireAuth, async (req, res) => {
 app.get("/api/deduplicate", requireAuth, async (req, res) => {
   const dupes = await findDuplicateTransactions();
   const toRemove = dupes.reduce((n, d) => n + d.remove.length, 0);
-  res.json({ groups: dupes.length, toRemove, preview: dupes.slice(0, 20) });
+  res.json({ groups: dupes.length, toRemove, preview: dupes });
 });
 
 app.post("/api/deduplicate", requireAuth, async (req, res) => {

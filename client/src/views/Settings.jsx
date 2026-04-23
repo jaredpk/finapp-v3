@@ -431,9 +431,6 @@ export default function Settings({ reloadData, user }) {
                     </div>
                   ))}
                 </div>
-                {dupePreview.groups > 20 && (
-                  <p style={{ ...styles.muted, marginTop: 8 }}>Showing first 20 of {dupePreview.groups} groups.</p>
-                )}
                 <button style={{ ...styles.generateBtn, marginTop: 14 }} onClick={handleDedupe} disabled={deduping}>
                   {deduping ? "Removing…" : `Remove ${dupePreview.toRemove} Duplicate${dupePreview.toRemove !== 1 ? "s" : ""}`}
                 </button>
