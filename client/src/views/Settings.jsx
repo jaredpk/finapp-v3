@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { getApiKey, generateApiKey, importCsvTransactions, importTransactions, clearImportedTransactions, previewDuplicates, runDeduplication, debugDuplicates } from "../api.js";
+import { getApiKey, generateApiKey, importXlsx, importCsvTransactions, importTransactions, clearImportedTransactions, previewDuplicates, runDeduplication, debugDuplicates } from "../api.js";
 
 // ── Simplifi CSV parser ───────────────────────────────────────────────────────
 const MONTHS = { Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12 };
@@ -66,6 +66,13 @@ export default function Settings({ reloadData, user }) {
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState(null); // "Imported 47 transactions"
   const [clearing, setClearing] = useState(false);
+
+  // Excel (xlsx) import state
+  const xlsxFileRef = useRef(null);
+  const [xlsxFileName, setXlsxFileName] = useState(null);
+  const [xlsxBase64, setXlsxBase64] = useState(null);
+  const [xlsxImporting, setXlsxImporting] = useState(false);
+  const [xlsxImportResult, setXlsxImportResult] = useState(null);
 
   // Perplexity CSV import state
   const csvFileRef = useRef(null);
@@ -183,6 +190,46 @@ export default function Settings({ reloadData, user }) {
       if (reloadData) reloadData();
     } finally {
       setDeduping(false);
+    }
+  }
+
+  function handleXlsxFileChange(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setXlsxFileName(file.name);
+    setXlsxImportResult(null);
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const bytes = new Uint8Array(ev.target.result);
+      let binary = "";
+      for (const b of bytes) binary += String.fromCharCode(b);
+      setXlsxBase64(btoa(binary));
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  async function handleXlsxImport() {
+    if (!xlsxBase64) return;
+    setXlsxImporting(true);
+    try {
+      const res = await importXlsx(xlsxBase64);
+      if (res.error) {
+        setXlsxImportResult(`Error: ${res.error}`);
+      } else {
+        const parts = [`Imported ${res.imported} transaction${res.imported !== 1 ? "s" : ""}`];
+        if (res.skipped) parts.push(`${res.skipped} skipped (already in Plaid)`);
+        if (res.balances) parts.push(`${res.balances} account balances`);
+        if (res.holdings) parts.push(`${res.holdings} investment holdings`);
+        setXlsxImportResult(parts.join(" · ") + ".");
+        setXlsxFileName(null);
+        setXlsxBase64(null);
+        if (xlsxFileRef.current) xlsxFileRef.current.value = "";
+        if (reloadData) reloadData();
+      }
+    } catch (err) {
+      setXlsxImportResult(`Error: ${err.message}`);
+    } finally {
+      setXlsxImporting(false);
     }
   }
 
@@ -317,6 +364,42 @@ export default function Settings({ reloadData, user }) {
           </div>
         </section>
       )}
+      {/* Excel Import */}
+      <section style={styles.card}>
+        <h2 style={styles.cardTitle}>Import from Excel Export</h2>
+        <p style={styles.description}>
+          Upload your <strong>.xlsx</strong> export with three tabs: <em>Account Balances</em>, <em>Investment Holdings</em>, and <em>Transactions</em>. Re-uploading is safe — transactions already in Plaid are skipped, and balance snapshots are replaced by date.
+        </p>
+
+        <input
+          ref={xlsxFileRef}
+          type="file"
+          accept=".xlsx"
+          style={{ display: "none" }}
+          onChange={handleXlsxFileChange}
+        />
+        <button style={styles.generateBtn} onClick={() => xlsxFileRef.current?.click()}>
+          Select Excel File
+        </button>
+
+        {xlsxFileName && (
+          <div style={styles.importPreview}>
+            <p style={styles.previewText}>
+              Ready to import: <strong>{xlsxFileName}</strong>
+            </p>
+            <button style={styles.generateBtn} onClick={handleXlsxImport} disabled={xlsxImporting}>
+              {xlsxImporting ? "Importing…" : "Import Now"}
+            </button>
+          </div>
+        )}
+
+        {xlsxImportResult && (
+          <p style={xlsxImportResult.startsWith("Error") ? styles.importError : styles.importSuccess}>
+            {xlsxImportResult}
+          </p>
+        )}
+      </section>
+
       {/* Perplexity CSV Import */}
       <section style={styles.card}>
         <h2 style={styles.cardTitle}>Import Transactions (Perplexity Export)</h2>

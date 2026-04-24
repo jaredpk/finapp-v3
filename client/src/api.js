@@ -128,6 +128,16 @@ export async function saveMerchantOverride(transaction_id, merchant_name) {
   return r.json();
 }
 
+// ── XLSX Import ───────────────────────────────────────────────────────────────
+export async function importXlsx(base64) {
+  const r = await fetch(`${BASE}/import-xlsx`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ xlsx: base64 }),
+  });
+  return r.json();
+}
+
 // ── CSV Import ────────────────────────────────────────────────────────────────
 export async function importCsvTransactions(csvText) {
   const r = await fetch(`${BASE}/import-csv`, {
