@@ -1,5 +1,6 @@
 import pg from "pg";
 import { randomBytes, createHash } from "crypto";
+import xlsxLib from "xlsx";
 
 const { Pool } = pg;
 
@@ -83,6 +84,17 @@ export async function initDb() {
       transaction_id TEXT PRIMARY KEY,
       merchant_name TEXT NOT NULL,
       updated_at TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS account_balances (
+      id SERIAL PRIMARY KEY,
+      snapshot_date DATE NOT NULL,
+      account TEXT NOT NULL,
+      institution TEXT,
+      type TEXT,
+      balance NUMERIC(12,2) NOT NULL,
+      available NUMERIC(12,2),
+      created_at TIMESTAMPTZ DEFAULT NOW()
     );
   `);
 
@@ -579,7 +591,7 @@ export async function deleteOAuthCode(code) {
 }
 
 // ── CSV Import (Perplexity export format) ─────────────────────────────────────
-// Parses the CSV text exported by Perplexity and returns rows with stable hash IDs.
+// Parses a Perplexity transactions-only CSV export and returns rows with stable hash IDs.
 // Identical rows on the same day get an occurrence index so two $1.50 hotdogs
 // on the same day produce two distinct hashes rather than collapsing into one.
 export function parseCsvText(csvText) {
@@ -611,6 +623,51 @@ export function parseCsvText(csvText) {
   return rows;
 }
 
+// Parses a dual-tab xlsx export (base64-encoded) and returns { transactions, balances, snapshotDate }.
+// "Account Balances" sheet → balances; "Transactions" sheet → transactions with stable hash IDs.
+export function parseXlsxBase64(base64, snapshotDate) {
+  const { read, utils } = xlsxLib;
+  const wb = read(Buffer.from(base64, 'base64'), { type: 'buffer', cellDates: true });
+
+  const balancesWs = wb.Sheets['Account Balances'];
+  const balances = balancesWs
+    ? utils.sheet_to_json(balancesWs, { raw: true }).map(r => {
+        const bal = parseFloat(r['Balance (USD)']);
+        if (!r['Account'] || isNaN(bal)) return null;
+        return {
+          account: r['Account'].toString().trim(),
+          institution: r['Institution']?.toString().trim() || null,
+          type: r['Type']?.toString().trim() || null,
+          balance: bal,
+          available: r['Available (USD)'] != null ? parseFloat(r['Available (USD)']) : null,
+        };
+      }).filter(Boolean)
+    : [];
+
+  const txnWs = wb.Sheets['Transactions'];
+  const counts = new Map();
+  const transactions = txnWs
+    ? utils.sheet_to_json(txnWs, { raw: true, cellDates: true }).map(r => {
+        const date = r['Date'] instanceof Date
+          ? r['Date'].toISOString().slice(0, 10)
+          : r['Date']?.toString().trim();
+        const merchant = r['Merchant']?.toString().trim() || null;
+        const category = r['Category']?.toString().trim() || null;
+        const amount = parseFloat(r['Amount']);
+        const account = r['Account']?.toString().trim() || null;
+        if (!date || isNaN(amount)) return null;
+
+        const key = `${date}|${merchant}|${category}|${amount}|${account}`;
+        const idx = counts.get(key) ?? 0;
+        counts.set(key, idx + 1);
+        const id = 'csv_' + createHash('sha256').update(`${key}|${idx}`).digest('hex').slice(0, 16);
+        return { id, date, merchant, category, amount, account };
+      }).filter(Boolean)
+    : [];
+
+  return { transactions, balances, snapshotDate: snapshotDate ?? new Date().toISOString().slice(0, 10) };
+}
+
 export async function upsertCsvTransaction(t) {
   // Skip if a Plaid-native row already covers this date+amount; avoids needing manual dedup after import.
   const { rowCount } = await pool.query(
@@ -627,6 +684,40 @@ export async function upsertCsvTransaction(t) {
     [t.id, t.date, t.merchant, t.amount, t.account, t.category]
   );
   return rowCount > 0;
+}
+
+// Replaces the entire balance snapshot for a given date (delete + insert in one transaction).
+// Using the same snapshotDate twice is idempotent.
+export async function upsertAccountBalances(snapshotDate, balances) {
+  if (!balances.length) return;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('DELETE FROM account_balances WHERE snapshot_date = $1', [snapshotDate]);
+    for (const b of balances) {
+      await client.query(
+        `INSERT INTO account_balances (snapshot_date, account, institution, type, balance, available)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [snapshotDate, b.account, b.institution, b.type, b.balance, b.available ?? null]
+      );
+    }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+export async function getLatestBalances() {
+  const { rows } = await pool.query(`
+    SELECT account, institution, type, balance, available, snapshot_date
+    FROM account_balances
+    WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM account_balances)
+    ORDER BY type, account
+  `);
+  return rows;
 }
 
 export async function upsertImportedTransaction(t) {

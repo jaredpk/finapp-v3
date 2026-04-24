@@ -27,7 +27,9 @@ import {
   getSplits, createSplit, deleteSplit, deleteSplitsForTransaction,
   getMerchantOverrides, upsertMerchantOverride,
   parseCsvText, upsertCsvTransaction,
+  parseXlsxBase64,
   upsertImportedTransaction, deleteImportedTransactions,
+  upsertAccountBalances, getLatestBalances,
 } from "./db.js";
 import pool from "./db.js";
 
@@ -443,6 +445,28 @@ app.post("/api/import-csv", requireApiKeyOrAuth, async (req, res) => {
   }
 });
 
+app.post("/api/import-xlsx", requireApiKeyOrAuth, async (req, res) => {
+  try {
+    const { xlsx, snapshot_date } = req.body;
+    if (!xlsx || typeof xlsx !== "string") return res.status(400).json({ error: "xlsx base64 string required" });
+    const { transactions, balances, snapshotDate } = parseXlsxBase64(xlsx, snapshot_date);
+    let imported = 0;
+    for (const row of transactions) {
+      if (await upsertCsvTransaction(row)) imported++;
+    }
+    if (balances.length) await upsertAccountBalances(snapshotDate, balances);
+    res.json({ imported, skipped: transactions.length - imported, balances: balances.length, snapshot_date: snapshotDate });
+  } catch (err) {
+    console.error("XLSX import error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/account-balances", requireAuth, async (req, res) => {
+  const rows = await getLatestBalances();
+  res.json(rows);
+});
+
 // ── Deduplication ─────────────────────────────────────────────────────────────
 app.get("/api/deduplicate/debug", requireAuth, async (req, res) => {
   const [sample, idStats, dupeRows] = await Promise.all([
@@ -673,7 +697,19 @@ function buildMcpServer() {
     return { content: [{ type: "text", text: "Sync complete." }] };
   });
 
-  server.tool("get_balances", "Get current balances for all linked accounts", {}, async () => {
+  server.tool("get_balances", "Get current account balances. Uses the latest CSV-imported snapshot when available (real data); falls back to Plaid sandbox balances otherwise.", {}, async () => {
+    const dbRows = await getLatestBalances();
+    if (dbRows.length) {
+      const { snapshot_date } = dbRows[0];
+      const accounts = dbRows.map(r => ({
+        account: r.account,
+        institution: r.institution,
+        type: r.type,
+        balance: parseFloat(r.balance),
+        available: r.available != null ? parseFloat(r.available) : null,
+      }));
+      return { content: [{ type: "text", text: `Balances as of ${snapshot_date}:\n${JSON.stringify(accounts, null, 2)}` }] };
+    }
     const items = await getUserItems();
     if (!items.length) return { content: [{ type: "text", text: "No banks linked yet." }] };
     const accounts = (await Promise.all(items.map(async ({ accessToken, institutionName }) => {
@@ -755,6 +791,23 @@ function buildMcpServer() {
       ? `Imported ${imported} transactions (skipped ${skipped} already covered by Plaid). Re-running with the same CSV is safe.`
       : `Imported ${imported} transactions. Re-running with the same CSV is safe.`;
     return { content: [{ type: "text", text: msg }] };
+  });
+
+  server.tool("import_xlsx", "Import transactions and account balances from a dual-tab Excel export. Pass the file content as a base64 string. Safe to re-run — transactions already in Plaid are skipped, and the balance snapshot for the given date is replaced.", {
+    xlsx: z.string().describe("Base64-encoded .xlsx file with an 'Account Balances' sheet and a 'Transactions' sheet"),
+    snapshot_date: z.string().optional().describe("YYYY-MM-DD date to tag the balance snapshot (defaults to today)"),
+  }, async ({ xlsx, snapshot_date }) => {
+    const { transactions, balances, snapshotDate } = parseXlsxBase64(xlsx, snapshot_date);
+    let imported = 0;
+    for (const row of transactions) {
+      if (await upsertCsvTransaction(row)) imported++;
+    }
+    if (balances.length) await upsertAccountBalances(snapshotDate, balances);
+    const skipped = transactions.length - imported;
+    const parts = [`Imported ${imported} transaction${imported !== 1 ? 's' : ''}`];
+    if (skipped) parts.push(`skipped ${skipped} already covered by Plaid`);
+    if (balances.length) parts.push(`saved ${balances.length} account balances as of ${snapshotDate}`);
+    return { content: [{ type: "text", text: parts.join(' · ') + '. Re-running is safe.' }] };
   });
 
   return server;
