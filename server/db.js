@@ -96,6 +96,18 @@ export async function initDb() {
       available NUMERIC(12,2),
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS investment_holdings (
+      id SERIAL PRIMARY KEY,
+      snapshot_date DATE NOT NULL,
+      ticker TEXT NOT NULL,
+      institution TEXT,
+      value NUMERIC(14,2) NOT NULL,
+      day_change TEXT,
+      gain_loss NUMERIC(14,2),
+      gain_loss_pct TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
   `);
 
   // Add new transaction columns from Perplexity schema
@@ -644,6 +656,22 @@ export function parseXlsxBase64(base64, snapshotDate) {
       }).filter(Boolean)
     : [];
 
+  const holdingsWs = wb.Sheets['Investment Holdings'];
+  const holdings = holdingsWs
+    ? utils.sheet_to_json(holdingsWs, { raw: true }).map(r => {
+        const value = parseFloat(r['Value (USD)']);
+        if (!r['Ticker'] || isNaN(value)) return null;
+        return {
+          ticker: r['Ticker'].toString().trim(),
+          institution: r['Institution']?.toString().trim() || null,
+          value,
+          day_change: r['Day Change']?.toString().trim() || null,
+          gain_loss: r['Gain/Loss (USD)'] != null ? parseFloat(r['Gain/Loss (USD)']) : null,
+          gain_loss_pct: r['Gain/Loss %']?.toString().trim() || null,
+        };
+      }).filter(Boolean)
+    : [];
+
   const txnWs = wb.Sheets['Transactions'];
   const counts = new Map();
   const transactions = txnWs
@@ -665,7 +693,7 @@ export function parseXlsxBase64(base64, snapshotDate) {
       }).filter(Boolean)
     : [];
 
-  return { transactions, balances, snapshotDate: snapshotDate ?? new Date().toISOString().slice(0, 10) };
+  return { transactions, balances, holdings, snapshotDate: snapshotDate ?? new Date().toISOString().slice(0, 10) };
 }
 
 export async function upsertCsvTransaction(t) {
@@ -716,6 +744,38 @@ export async function getLatestBalances() {
     FROM account_balances
     WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM account_balances)
     ORDER BY type, account
+  `);
+  return rows;
+}
+
+export async function upsertInvestmentHoldings(snapshotDate, holdings) {
+  if (!holdings.length) return;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('DELETE FROM investment_holdings WHERE snapshot_date = $1', [snapshotDate]);
+    for (const h of holdings) {
+      await client.query(
+        `INSERT INTO investment_holdings (snapshot_date, ticker, institution, value, day_change, gain_loss, gain_loss_pct)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [snapshotDate, h.ticker, h.institution, h.value, h.day_change ?? null, h.gain_loss ?? null, h.gain_loss_pct ?? null]
+      );
+    }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+export async function getLatestHoldings() {
+  const { rows } = await pool.query(`
+    SELECT ticker, institution, value, day_change, gain_loss, gain_loss_pct, snapshot_date
+    FROM investment_holdings
+    WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM investment_holdings)
+    ORDER BY value DESC
   `);
   return rows;
 }

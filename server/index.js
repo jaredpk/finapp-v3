@@ -30,6 +30,7 @@ import {
   parseXlsxBase64,
   upsertImportedTransaction, deleteImportedTransactions,
   upsertAccountBalances, getLatestBalances,
+  upsertInvestmentHoldings, getLatestHoldings,
 } from "./db.js";
 import pool from "./db.js";
 
@@ -449,13 +450,14 @@ app.post("/api/import-xlsx", requireApiKeyOrAuth, async (req, res) => {
   try {
     const { xlsx, snapshot_date } = req.body;
     if (!xlsx || typeof xlsx !== "string") return res.status(400).json({ error: "xlsx base64 string required" });
-    const { transactions, balances, snapshotDate } = parseXlsxBase64(xlsx, snapshot_date);
+    const { transactions, balances, holdings, snapshotDate } = parseXlsxBase64(xlsx, snapshot_date);
     let imported = 0;
     for (const row of transactions) {
       if (await upsertCsvTransaction(row)) imported++;
     }
     if (balances.length) await upsertAccountBalances(snapshotDate, balances);
-    res.json({ imported, skipped: transactions.length - imported, balances: balances.length, snapshot_date: snapshotDate });
+    if (holdings.length) await upsertInvestmentHoldings(snapshotDate, holdings);
+    res.json({ imported, skipped: transactions.length - imported, balances: balances.length, holdings: holdings.length, snapshot_date: snapshotDate });
   } catch (err) {
     console.error("XLSX import error:", err);
     res.status(500).json({ error: err.message });
@@ -464,6 +466,11 @@ app.post("/api/import-xlsx", requireApiKeyOrAuth, async (req, res) => {
 
 app.get("/api/account-balances", requireAuth, async (req, res) => {
   const rows = await getLatestBalances();
+  res.json(rows);
+});
+
+app.get("/api/investment-holdings", requireAuth, async (req, res) => {
+  const rows = await getLatestHoldings();
   res.json(rows);
 });
 
@@ -797,16 +804,18 @@ function buildMcpServer() {
     xlsx: z.string().describe("Base64-encoded .xlsx file with an 'Account Balances' sheet and a 'Transactions' sheet"),
     snapshot_date: z.string().optional().describe("YYYY-MM-DD date to tag the balance snapshot (defaults to today)"),
   }, async ({ xlsx, snapshot_date }) => {
-    const { transactions, balances, snapshotDate } = parseXlsxBase64(xlsx, snapshot_date);
+    const { transactions, balances, holdings, snapshotDate } = parseXlsxBase64(xlsx, snapshot_date);
     let imported = 0;
     for (const row of transactions) {
       if (await upsertCsvTransaction(row)) imported++;
     }
     if (balances.length) await upsertAccountBalances(snapshotDate, balances);
+    if (holdings.length) await upsertInvestmentHoldings(snapshotDate, holdings);
     const skipped = transactions.length - imported;
     const parts = [`Imported ${imported} transaction${imported !== 1 ? 's' : ''}`];
     if (skipped) parts.push(`skipped ${skipped} already covered by Plaid`);
     if (balances.length) parts.push(`saved ${balances.length} account balances as of ${snapshotDate}`);
+    if (holdings.length) parts.push(`saved ${holdings.length} investment holdings as of ${snapshotDate}`);
     return { content: [{ type: "text", text: parts.join(' · ') + '. Re-running is safe.' }] };
   });
 
