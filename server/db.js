@@ -110,6 +110,11 @@ export async function initDb() {
     );
   `);
 
+  // Add account column to investment_holdings to distinguish multiple accounts per institution
+  await pool.query(`
+    ALTER TABLE investment_holdings ADD COLUMN IF NOT EXISTS account TEXT;
+  `);
+
   // Add new transaction columns from Perplexity schema
   await pool.query(`
     ALTER TABLE transactions
@@ -664,6 +669,7 @@ export function parseXlsxBase64(base64, snapshotDate) {
         return {
           ticker: r['Ticker'].toString().trim(),
           institution: r['Institution']?.toString().trim() || null,
+          account: r['Account']?.toString().trim() || null,
           value,
           day_change: r['Day Change']?.toString().trim() || null,
           gain_loss: r['Gain/Loss (USD)'] != null ? parseFloat(r['Gain/Loss (USD)']) : null,
@@ -756,9 +762,9 @@ export async function upsertInvestmentHoldings(snapshotDate, holdings) {
     await client.query('DELETE FROM investment_holdings WHERE snapshot_date = $1', [snapshotDate]);
     for (const h of holdings) {
       await client.query(
-        `INSERT INTO investment_holdings (snapshot_date, ticker, institution, value, day_change, gain_loss, gain_loss_pct)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [snapshotDate, h.ticker, h.institution, h.value, h.day_change ?? null, h.gain_loss ?? null, h.gain_loss_pct ?? null]
+        `INSERT INTO investment_holdings (snapshot_date, ticker, institution, account, value, day_change, gain_loss, gain_loss_pct)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [snapshotDate, h.ticker, h.institution, h.account ?? null, h.value, h.day_change ?? null, h.gain_loss ?? null, h.gain_loss_pct ?? null]
       );
     }
     await client.query('COMMIT');
@@ -772,7 +778,7 @@ export async function upsertInvestmentHoldings(snapshotDate, holdings) {
 
 export async function getLatestHoldings() {
   const { rows } = await pool.query(`
-    SELECT ticker, institution, value, day_change, gain_loss, gain_loss_pct, snapshot_date
+    SELECT ticker, institution, account, value, day_change, gain_loss, gain_loss_pct, snapshot_date
     FROM investment_holdings
     WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM investment_holdings)
     ORDER BY value DESC

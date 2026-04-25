@@ -7,6 +7,9 @@ import StatCard from "../components/StatCard.jsx";
 const fmt = (n) =>
   n == null ? "—" : "$" + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
+const fmtSigned = (n) =>
+  n == null ? "—" : (n < 0 ? "-" : "") + "$" + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
 const COLORS = ["var(--accent)", "var(--accent2)", "var(--blue)", "var(--green)"];
 
 export default function Dashboard({ accounts, transactions, categories, assignments }) {
@@ -98,7 +101,7 @@ export default function Dashboard({ accounts, transactions, categories, assignme
 
       {/* Stats */}
       <div style={styles.stats}>
-        <StatCard label="Net Worth" value={netWorth != null ? fmt(netWorth) : "—"} sub="across all accounts" accent="var(--accent)" delay={0} />
+        <StatCard label="Net Worth" value={netWorth != null ? fmtSigned(netWorth) : "—"} sub="across all accounts" accent="var(--accent)" delay={0} />
         <StatCard label="This Month" value={monthSpend ? fmt(-monthSpend) : "—"} sub="total spending" accent="var(--red)" delay={0.06} />
         <StatCard label="Accounts" value={accounts.length || "—"} sub="connected" delay={0.12} />
         <StatCard label="Transactions" value={transactions.length || "—"} sub="last 90 days" delay={0.18} />

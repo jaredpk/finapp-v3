@@ -358,24 +358,34 @@ app.get("/api/accounts", requireAuth, async (req, res) => {
     };
   });
 
-  // Roll up investment holdings by institution for any institution not already
-  // covered by account_balances (e.g. eTrade brokerage accounts).
+  // Roll up investment holdings into synthetic investment accounts for any
+  // institution not already covered by account_balances (e.g. eTrade).
+  // Group by account name first (distinguishes multiple accounts at same institution),
+  // falling back to institution name.  Skip rows with neither.
   const coveredInstitutions = new Set(balRows.map((r) => (r.institution || "").toLowerCase()));
-  const holdingsByInst = {};
+  const holdingsByAcct = {};
   for (const h of holdingRows) {
-    const inst = h.institution || "Unknown";
-    holdingsByInst[inst] = (holdingsByInst[inst] || 0) + (parseFloat(h.value) || 0);
+    const key = h.account || h.institution;
+    if (!key) continue;
+    if (!holdingsByAcct[key]) {
+      holdingsByAcct[key] = {
+        displayName: h.account || h.institution,
+        institution: h.institution || h.account,
+        value: 0,
+      };
+    }
+    holdingsByAcct[key].value += parseFloat(h.value) || 0;
   }
-  const holdingAccounts = Object.entries(holdingsByInst)
-    .filter(([inst]) => !coveredInstitutions.has(inst.toLowerCase()))
-    .map(([inst, total]) => ({
-      account_id: `holdings_${inst}`,
-      name: `${inst} Investments`,
-      official_name: `${inst} Investments`,
+  const holdingAccounts = Object.values(holdingsByAcct)
+    .filter((g) => !coveredInstitutions.has((g.institution || "").toLowerCase()))
+    .map((g) => ({
+      account_id: `holdings_${g.displayName}`,
+      name: g.displayName,
+      official_name: g.displayName,
       type: "investment",
       subtype: "brokerage",
-      balances: { current: total, available: null },
-      institutionName: inst,
+      balances: { current: g.value, available: null },
+      institutionName: g.institution,
       mask: null,
     }));
 
