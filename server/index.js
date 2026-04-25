@@ -336,8 +336,8 @@ app.get("/api/accounts", requireAuth, async (req, res) => {
   }
 
   // Fall back to latest imported balance snapshot
-  const balRows = await getLatestBalances();
-  if (!balRows.length) return res.json({ accounts: [] });
+  const [balRows, holdingRows] = await Promise.all([getLatestBalances(), getLatestHoldings()]);
+  if (!balRows.length && !holdingRows.length) return res.json({ accounts: [] });
 
   const accounts = balRows.map((r) => {
     const type = normalizePlaidType(r.type);
@@ -358,7 +358,31 @@ app.get("/api/accounts", requireAuth, async (req, res) => {
     };
   });
 
-  res.json({ accounts, snapshotDate: balRows[0]?.snapshot_date });
+  // Roll up investment holdings by institution for any institution not already
+  // covered by account_balances (e.g. eTrade brokerage accounts).
+  const coveredInstitutions = new Set(balRows.map((r) => (r.institution || "").toLowerCase()));
+  const holdingsByInst = {};
+  for (const h of holdingRows) {
+    const inst = h.institution || "Unknown";
+    holdingsByInst[inst] = (holdingsByInst[inst] || 0) + (parseFloat(h.value) || 0);
+  }
+  const holdingAccounts = Object.entries(holdingsByInst)
+    .filter(([inst]) => !coveredInstitutions.has(inst.toLowerCase()))
+    .map(([inst, total]) => ({
+      account_id: `holdings_${inst}`,
+      name: `${inst} Investments`,
+      official_name: `${inst} Investments`,
+      type: "investment",
+      subtype: "brokerage",
+      balances: { current: total, available: null },
+      institutionName: inst,
+      mask: null,
+    }));
+
+  res.json({
+    accounts: [...accounts, ...holdingAccounts],
+    snapshotDate: balRows[0]?.snapshot_date || holdingRows[0]?.snapshot_date,
+  });
 });
 
 // ── Transactions ──────────────────────────────────────────────────────────────
