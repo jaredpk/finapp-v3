@@ -339,19 +339,24 @@ app.get("/api/accounts", requireAuth, async (req, res) => {
   const balRows = await getLatestBalances();
   if (!balRows.length) return res.json({ accounts: [] });
 
-  const accounts = balRows.map((r) => ({
-    account_id: `balance_${r.account}`,
-    name: r.account,
-    official_name: r.account,
-    type: normalizePlaidType(r.type),
-    subtype: r.type || normalizePlaidType(r.type),
-    balances: {
-      current: parseFloat(r.balance),
-      available: r.available != null ? parseFloat(r.available) : null,
-    },
-    institutionName: r.institution,
-    mask: null,
-  }));
+  const accounts = balRows.map((r) => {
+    const type = normalizePlaidType(r.type);
+    const isLiability = type === "credit" || type === "loan";
+    // Imported balances store liabilities as negative; normalize to Plaid convention
+    // (positive = amount owed) so the Dashboard net worth formula works consistently.
+    const current = isLiability ? Math.abs(parseFloat(r.balance)) : parseFloat(r.balance);
+    const available = r.available != null ? Math.abs(parseFloat(r.available)) : null;
+    return {
+      account_id: `balance_${r.account}`,
+      name: r.account,
+      official_name: r.account,
+      type,
+      subtype: r.type || type,
+      balances: { current, available },
+      institutionName: r.institution,
+      mask: null,
+    };
+  });
 
   res.json({ accounts, snapshotDate: balRows[0]?.snapshot_date });
 });
