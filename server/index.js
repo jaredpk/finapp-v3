@@ -32,6 +32,7 @@ import {
   upsertAccountBalances, getLatestBalances,
   upsertInvestmentHoldings, getLatestHoldings,
   getProperties, upsertProperty, deleteProperty, updatePropertyValue,
+  getManualAccounts, upsertManualAccount, deleteManualAccount,
 } from "./db.js";
 import pool from "./db.js";
 
@@ -446,8 +447,21 @@ app.get("/api/accounts", requireAuth, async (req, res) => {
       mask: null,
     }));
 
+  // Add manually-entered accounts (e.g. Paychex Flex retirement)
+  const manualRows = await getManualAccounts();
+  const manualAccounts = manualRows.map((m) => ({
+    account_id: `manual_${m.id}`,
+    name: m.name,
+    official_name: m.name,
+    type: "investment",
+    subtype: m.subtype || "retirement",
+    balances: { current: parseFloat(m.balance), available: null },
+    institutionName: m.institution || "Manual",
+    mask: null,
+  }));
+
   res.json({
-    accounts: [...accounts, ...holdingAccounts, ...propertyAccounts],
+    accounts: [...accounts, ...holdingAccounts, ...propertyAccounts, ...manualAccounts],
     snapshotDate: balRows[0]?.snapshot_date || holdingRows[0]?.snapshot_date,
   });
 });
@@ -637,6 +651,24 @@ app.post("/api/properties/sync", requireAuth, async (req, res) => {
   if (!process.env.RENTCAST_API_KEY) return res.status(400).json({ error: "RENTCAST_API_KEY not configured" });
   const { synced, results } = await syncPropertyValues(true);
   res.json({ synced, results });
+});
+
+// ── Manual accounts ───────────────────────────────────────────────────────────
+app.get("/api/manual-accounts", requireAuth, async (req, res) => {
+  const rows = await getManualAccounts();
+  res.json({ accounts: rows });
+});
+
+app.post("/api/manual-accounts", requireAuth, async (req, res) => {
+  const { id, name, institution, subtype, balance } = req.body;
+  if (!name || balance == null) return res.status(400).json({ error: "name and balance are required" });
+  const account = await upsertManualAccount(id || null, name, institution, subtype, balance);
+  res.json({ account });
+});
+
+app.delete("/api/manual-accounts/:id", requireAuth, async (req, res) => {
+  await deleteManualAccount(parseInt(req.params.id));
+  res.json({ ok: true });
 });
 
 // ── Deduplication ─────────────────────────────────────────────────────────────

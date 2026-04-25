@@ -117,6 +117,15 @@ export async function initDb() {
       last_synced_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS manual_accounts (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      institution TEXT,
+      subtype TEXT DEFAULT 'retirement',
+      balance NUMERIC(14,2) NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
   `);
 
   // Add account column to investment_holdings to distinguish multiple accounts per institution
@@ -1064,6 +1073,36 @@ export async function updatePropertyValue(id, value) {
     `UPDATE properties SET last_value = $1, last_synced_at = NOW() WHERE id = $2`,
     [value, id]
   );
+}
+
+// ── Manual accounts ───────────────────────────────────────────────────────────
+export async function getManualAccounts() {
+  const { rows } = await pool.query(
+    `SELECT id, name, institution, subtype, balance::float, updated_at FROM manual_accounts ORDER BY id`
+  );
+  return rows;
+}
+
+export async function upsertManualAccount(id, name, institution, subtype, balance) {
+  if (id) {
+    const { rows } = await pool.query(
+      `UPDATE manual_accounts SET name=$1, institution=$2, subtype=$3, balance=$4, updated_at=NOW()
+       WHERE id=$5 RETURNING *`,
+      [name, institution || null, subtype || 'retirement', parseFloat(balance), id]
+    );
+    return rows[0] || null;
+  }
+  const { rows } = await pool.query(
+    `INSERT INTO manual_accounts (name, institution, subtype, balance)
+     VALUES ($1, $2, $3, $4) RETURNING *`,
+    [name, institution || null, subtype || 'retirement', parseFloat(balance)]
+  );
+  return rows[0];
+}
+
+export async function deleteManualAccount(id) {
+  const { rowCount } = await pool.query(`DELETE FROM manual_accounts WHERE id=$1`, [id]);
+  return rowCount > 0;
 }
 
 export default pool;

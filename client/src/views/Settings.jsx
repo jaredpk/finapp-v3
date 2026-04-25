@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { getApiKey, generateApiKey, importXlsx, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi } from "../api.js";
+import { getApiKey, generateApiKey, importXlsx, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi, fetchManualAccounts, saveManualAccount, deleteManualAccountApi } from "../api.js";
 
 export default function Settings({ reloadData, user }) {
   const [apiKey, setApiKey] = useState(null);
@@ -23,6 +23,16 @@ export default function Settings({ reloadData, user }) {
   const [syncingProps, setSyncingProps] = useState(false);
   const [propResult, setPropResult]     = useState(null);
 
+  // Manual accounts state
+  const [manualAccounts, setManualAccounts]   = useState([]);
+  const [manualLoading, setManualLoading]     = useState(true);
+  const [newAcctName, setNewAcctName]         = useState("");
+  const [newAcctInst, setNewAcctInst]         = useState("");
+  const [newAcctBal, setNewAcctBal]           = useState("");
+  const [addingAcct, setAddingAcct]           = useState(false);
+  const [acctResult, setAcctResult]           = useState(null);
+  const [editingAcct, setEditingAcct]         = useState(null); // { id, balance }
+
   // Dedup state
   const [deduping, setDeduping]         = useState(false);
   const [dupePreview, setDupePreview]   = useState(null);
@@ -35,6 +45,7 @@ export default function Settings({ reloadData, user }) {
   useEffect(() => {
     getApiKey().then((data) => { setApiKey(data.key || null); setLoading(false); });
     fetchProperties().then((data) => { setProperties(data.properties || []); setPropsLoading(false); });
+    fetchManualAccounts().then((data) => { setManualAccounts(data.accounts || []); setManualLoading(false); });
   }, []);
 
   // ── API key ──────────────────────────────────────────────────────────────────
@@ -90,6 +101,37 @@ export default function Settings({ reloadData, user }) {
     } finally {
       setXlsxImporting(false);
     }
+  }
+
+  // ── Manual accounts ──────────────────────────────────────────────────────────
+  async function handleAddManualAccount() {
+    if (!newAcctName.trim() || !newAcctBal.trim()) return;
+    setAddingAcct(true);
+    setAcctResult(null);
+    try {
+      const res = await saveManualAccount(null, newAcctName.trim(), newAcctInst.trim(), "retirement", parseFloat(newAcctBal));
+      if (res.error) { setAcctResult(`Error: ${res.error}`); return; }
+      setManualAccounts((prev) => [...prev, res.account]);
+      setNewAcctName(""); setNewAcctInst(""); setNewAcctBal("");
+      if (reloadData) reloadData();
+    } finally { setAddingAcct(false); }
+  }
+
+  async function handleUpdateBalance(id) {
+    const bal = parseFloat(editingAcct.balance);
+    if (isNaN(bal)) return;
+    const existing = manualAccounts.find((a) => a.id === id);
+    const res = await saveManualAccount(id, existing.name, existing.institution, existing.subtype, bal);
+    if (res.error) { setAcctResult(`Error: ${res.error}`); return; }
+    setManualAccounts((prev) => prev.map((a) => (a.id === id ? res.account : a)));
+    setEditingAcct(null);
+    if (reloadData) reloadData();
+  }
+
+  async function handleDeleteManualAccount(id) {
+    await deleteManualAccountApi(id);
+    setManualAccounts((prev) => prev.filter((a) => a.id !== id));
+    if (reloadData) reloadData();
   }
 
   // ── Properties ────────────────────────────────────────────────────────────────
@@ -195,6 +237,66 @@ export default function Settings({ reloadData, user }) {
           <span style={styles.label}>Email</span>
           <span style={styles.value}>{user?.email || "—"}</span>
         </div>
+      </section>
+
+      {/* Manual Accounts */}
+      <section style={styles.card}>
+        <h2 style={styles.cardTitle}>Manual Accounts</h2>
+        <p style={styles.description}>
+          Add accounts that can't connect via Plaid (e.g. Paychex Flex retirement). Enter the <strong>vested balance only</strong> — unvested funds aren't yours yet. Update the balance manually whenever you check the account.
+        </p>
+        {manualLoading ? (
+          <p style={styles.muted}>Loading…</p>
+        ) : (
+          <>
+            {manualAccounts.length > 0 && (
+              <div style={{ marginBottom: 16 }}>
+                {manualAccounts.map((a) => (
+                  <div key={a.id} style={styles.propRow}>
+                    <div style={{ flex: 1 }}>
+                      <p style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", margin: 0 }}>{a.name}</p>
+                      <p style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", margin: "2px 0 0" }}>
+                        {a.institution ? `${a.institution} · ` : ""}{a.subtype} · ${parseFloat(a.balance).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (vested)
+                      </p>
+                      <p style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", margin: "2px 0 0" }}>
+                        Updated {new Date(a.updated_at).toLocaleDateString()}
+                      </p>
+                    </div>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      {editingAcct?.id === a.id ? (
+                        <>
+                          <input
+                            style={{ ...styles.propInput, width: 130, marginTop: 0 }}
+                            type="number"
+                            step="0.01"
+                            value={editingAcct.balance}
+                            onChange={(e) => setEditingAcct({ id: a.id, balance: e.target.value })}
+                          />
+                          <button style={styles.generateBtn} onClick={() => handleUpdateBalance(a.id)}>Save</button>
+                          <button style={styles.regenerateBtn} onClick={() => setEditingAcct(null)}>Cancel</button>
+                        </>
+                      ) : (
+                        <button style={styles.regenerateBtn} onClick={() => setEditingAcct({ id: a.id, balance: a.balance })}>Update Balance</button>
+                      )}
+                      <button style={styles.deleteBtn} onClick={() => handleDeleteManualAccount(a.id)}>Remove</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={styles.propForm}>
+              <input style={styles.propInput} placeholder="Account name (e.g. Paychex 401k)" value={newAcctName} onChange={(e) => setNewAcctName(e.target.value)} />
+              <input style={{ ...styles.propInput, marginTop: 8 }} placeholder="Institution (e.g. Paychex Flex)" value={newAcctInst} onChange={(e) => setNewAcctInst(e.target.value)} />
+              <input style={{ ...styles.propInput, marginTop: 8 }} placeholder="Vested balance (e.g. 42500.00)" type="number" step="0.01" value={newAcctBal} onChange={(e) => setNewAcctBal(e.target.value)} />
+              <button style={{ ...styles.generateBtn, marginTop: 10 }} onClick={handleAddManualAccount} disabled={addingAcct || !newAcctName.trim() || !newAcctBal.trim()}>
+                {addingAcct ? "Adding…" : "Add Account"}
+              </button>
+            </div>
+            {acctResult && (
+              <p style={acctResult.startsWith("Error") ? styles.importError : styles.importSuccess}>{acctResult}</p>
+            )}
+          </>
+        )}
       </section>
 
       {/* Properties */}

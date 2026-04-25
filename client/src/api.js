@@ -196,6 +196,29 @@ export async function syncPropertiesApi() {
   return r.json();
 }
 
+// ── Manual accounts ───────────────────────────────────────────────────────────
+export async function fetchManualAccounts() {
+  const r = await fetch(`${BASE}/manual-accounts`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function saveManualAccount(id, name, institution, subtype, balance) {
+  const r = await fetch(`${BASE}/manual-accounts`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ id: id || undefined, name, institution, subtype, balance }),
+  });
+  return r.json();
+}
+
+export async function deleteManualAccountApi(id) {
+  const r = await fetch(`${BASE}/manual-accounts/${id}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+  });
+  return r.json();
+}
+
 // ── Deduplication ─────────────────────────────────────────────────────────────
 export async function previewDuplicates() {
   const r = await fetch(`${BASE}/deduplicate`, { headers: await authHeaders() });
