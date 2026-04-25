@@ -108,6 +108,15 @@ export async function initDb() {
       gain_loss_pct TEXT,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS properties (
+      id SERIAL PRIMARY KEY,
+      address TEXT NOT NULL,
+      nickname TEXT,
+      last_value NUMERIC(14,2),
+      last_synced_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
   `);
 
   // Add account column to investment_holdings to distinguish multiple accounts per institution
@@ -1018,6 +1027,42 @@ export async function upsertMerchantOverride(transactionId, merchantName) {
      VALUES ($1, $2, NOW())
      ON CONFLICT (transaction_id) DO UPDATE SET merchant_name = $2, updated_at = NOW()`,
     [transactionId, merchantName]
+  );
+}
+
+// ── Properties ────────────────────────────────────────────────────────────────
+export async function getProperties() {
+  const { rows } = await pool.query(
+    `SELECT id, address, nickname, last_value::float, last_synced_at, created_at
+     FROM properties ORDER BY created_at`
+  );
+  return rows;
+}
+
+export async function upsertProperty(id, address, nickname) {
+  if (id) {
+    const { rows } = await pool.query(
+      `UPDATE properties SET address = $1, nickname = $2 WHERE id = $3 RETURNING *`,
+      [address, nickname || null, id]
+    );
+    return rows[0] || null;
+  }
+  const { rows } = await pool.query(
+    `INSERT INTO properties (address, nickname) VALUES ($1, $2) RETURNING *`,
+    [address, nickname || null]
+  );
+  return rows[0];
+}
+
+export async function deleteProperty(id) {
+  const { rowCount } = await pool.query(`DELETE FROM properties WHERE id = $1`, [id]);
+  return rowCount > 0;
+}
+
+export async function updatePropertyValue(id, value) {
+  await pool.query(
+    `UPDATE properties SET last_value = $1, last_synced_at = NOW() WHERE id = $2`,
+    [value, id]
   );
 }
 

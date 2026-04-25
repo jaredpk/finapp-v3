@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { getApiKey, generateApiKey, importXlsx, importCsvTransactions, importTransactions, clearImportedTransactions, previewDuplicates, runDeduplication, debugDuplicates } from "../api.js";
+import { getApiKey, generateApiKey, importXlsx, importCsvTransactions, importTransactions, clearImportedTransactions, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi } from "../api.js";
 
 // ── Simplifi CSV parser ───────────────────────────────────────────────────────
 const MONTHS = { Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12 };
@@ -81,6 +81,15 @@ export default function Settings({ reloadData, user }) {
   const [csvImporting, setCsvImporting] = useState(false);
   const [csvImportResult, setCsvImportResult] = useState(null);
 
+  // Properties state
+  const [properties, setProperties]       = useState([]);
+  const [propsLoading, setPropsLoading]   = useState(true);
+  const [newAddr, setNewAddr]             = useState("");
+  const [newNick, setNewNick]             = useState("");
+  const [addingProp, setAddingProp]       = useState(false);
+  const [syncingProps, setSyncingProps]   = useState(false);
+  const [propResult, setPropResult]       = useState(null);
+
   // Dedup state
   const [deduping, setDeduping]           = useState(false);
   const [dupePreview, setDupePreview]     = useState(null); // { groups, toRemove, preview }
@@ -91,10 +100,8 @@ export default function Settings({ reloadData, user }) {
   const [debugging, setDebugging]         = useState(false);
 
   useEffect(() => {
-    getApiKey().then((data) => {
-      setApiKey(data.key || null);
-      setLoading(false);
-    });
+    getApiKey().then((data) => { setApiKey(data.key || null); setLoading(false); });
+    fetchProperties().then((data) => { setProperties(data.properties || []); setPropsLoading(false); });
   }, []);
 
   async function handleGenerate() {
@@ -102,6 +109,43 @@ export default function Settings({ reloadData, user }) {
     const data = await generateApiKey();
     setApiKey(data.key);
     setGenerating(false);
+  }
+
+  async function handleAddProperty() {
+    if (!newAddr.trim()) return;
+    setAddingProp(true);
+    setPropResult(null);
+    try {
+      const res = await saveProperty(null, newAddr.trim(), newNick.trim());
+      if (res.error) { setPropResult(`Error: ${res.error}`); return; }
+      setProperties((prev) => [...prev, res.property]);
+      setNewAddr("");
+      setNewNick("");
+      if (reloadData) reloadData();
+    } finally {
+      setAddingProp(false);
+    }
+  }
+
+  async function handleDeleteProperty(id) {
+    await deletePropertyApi(id);
+    setProperties((prev) => prev.filter((p) => p.id !== id));
+    if (reloadData) reloadData();
+  }
+
+  async function handleSyncProperties() {
+    setSyncingProps(true);
+    setPropResult(null);
+    try {
+      const res = await syncPropertiesApi();
+      if (res.error) { setPropResult(`Error: ${res.error}`); return; }
+      const updated = await fetchProperties();
+      setProperties(updated.properties || []);
+      setPropResult(`Synced ${res.synced} property value${res.synced !== 1 ? "s" : ""}.`);
+      if (reloadData) reloadData();
+    } finally {
+      setSyncingProps(false);
+    }
   }
 
   function handleCopy(text) {
@@ -303,6 +347,77 @@ export default function Settings({ reloadData, user }) {
           <span style={styles.label}>Email</span>
           <span style={styles.value}>{user?.email || "—"}</span>
         </div>
+      </section>
+
+      {/* Properties */}
+      <section style={styles.card}>
+        <h2 style={styles.cardTitle}>Properties</h2>
+        <p style={styles.description}>
+          Add your properties to include their Rentcast estimates in net worth. Values refresh automatically every 30 days.
+        </p>
+
+        {propsLoading ? (
+          <p style={styles.muted}>Loading…</p>
+        ) : (
+          <>
+            {properties.length > 0 && (
+              <div style={{ marginBottom: 16 }}>
+                {properties.map((p) => (
+                  <div key={p.id} style={styles.propRow}>
+                    <div style={{ flex: 1 }}>
+                      <p style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", margin: 0 }}>
+                        {p.nickname || p.address}
+                      </p>
+                      {p.nickname && <p style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", margin: "2px 0 0" }}>{p.address}</p>}
+                      <p style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", margin: "2px 0 0" }}>
+                        {p.last_value != null
+                          ? `$${parseFloat(p.last_value).toLocaleString("en-US", { maximumFractionDigits: 0 })} · last synced ${p.last_synced_at ? new Date(p.last_synced_at).toLocaleDateString() : "never"}`
+                          : "Not yet synced"}
+                      </p>
+                    </div>
+                    <button style={styles.deleteBtn} onClick={() => handleDeleteProperty(p.id)}>Remove</button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div style={styles.propForm}>
+              <input
+                style={styles.propInput}
+                placeholder="Full address (e.g. 123 Main St, Salt Lake City, UT 84101)"
+                value={newAddr}
+                onChange={(e) => setNewAddr(e.target.value)}
+              />
+              <input
+                style={{ ...styles.propInput, marginTop: 8 }}
+                placeholder="Nickname (optional, e.g. Primary Home)"
+                value={newNick}
+                onChange={(e) => setNewNick(e.target.value)}
+              />
+              <button
+                style={{ ...styles.generateBtn, marginTop: 10 }}
+                onClick={handleAddProperty}
+                disabled={addingProp || !newAddr.trim()}
+              >
+                {addingProp ? "Adding…" : "Add Property"}
+              </button>
+            </div>
+
+            {properties.length > 0 && (
+              <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--border)" }}>
+                <button style={styles.regenerateBtn} onClick={handleSyncProperties} disabled={syncingProps}>
+                  {syncingProps ? "Syncing…" : "Sync Values Now"}
+                </button>
+              </div>
+            )}
+
+            {propResult && (
+              <p style={propResult.startsWith("Error") ? styles.importError : styles.importSuccess}>
+                {propResult}
+              </p>
+            )}
+          </>
+        )}
       </section>
 
       {/* API Key */}
@@ -688,4 +803,8 @@ const styles = {
     alignItems: "center",
   },
   dupeCell: { fontSize: 12, fontFamily: "var(--font-mono)", color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", paddingRight: 8 },
+  propRow: { display: "flex", alignItems: "center", gap: 12, padding: "12px 0", borderBottom: "1px solid var(--border)" },
+  propForm: { marginTop: 8 },
+  propInput: { width: "100%", padding: "10px 12px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text)", fontSize: 13, fontFamily: "var(--font-display)", boxSizing: "border-box" },
+  deleteBtn: { background: "none", color: "var(--red, #ef4444)", border: "1px solid var(--border)", borderRadius: 6, padding: "5px 10px", fontSize: 12, cursor: "pointer", flexShrink: 0 },
 };

@@ -31,6 +31,7 @@ import {
   upsertImportedTransaction, deleteImportedTransactions,
   upsertAccountBalances, getLatestBalances,
   upsertInvestmentHoldings, getLatestHoldings,
+  getProperties, upsertProperty, deleteProperty, updatePropertyValue,
 } from "./db.js";
 import pool from "./db.js";
 
@@ -103,6 +104,31 @@ async function syncTransactions() {
     }
     await saveCursor(itemId, cursor);
   }
+}
+
+// ── Rentcast property value sync ──────────────────────────────────────────────
+async function syncPropertyValues(forceAll = false) {
+  const apiKey = process.env.RENTCAST_API_KEY;
+  if (!apiKey) return 0;
+  const props = await getProperties();
+  const toSync = forceAll ? props : props.filter((p) => {
+    if (!p.last_synced_at) return true;
+    const days = (Date.now() - new Date(p.last_synced_at).getTime()) / 86400000;
+    return days >= 30;
+  });
+  let synced = 0;
+  for (const p of toSync) {
+    try {
+      const url = `https://api.rentcast.io/v1/avm/value?address=${encodeURIComponent(p.address)}`;
+      const r = await fetch(url, { headers: { "X-Api-Key": apiKey } });
+      if (!r.ok) { console.error(`Rentcast ${p.id}: HTTP ${r.status}`); continue; }
+      const data = await r.json();
+      if (data.price) { await updatePropertyValue(p.id, data.price); synced++; }
+    } catch (err) {
+      console.error(`Rentcast sync failed for property ${p.id}:`, err.message);
+    }
+  }
+  return synced;
 }
 
 // ── Auth helpers ──────────────────────────────────────────────────────────────
@@ -389,8 +415,23 @@ app.get("/api/accounts", requireAuth, async (req, res) => {
       mask: null,
     }));
 
+  // Add properties with known values as real-estate assets
+  const propRows = await getProperties();
+  const propertyAccounts = propRows
+    .filter((p) => p.last_value != null)
+    .map((p) => ({
+      account_id: `property_${p.id}`,
+      name: p.nickname || p.address,
+      official_name: p.address,
+      type: "other",
+      subtype: "real estate",
+      balances: { current: parseFloat(p.last_value), available: null },
+      institutionName: "Rentcast Estimate",
+      mask: null,
+    }));
+
   res.json({
-    accounts: [...accounts, ...holdingAccounts],
+    accounts: [...accounts, ...holdingAccounts, ...propertyAccounts],
     snapshotDate: balRows[0]?.snapshot_date || holdingRows[0]?.snapshot_date,
   });
 });
@@ -556,6 +597,30 @@ app.get("/api/account-balances", requireAuth, async (req, res) => {
 app.get("/api/investment-holdings", requireAuth, async (req, res) => {
   const rows = await getLatestHoldings();
   res.json(rows);
+});
+
+// ── Properties (Rentcast) ─────────────────────────────────────────────────────
+app.get("/api/properties", requireAuth, async (req, res) => {
+  const props = await getProperties();
+  res.json({ properties: props });
+});
+
+app.post("/api/properties", requireAuth, async (req, res) => {
+  const { id, address, nickname } = req.body;
+  if (!address) return res.status(400).json({ error: "address required" });
+  const prop = await upsertProperty(id || null, address, nickname);
+  res.json({ property: prop });
+});
+
+app.delete("/api/properties/:id", requireAuth, async (req, res) => {
+  const ok = await deleteProperty(req.params.id);
+  res.json({ ok });
+});
+
+app.post("/api/properties/sync", requireAuth, async (req, res) => {
+  if (!process.env.RENTCAST_API_KEY) return res.status(400).json({ error: "RENTCAST_API_KEY not configured" });
+  const synced = await syncPropertyValues(true);
+  res.json({ synced });
 });
 
 // ── Deduplication ─────────────────────────────────────────────────────────────
@@ -977,5 +1042,9 @@ initDb().then(async () => {
   } catch (e) {
     console.error("Startup dedup failed (non-fatal):", e.message);
   }
+  // Sync any properties that haven't been updated in 30+ days (non-blocking)
+  syncPropertyValues().then((n) => {
+    if (n > 0) console.log(`Startup: synced ${n} property value(s) via Rentcast`);
+  }).catch((e) => console.error("Startup property sync failed (non-fatal):", e.message));
   app.listen(PORT, () => console.log(`FinApp server running on :${PORT}`));
 });

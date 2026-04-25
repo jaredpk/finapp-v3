@@ -165,6 +165,37 @@ export async function clearImportedTransactions() {
   return r.json();
 }
 
+// ── Properties ────────────────────────────────────────────────────────────────
+export async function fetchProperties() {
+  const r = await fetch(`${BASE}/properties`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function saveProperty(id, address, nickname) {
+  const r = await fetch(`${BASE}/properties`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ id: id || undefined, address, nickname }),
+  });
+  return r.json();
+}
+
+export async function deletePropertyApi(id) {
+  const r = await fetch(`${BASE}/properties/${id}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+  });
+  return r.json();
+}
+
+export async function syncPropertiesApi() {
+  const r = await fetch(`${BASE}/properties/sync`, {
+    method: "POST",
+    headers: await authHeaders(),
+  });
+  return r.json();
+}
+
 // ── Deduplication ─────────────────────────────────────────────────────────────
 export async function previewDuplicates() {
   const r = await fetch(`${BASE}/deduplicate`, { headers: await authHeaders() });
