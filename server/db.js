@@ -383,8 +383,8 @@ export async function getTransactions({ limit = 100, startDate, endDate, categor
   const { rows } = await pool.query(
     `SELECT
        id AS transaction_id,
-       date,
-       authorized_date,
+       TO_CHAR(date, 'YYYY-MM-DD') AS date,
+       TO_CHAR(authorized_date, 'YYYY-MM-DD') AS authorized_date,
        merchant AS merchant_name,
        name,
        amount::float,

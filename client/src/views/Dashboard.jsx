@@ -18,6 +18,28 @@ export default function Dashboard({ accounts, transactions, categories, assignme
     }, 0);
   }, [accounts]);
 
+  // Build category id → name lookup
+  const categoryMap = useMemo(() => {
+    const m = {};
+    (categories || []).forEach((c) => { m[c.id] = c.name; });
+    return m;
+  }, [categories]);
+
+  // Resolve a transaction's display category label
+  const resolveLabel = (t) => {
+    const assignedId = assignments?.[t.transaction_id];
+    return (assignedId && categoryMap[assignedId])
+      ? categoryMap[assignedId]
+      : (t.category || "Other").replace(/_/g, " ");
+  };
+
+  // True for any transaction that is a fund transfer (internal money movement)
+  const isTransfer = (t) => {
+    const label = resolveLabel(t);
+    return label.toLowerCase().startsWith("transfer") ||
+      (t.category || "").toUpperCase().startsWith("TRANSFER");
+  };
+
   const monthSpend = useMemo(() => {
     const now = new Date();
     const month = now.getMonth();
@@ -25,10 +47,11 @@ export default function Dashboard({ accounts, transactions, categories, assignme
     return transactions
       .filter((t) => {
         const d = new Date(t.date);
-        return d.getMonth() === month && d.getFullYear() === year && t.amount > 0;
+        return d.getMonth() === month && d.getFullYear() === year && t.amount > 0 && !isTransfer(t);
       })
       .reduce((s, t) => s + t.amount, 0);
-  }, [transactions]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [transactions, assignments, categoryMap]);
 
   // Build daily spending data for last 30 days
   const spendingData = useMemo(() => {
@@ -40,38 +63,31 @@ export default function Dashboard({ accounts, transactions, categories, assignme
     }
     const byDay = {};
     transactions
-      .filter((t) => t.amount > 0 && days.includes(t.date))
+      .filter((t) => t.amount > 0 && !isTransfer(t) && days.includes((t.date || "").slice(0, 10)))
       .forEach((t) => {
-        byDay[t.date] = (byDay[t.date] || 0) + t.amount;
+        const day = (t.date || "").slice(0, 10);
+        byDay[day] = (byDay[day] || 0) + t.amount;
       });
     return days.map((d) => ({
       date: d.slice(5),
       amount: byDay[d] || 0,
     }));
-  }, [transactions]);
-
-  // Build category id → name lookup
-  const categoryMap = useMemo(() => {
-    const m = {};
-    (categories || []).forEach((c) => { m[c.id] = c.name; });
-    return m;
-  }, [categories]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [transactions, assignments, categoryMap]);
 
   // Top spending categories — prefer user-assigned, fall back to Plaid
   const spendByCategory = useMemo(() => {
     const map = {};
     transactions
-      .filter((t) => t.amount > 0)
+      .filter((t) => t.amount > 0 && !isTransfer(t))
       .forEach((t) => {
-        const assignedId = assignments?.[t.transaction_id];
-        const label = (assignedId && categoryMap[assignedId])
-          ? categoryMap[assignedId]
-          : (t.category || "Other").replace(/_/g, " ");
+        const label = resolveLabel(t);
         map[label] = (map[label] || 0) + t.amount;
       });
     return Object.entries(map)
       .sort((a, b) => b[1] - a[1])
       .slice(0, 5);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [transactions, assignments, categoryMap]);
 
   const totalCat = spendByCategory.reduce((s, [, v]) => s + v, 0);

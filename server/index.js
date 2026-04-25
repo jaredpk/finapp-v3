@@ -296,19 +296,64 @@ app.post("/api/exchange_public_token", async (req, res) => {
 });
 
 // ── Accounts ──────────────────────────────────────────────────────────────────
+const ACCOUNT_TYPE_MAP = {
+  checking:     "depository",
+  savings:      "depository",
+  brokerage:    "investment",
+  investment:   "investment",
+  ira:          "investment",
+  "401k":       "investment",
+  "401(k)":     "investment",
+  roth:         "investment",
+  "credit card":"credit",
+  credit:       "credit",
+  mortgage:     "loan",
+  loan:         "loan",
+  heloc:        "loan",
+};
+
+function normalizePlaidType(rawType) {
+  const lower = (rawType || "").toLowerCase();
+  const match = Object.keys(ACCOUNT_TYPE_MAP).find((k) => lower.includes(k));
+  return match ? ACCOUNT_TYPE_MAP[match] : "other";
+}
+
 app.get("/api/accounts", requireAuth, async (req, res) => {
   const items = await getUserItems();
-  try {
-    const allAccounts = await Promise.all(
-      items.map(async ({ accessToken, itemId, institutionName }) => {
-        const r = await plaidClient.accountsBalanceGet({ access_token: accessToken });
-        return r.data.accounts.map((a) => ({ ...a, institutionName, itemId }));
-      })
-    );
-    res.json({ accounts: allAccounts.flat() });
-  } catch (err) {
-    res.status(500).json({ error: "Failed to fetch accounts" });
+
+  if (items.length > 0) {
+    try {
+      const allAccounts = await Promise.all(
+        items.map(async ({ accessToken, itemId, institutionName }) => {
+          const r = await plaidClient.accountsBalanceGet({ access_token: accessToken });
+          return r.data.accounts.map((a) => ({ ...a, institutionName, itemId }));
+        })
+      );
+      return res.json({ accounts: allAccounts.flat() });
+    } catch (err) {
+      console.error("Plaid accounts error, falling back to balance snapshot:", err.message);
+    }
   }
+
+  // Fall back to latest imported balance snapshot
+  const balRows = await getLatestBalances();
+  if (!balRows.length) return res.json({ accounts: [] });
+
+  const accounts = balRows.map((r) => ({
+    account_id: `balance_${r.account}`,
+    name: r.account,
+    official_name: r.account,
+    type: normalizePlaidType(r.type),
+    subtype: r.type || normalizePlaidType(r.type),
+    balances: {
+      current: parseFloat(r.balance),
+      available: r.available != null ? parseFloat(r.available) : null,
+    },
+    institutionName: r.institution,
+    mask: null,
+  }));
+
+  res.json({ accounts, snapshotDate: balRows[0]?.snapshot_date });
 });
 
 // ── Transactions ──────────────────────────────────────────────────────────────
