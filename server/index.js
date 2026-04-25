@@ -109,26 +109,42 @@ async function syncTransactions() {
 // ── Rentcast property value sync ──────────────────────────────────────────────
 async function syncPropertyValues(forceAll = false) {
   const apiKey = process.env.RENTCAST_API_KEY;
-  if (!apiKey) return 0;
+  if (!apiKey) return { synced: 0, results: [] };
   const props = await getProperties();
   const toSync = forceAll ? props : props.filter((p) => {
     if (!p.last_synced_at) return true;
-    const days = (Date.now() - new Date(p.last_synced_at).getTime()) / 86400000;
-    return days >= 30;
+    return (Date.now() - new Date(p.last_synced_at).getTime()) / 86400000 >= 30;
   });
   let synced = 0;
+  const results = [];
   for (const p of toSync) {
     try {
       const url = `https://api.rentcast.io/v1/avm/value?address=${encodeURIComponent(p.address)}`;
       const r = await fetch(url, { headers: { "X-Api-Key": apiKey } });
-      if (!r.ok) { console.error(`Rentcast ${p.id}: HTTP ${r.status}`); continue; }
-      const data = await r.json();
-      if (data.price) { await updatePropertyValue(p.id, data.price); synced++; }
+      const body = await r.json();
+      if (!r.ok) {
+        const msg = body?.message || body?.error || `HTTP ${r.status}`;
+        console.error(`Rentcast [${p.address}]: ${msg}`);
+        results.push({ id: p.id, address: p.address, ok: false, error: msg });
+        continue;
+      }
+      // Rentcast may return 'price' or 'value' depending on endpoint/plan
+      const value = body.price ?? body.value ?? body.priceRangeLow ?? null;
+      if (value != null) {
+        await updatePropertyValue(p.id, value);
+        synced++;
+        results.push({ id: p.id, address: p.address, ok: true, value });
+      } else {
+        const msg = `No value in response: ${JSON.stringify(body)}`;
+        console.error(`Rentcast [${p.address}]: ${msg}`);
+        results.push({ id: p.id, address: p.address, ok: false, error: msg });
+      }
     } catch (err) {
-      console.error(`Rentcast sync failed for property ${p.id}:`, err.message);
+      console.error(`Rentcast sync error [${p.address}]:`, err.message);
+      results.push({ id: p.id, address: p.address, ok: false, error: err.message });
     }
   }
-  return synced;
+  return { synced, results };
 }
 
 // ── Auth helpers ──────────────────────────────────────────────────────────────
@@ -619,8 +635,8 @@ app.delete("/api/properties/:id", requireAuth, async (req, res) => {
 
 app.post("/api/properties/sync", requireAuth, async (req, res) => {
   if (!process.env.RENTCAST_API_KEY) return res.status(400).json({ error: "RENTCAST_API_KEY not configured" });
-  const synced = await syncPropertyValues(true);
-  res.json({ synced });
+  const { synced, results } = await syncPropertyValues(true);
+  res.json({ synced, results });
 });
 
 // ── Deduplication ─────────────────────────────────────────────────────────────
@@ -1043,8 +1059,9 @@ initDb().then(async () => {
     console.error("Startup dedup failed (non-fatal):", e.message);
   }
   // Sync any properties that haven't been updated in 30+ days (non-blocking)
-  syncPropertyValues().then((n) => {
-    if (n > 0) console.log(`Startup: synced ${n} property value(s) via Rentcast`);
+  syncPropertyValues().then(({ synced, results }) => {
+    if (synced > 0) console.log(`Startup: synced ${synced} property value(s) via Rentcast`);
+    results.filter(r => !r.ok).forEach(r => console.error(`Startup Rentcast failed [${r.address}]: ${r.error}`));
   }).catch((e) => console.error("Startup property sync failed (non-fatal):", e.message));
   app.listen(PORT, () => console.log(`FinApp server running on :${PORT}`));
 });

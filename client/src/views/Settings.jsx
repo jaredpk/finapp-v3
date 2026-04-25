@@ -141,7 +141,12 @@ export default function Settings({ reloadData, user }) {
       if (res.error) { setPropResult(`Error: ${res.error}`); return; }
       const updated = await fetchProperties();
       setProperties(updated.properties || []);
-      setPropResult(`Synced ${res.synced} property value${res.synced !== 1 ? "s" : ""}.`);
+      const failures = (res.results || []).filter(r => !r.ok);
+      if (failures.length) {
+        setPropResult(`Synced ${res.synced}. Errors: ${failures.map(f => `${f.address}: ${f.error}`).join(" | ")}`);
+      } else {
+        setPropResult(`Synced ${res.synced} property value${res.synced !== 1 ? "s" : ""}.`);
+      }
       if (reloadData) reloadData();
     } finally {
       setSyncingProps(false);
