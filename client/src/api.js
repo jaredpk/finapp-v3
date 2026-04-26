@@ -196,6 +196,15 @@ export async function syncPropertiesApi() {
   return r.json();
 }
 
+export async function setPropertyBaselineApi(id, value, msa) {
+  const r = await fetch(`${BASE}/properties/${id}/baseline`, {
+    method: "POST",
+    headers: { ...(await authHeaders()), "Content-Type": "application/json" },
+    body: JSON.stringify({ value, msa }),
+  });
+  return r.json();
+}
+
 // ── Manual accounts ───────────────────────────────────────────────────────────
 export async function fetchManualAccounts() {
   const r = await fetch(`${BASE}/manual-accounts`, { headers: await authHeaders() });

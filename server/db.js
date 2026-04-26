@@ -128,6 +128,14 @@ export async function initDb() {
     );
   `);
 
+  // Add FHFA-based property valuation columns
+  await pool.query(`
+    ALTER TABLE properties ADD COLUMN IF NOT EXISTS baseline_value NUMERIC(14,2);
+    ALTER TABLE properties ADD COLUMN IF NOT EXISTS baseline_date DATE;
+    ALTER TABLE properties ADD COLUMN IF NOT EXISTS baseline_fhfa_index NUMERIC(14,6);
+    ALTER TABLE properties ADD COLUMN IF NOT EXISTS fhfa_msa INTEGER;
+  `);
+
   // Add account column to investment_holdings to distinguish multiple accounts per institution
   await pool.query(`
     ALTER TABLE investment_holdings ADD COLUMN IF NOT EXISTS account TEXT;
@@ -1042,7 +1050,8 @@ export async function upsertMerchantOverride(transactionId, merchantName) {
 // ── Properties ────────────────────────────────────────────────────────────────
 export async function getProperties() {
   const { rows } = await pool.query(
-    `SELECT id, address, nickname, last_value::float, last_synced_at, created_at
+    `SELECT id, address, nickname, last_value::float, last_synced_at, created_at,
+            baseline_value::float, baseline_date, baseline_fhfa_index::float, fhfa_msa
      FROM properties ORDER BY created_at`
   );
   return rows;
@@ -1072,6 +1081,16 @@ export async function updatePropertyValue(id, value) {
   await pool.query(
     `UPDATE properties SET last_value = $1, last_synced_at = NOW() WHERE id = $2`,
     [value, id]
+  );
+}
+
+export async function setPropertyBaseline(id, value, msaCode, fhfaIndex) {
+  await pool.query(
+    `UPDATE properties
+     SET baseline_value = $1, baseline_date = NOW(), baseline_fhfa_index = $2, fhfa_msa = $3,
+         last_value = $1, last_synced_at = NOW()
+     WHERE id = $4`,
+    [value, fhfaIndex, msaCode, id]
   );
 }
 

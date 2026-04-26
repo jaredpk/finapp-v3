@@ -31,7 +31,7 @@ import {
   upsertImportedTransaction, deleteImportedTransactions,
   upsertAccountBalances, getLatestBalances,
   upsertInvestmentHoldings, getLatestHoldings,
-  getProperties, upsertProperty, deleteProperty, updatePropertyValue,
+  getProperties, upsertProperty, deleteProperty, updatePropertyValue, setPropertyBaseline,
   getManualAccounts, upsertManualAccount, deleteManualAccount,
 } from "./db.js";
 import pool from "./db.js";
@@ -107,45 +107,76 @@ async function syncTransactions() {
   }
 }
 
-// ── Rentcast property value sync ──────────────────────────────────────────────
-async function syncPropertyValues(forceAll = false) {
-  const apiKey = process.env.RENTCAST_API_KEY;
-  if (!apiKey) return { synced: 0, results: [] };
+// ── FHFA property value drift ─────────────────────────────────────────────────
+const FHFA_CSV_URL = "https://www.fhfa.gov/hpi/download/quarterly_datasets/hpi_at_metro.csv";
+let fhfaCache = null;
+let fhfaCacheTime = 0;
+const FHFA_CACHE_TTL = 24 * 60 * 60 * 1000;
+
+function parseCsvRow(line) {
+  const cols = [];
+  let cur = "";
+  let inQuote = false;
+  for (const ch of line) {
+    if (ch === '"') { inQuote = !inQuote; }
+    else if (ch === "," && !inQuote) { cols.push(cur.trim()); cur = ""; }
+    else { cur += ch; }
+  }
+  cols.push(cur.trim());
+  return cols;
+}
+
+async function fetchFHFAData() {
+  if (fhfaCache && Date.now() - fhfaCacheTime < FHFA_CACHE_TTL) return fhfaCache;
+  const r = await fetch(FHFA_CSV_URL);
+  if (!r.ok) throw new Error(`FHFA fetch failed: HTTP ${r.status}`);
+  const text = await r.text();
+  const lines = text.split("\n");
+  const data = {};
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    const cols = parseCsvRow(line);
+    if (cols.length < 5) continue;
+    const msaCode = parseInt(cols[1]);
+    const year = parseInt(cols[2]);
+    const quarter = parseInt(cols[3]);
+    const indexVal = parseFloat(cols[4]);
+    if (!msaCode || isNaN(year) || isNaN(quarter) || isNaN(indexVal)) continue;
+    if (!data[msaCode]) data[msaCode] = [];
+    data[msaCode].push({ year, quarter, index: indexVal });
+  }
+  fhfaCache = data;
+  fhfaCacheTime = Date.now();
+  return data;
+}
+
+async function getLatestFHFAIndex(msaCode) {
+  const data = await fetchFHFAData();
+  const entries = data[msaCode];
+  if (!entries || entries.length === 0) throw new Error(`MSA ${msaCode} not found in FHFA data`);
+  return entries.sort((a, b) => a.year !== b.year ? b.year - a.year : b.quarter - a.quarter)[0];
+}
+
+async function applyFHFADrift() {
   const props = await getProperties();
-  const toSync = forceAll ? props : props.filter((p) => {
-    if (!p.last_synced_at) return true;
-    return (Date.now() - new Date(p.last_synced_at).getTime()) / 86400000 >= 30;
-  });
-  let synced = 0;
+  const toUpdate = props.filter((p) => p.fhfa_msa && p.baseline_value != null && p.baseline_fhfa_index != null);
+  if (toUpdate.length === 0) return { updated: 0, results: [] };
+  let updated = 0;
   const results = [];
-  for (const p of toSync) {
+  for (const p of toUpdate) {
     try {
-      const url = `https://api.rentcast.io/v1/avm/value?address=${encodeURIComponent(p.address)}`;
-      const r = await fetch(url, { headers: { "X-Api-Key": apiKey } });
-      const body = await r.json();
-      if (!r.ok) {
-        const msg = body?.message || body?.error || `HTTP ${r.status}`;
-        console.error(`Rentcast [${p.address}]: ${msg}`);
-        results.push({ id: p.id, address: p.address, ok: false, error: msg });
-        continue;
-      }
-      // Rentcast may return 'price' or 'value' depending on endpoint/plan
-      const value = body.price ?? body.value ?? body.priceRangeLow ?? null;
-      if (value != null) {
-        await updatePropertyValue(p.id, value);
-        synced++;
-        results.push({ id: p.id, address: p.address, ok: true, value });
-      } else {
-        const msg = `No value in response: ${JSON.stringify(body)}`;
-        console.error(`Rentcast [${p.address}]: ${msg}`);
-        results.push({ id: p.id, address: p.address, ok: false, error: msg });
-      }
+      const latest = await getLatestFHFAIndex(p.fhfa_msa);
+      const driftedValue = Math.round(p.baseline_value * (latest.index / p.baseline_fhfa_index));
+      await updatePropertyValue(p.id, driftedValue);
+      updated++;
+      results.push({ id: p.id, address: p.address, ok: true, value: driftedValue, year: latest.year, quarter: latest.quarter });
     } catch (err) {
-      console.error(`Rentcast sync error [${p.address}]:`, err.message);
+      console.error(`FHFA drift error [${p.address}]:`, err.message);
       results.push({ id: p.id, address: p.address, ok: false, error: err.message });
     }
   }
-  return { synced, results };
+  return { updated, results };
 }
 
 // ── Auth helpers ──────────────────────────────────────────────────────────────
@@ -443,7 +474,7 @@ app.get("/api/accounts", requireAuth, async (req, res) => {
       type: "other",
       subtype: "real estate",
       balances: { current: parseFloat(p.last_value), available: null },
-      institutionName: "Rentcast Estimate",
+      institutionName: "FHFA Estimate",
       mask: null,
     }));
 
@@ -629,7 +660,7 @@ app.get("/api/investment-holdings", requireAuth, async (req, res) => {
   res.json(rows);
 });
 
-// ── Properties (Rentcast) ─────────────────────────────────────────────────────
+// ── Properties (FHFA) ────────────────────────────────────────────────────────
 app.get("/api/properties", requireAuth, async (req, res) => {
   const props = await getProperties();
   res.json({ properties: props });
@@ -648,9 +679,30 @@ app.delete("/api/properties/:id", requireAuth, async (req, res) => {
 });
 
 app.post("/api/properties/sync", requireAuth, async (req, res) => {
-  if (!process.env.RENTCAST_API_KEY) return res.status(400).json({ error: "RENTCAST_API_KEY not configured" });
-  const { synced, results } = await syncPropertyValues(true);
-  res.json({ synced, results });
+  try {
+    const { updated, results } = await applyFHFADrift();
+    res.json({ synced: updated, results });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/properties/:id/baseline", requireAuth, async (req, res) => {
+  const { value, msa } = req.body;
+  if (!value || isNaN(parseFloat(value))) return res.status(400).json({ error: "value required" });
+  const props = await getProperties();
+  const prop = props.find((p) => p.id === parseInt(req.params.id));
+  if (!prop) return res.status(404).json({ error: "Property not found" });
+  const msaCode = msa ? parseInt(msa) : prop.fhfa_msa;
+  if (!msaCode) return res.status(400).json({ error: "msa required for first baseline" });
+  try {
+    const latest = await getLatestFHFAIndex(msaCode);
+    await setPropertyBaseline(prop.id, parseFloat(value), msaCode, latest.index);
+    const updated = await getProperties();
+    res.json({ property: updated.find((p) => p.id === prop.id), fhfa: { year: latest.year, quarter: latest.quarter, index: latest.index } });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 // ── Manual accounts ───────────────────────────────────────────────────────────
@@ -1090,10 +1142,10 @@ initDb().then(async () => {
   } catch (e) {
     console.error("Startup dedup failed (non-fatal):", e.message);
   }
-  // Sync any properties that haven't been updated in 30+ days (non-blocking)
-  syncPropertyValues().then(({ synced, results }) => {
-    if (synced > 0) console.log(`Startup: synced ${synced} property value(s) via Rentcast`);
-    results.filter(r => !r.ok).forEach(r => console.error(`Startup Rentcast failed [${r.address}]: ${r.error}`));
-  }).catch((e) => console.error("Startup property sync failed (non-fatal):", e.message));
+  // Apply FHFA drift to properties with baselines (non-blocking)
+  applyFHFADrift().then(({ updated, results }) => {
+    if (updated > 0) console.log(`Startup: applied FHFA drift to ${updated} property value(s)`);
+    results.filter((r) => !r.ok).forEach((r) => console.error(`Startup FHFA drift failed [${r.address}]: ${r.error}`));
+  }).catch((e) => console.error("Startup FHFA drift failed (non-fatal):", e.message));
   app.listen(PORT, () => console.log(`FinApp server running on :${PORT}`));
 });

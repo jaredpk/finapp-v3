@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { getApiKey, generateApiKey, importXlsx, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi, fetchManualAccounts, saveManualAccount, deleteManualAccountApi } from "../api.js";
+import { getApiKey, generateApiKey, importXlsx, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi, setPropertyBaselineApi, fetchManualAccounts, saveManualAccount, deleteManualAccountApi } from "../api.js";
 
 export default function Settings({ reloadData, user }) {
   const [apiKey, setApiKey] = useState(null);
@@ -15,13 +15,15 @@ export default function Settings({ reloadData, user }) {
   const [xlsxImportResult, setXlsxImportResult] = useState(null);
 
   // Properties state
-  const [properties, setProperties]     = useState([]);
-  const [propsLoading, setPropsLoading] = useState(true);
-  const [newAddr, setNewAddr]           = useState("");
-  const [newNick, setNewNick]           = useState("");
-  const [addingProp, setAddingProp]     = useState(false);
-  const [syncingProps, setSyncingProps] = useState(false);
-  const [propResult, setPropResult]     = useState(null);
+  const [properties, setProperties]         = useState([]);
+  const [propsLoading, setPropsLoading]     = useState(true);
+  const [newAddr, setNewAddr]               = useState("");
+  const [newNick, setNewNick]               = useState("");
+  const [addingProp, setAddingProp]         = useState(false);
+  const [syncingProps, setSyncingProps]     = useState(false);
+  const [propResult, setPropResult]         = useState(null);
+  const [editingProperty, setEditingProperty] = useState(null); // { id, value, msa }
+  const [savingBaseline, setSavingBaseline] = useState(false);
 
   // Manual accounts state
   const [manualAccounts, setManualAccounts]   = useState([]);
@@ -177,6 +179,23 @@ export default function Settings({ reloadData, user }) {
     }
   }
 
+  async function handleSetBaseline(id) {
+    if (!editingProperty || editingProperty.id !== id) return;
+    const { value, msa } = editingProperty;
+    if (!value) return;
+    setSavingBaseline(true);
+    setPropResult(null);
+    try {
+      const res = await setPropertyBaselineApi(id, parseFloat(value), msa ? parseInt(msa) : undefined);
+      if (res.error) { setPropResult(`Error: ${res.error}`); return; }
+      setProperties((prev) => prev.map((p) => (p.id === id ? res.property : p)));
+      setEditingProperty(null);
+      if (reloadData) reloadData();
+    } finally {
+      setSavingBaseline(false);
+    }
+  }
+
   // ── Dedup ─────────────────────────────────────────────────────────────────────
   async function handleDedupePreview() {
     setPreviewing(true);
@@ -303,7 +322,9 @@ export default function Settings({ reloadData, user }) {
       <section style={styles.card}>
         <h2 style={styles.cardTitle}>Properties</h2>
         <p style={styles.description}>
-          Add your properties to include their Rentcast estimates in net worth. Values refresh automatically every 30 days.
+          Enter a verified Zillow estimate once a year. Between updates, values drift automatically using the{" "}
+          <a href="https://www.fhfa.gov/data/hpi" target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>FHFA House Price Index</a>{" "}
+          for your metro area.
         </p>
         {propsLoading ? (
           <p style={styles.muted}>Loading…</p>
@@ -312,19 +333,71 @@ export default function Settings({ reloadData, user }) {
             {properties.length > 0 && (
               <div style={{ marginBottom: 16 }}>
                 {properties.map((p) => (
-                  <div key={p.id} style={styles.propRow}>
-                    <div style={{ flex: 1 }}>
-                      <p style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", margin: 0 }}>
-                        {p.nickname || p.address}
-                      </p>
-                      {p.nickname && <p style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", margin: "2px 0 0" }}>{p.address}</p>}
-                      <p style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", margin: "2px 0 0" }}>
-                        {p.last_value != null
-                          ? `$${parseFloat(p.last_value).toLocaleString("en-US", { maximumFractionDigits: 0 })} · synced ${p.last_synced_at ? new Date(p.last_synced_at).toLocaleDateString() : "never"}`
-                          : "Not yet synced"}
-                      </p>
+                  <div key={p.id} style={{ ...styles.propRow, flexDirection: "column", alignItems: "flex-start" }}>
+                    <div style={{ display: "flex", width: "100%", alignItems: "flex-start", gap: 12 }}>
+                      <div style={{ flex: 1 }}>
+                        <p style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", margin: 0 }}>
+                          {p.nickname || p.address}
+                        </p>
+                        {p.nickname && (
+                          <p style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", margin: "2px 0 0" }}>{p.address}</p>
+                        )}
+                        <p style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", margin: "2px 0 0" }}>
+                          {p.last_value != null
+                            ? `$${parseFloat(p.last_value).toLocaleString("en-US", { maximumFractionDigits: 0 })} · updated ${p.last_synced_at ? new Date(p.last_synced_at).toLocaleDateString() : "never"}`
+                            : "No value set — click Update Value to add a Zillow estimate"}
+                        </p>
+                        {p.baseline_value != null && (
+                          <p style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", margin: "2px 0 0" }}>
+                            {`Zillow baseline: $${parseFloat(p.baseline_value).toLocaleString("en-US", { maximumFractionDigits: 0 })} · ${p.baseline_date ? new Date(p.baseline_date).toLocaleDateString() : ""} · MSA ${p.fhfa_msa}`}
+                          </p>
+                        )}
+                      </div>
+                      <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+                        {editingProperty?.id !== p.id && (
+                          <button style={styles.regenerateBtn} onClick={() => setEditingProperty({ id: p.id, value: "", msa: p.fhfa_msa ? String(p.fhfa_msa) : "" })}>
+                            Update Value
+                          </button>
+                        )}
+                        <button style={styles.deleteBtn} onClick={() => handleDeleteProperty(p.id)}>Remove</button>
+                      </div>
                     </div>
-                    <button style={styles.deleteBtn} onClick={() => handleDeleteProperty(p.id)}>Remove</button>
+                    {editingProperty?.id === p.id && (
+                      <div style={{ marginTop: 10, width: "100%" }}>
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                          <input
+                            style={{ ...styles.propInput, width: 180 }}
+                            type="number"
+                            placeholder="Zillow estimate (e.g. 669000)"
+                            value={editingProperty.value}
+                            onChange={(e) => setEditingProperty((prev) => ({ ...prev, value: e.target.value }))}
+                          />
+                          <input
+                            style={{ ...styles.propInput, width: 130 }}
+                            placeholder="MSA code (e.g. 41620)"
+                            value={editingProperty.msa}
+                            onChange={(e) => setEditingProperty((prev) => ({ ...prev, msa: e.target.value }))}
+                          />
+                        </div>
+                        {!p.fhfa_msa && (
+                          <p style={{ fontSize: 11, color: "var(--muted)", margin: "6px 0 0" }}>
+                            Find your MSA code at{" "}
+                            <a href="https://www.fhfa.gov/data/hpi" target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>fhfa.gov/data/hpi</a>
+                            {" "}→ All-Transactions MSA spreadsheet.
+                          </p>
+                        )}
+                        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                          <button
+                            style={styles.generateBtn}
+                            onClick={() => handleSetBaseline(p.id)}
+                            disabled={savingBaseline || !editingProperty.value || (!p.fhfa_msa && !editingProperty.msa)}
+                          >
+                            {savingBaseline ? "Saving…" : "Save"}
+                          </button>
+                          <button style={styles.regenerateBtn} onClick={() => setEditingProperty(null)}>Cancel</button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -339,7 +412,7 @@ export default function Settings({ reloadData, user }) {
             {properties.length > 0 && (
               <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--border)" }}>
                 <button style={styles.regenerateBtn} onClick={handleSyncProperties} disabled={syncingProps}>
-                  {syncingProps ? "Syncing…" : "Sync Values Now"}
+                  {syncingProps ? "Refreshing…" : "Refresh FHFA Drift"}
                 </button>
               </div>
             )}
