@@ -4,6 +4,7 @@ import {
   fetchCashflowStates, saveCashflowState,
   fetchCashflowMappings, saveCashflowMapping,
   fetchTransactionsForMonth,
+  fetchAccounts,
 } from "../api";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -154,6 +155,16 @@ function suggestMatch(plaidTxn, presetsMap) {
     if (s > bestScore) { bestScore = s; best = row; }
   }
   return best;
+}
+
+// Match a Plaid account name to a cashflow account: check if the account's
+// id or any long word in its display name appears in the Plaid name.
+function matchPlaidToAccount(plaidName, acctId, acctDisplayName) {
+  const p = plaidName.toLowerCase();
+  if (p.includes(acctId.toLowerCase())) return true;
+  return acctDisplayName.toLowerCase().split(/\s+/)
+    .filter(w => w.length > 3)
+    .some(w => p.includes(w));
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
@@ -542,6 +553,9 @@ export default function CashFlow() {
   const [startingBals, setStartingBals] = useState(() =>
     Object.fromEntries(DEFAULT_ACCOUNTS.map(a => [a.id, a.defaultStart]))
   );
+  // Track which accounts the user has manually set a starting balance for —
+  // those won't be overwritten by the live Plaid balance.
+  const [userSetStartIds, setUserSetStartIds] = useState(new Set());
   const [monthStates, setMonthStates] = useState({});
   const [accounts, setAccounts] = useState(DEFAULT_ACCOUNTS);
   const [mappings, setMappings] = useState([]);
@@ -570,17 +584,34 @@ export default function CashFlow() {
       });
       setPresets(merged);
 
-      // Starting balances stored as __start_accountId presets
+      // Starting balances stored as __start_accountId presets (user-set overrides)
       const newBals = {};
+      const newUserSet = new Set();
       DEFAULT_ACCOUNTS.forEach(a => {
         const db = dbPresets.find(p => p.name === `__start_${a.id}`);
-        if (db) newBals[a.id] = db.amount;
+        if (db) { newBals[a.id] = db.amount; newUserSet.add(a.id); }
       });
-      if (Object.keys(newBals).length > 0) {
-        setStartingBals(prev => ({ ...prev, ...newBals }));
-      }
+      if (Object.keys(newBals).length > 0) setStartingBals(prev => ({ ...prev, ...newBals }));
+      if (newUserSet.size > 0) setUserSetStartIds(newUserSet);
     }).catch(() => {});
   }, []);
+
+  // Load live Plaid balances and use them as starting balances for linked accounts
+  useEffect(() => {
+    fetchAccounts().then(data => {
+      const plaidAccts = data?.accounts ?? [];
+      if (!plaidAccts.length) return;
+      setStartingBals(prev => {
+        const next = { ...prev };
+        DEFAULT_ACCOUNTS.forEach(acct => {
+          if (userSetStartIds.has(acct.id)) return; // user manually set this, don't overwrite
+          const match = plaidAccts.find(p => matchPlaidToAccount(p.name, acct.id, acct.name));
+          if (match?.balances?.current != null) next[acct.id] = match.balances.current;
+        });
+        return next;
+      });
+    }).catch(() => {});
+  }, [userSetStartIds]);
 
   // Load mapping rules once
   useEffect(() => {
@@ -709,6 +740,7 @@ export default function CashFlow() {
 
   const saveStartingBalance = useCallback((accountId, amount) => {
     setStartingBals(prev => ({ ...prev, [accountId]: amount }));
+    setUserSetStartIds(prev => new Set([...prev, accountId]));
     saveCashflowPreset(`__start_${accountId}`, amount, null, null).catch(() => {});
     setModal(null);
   }, []);
