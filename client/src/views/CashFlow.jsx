@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useCallback } from "react";
+import React, { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import {
   fetchCashflowPresets, saveCashflowPreset,
   fetchCashflowStates, saveCashflowState,
@@ -36,21 +36,21 @@ const DEFAULT_ACCOUNTS = [
     name: "Amex Checking",
     defaultStart: 1712,
     transactions: [
-      { id: 1,  day: 1,  name: "Personal Jared",                  freq: "Monthly",    amount: -2637   },
-      { id: 2,  day: 5,  name: "Paycheck",                        freq: "Bi-Monthly", amount: 4009    },
-      { id: 3,  day: 7,  name: "Jared Transfer to Shared",        freq: "Monthly",    amount: -1900   },
-      { id: 4,  day: 10, name: "UESP",                            freq: "Monthly",    amount: -100    },
-      { id: 5,  day: 19, name: "Transfer Reserve Account",        freq: "Monthly",    amount: -500    },
-      { id: 6,  day: 20, name: "Paycheck",                        freq: "Bi-Monthly", amount: 4009    },
-      { id: 7,  day: 24, name: "Jared Transfer to Personal Macu", freq: "Monthly",    amount: -629.84 },
-      { id: 8,  day: 27, name: "Transfer to Long-Term Purchases", freq: "Monthly",    amount: -250    },
-      { id: 9,  day: 27, name: "Transfer to Emergency Fund",      freq: "Monthly",    amount: -250    },
-      { id: 10, day: 27, name: "Jared Transfer to Shared",        freq: "Monthly",    amount: -1900   },
-      { id: 11, day: 28, name: "Transfer to Joint Savings",       freq: "Monthly",    amount: -385    },
-      { id: 12, day: 30, name: "Transfer for PTO Reserve",        freq: "Monthly",    amount: -320    },
-      { id: 13, day: 30, name: "Personal IRA Transfer",           freq: "Monthly",    amount: -500    },
-      { id: 14, day: 30, name: "Jared Transfer to Shared",        freq: "Monthly",    amount: -1900   },
-      { id: 15, day: 30, name: "Paycheck (Month End)",            freq: "Monthly",    amount: 4009    },
+      { id: 1,  day: 1,  name: "Personal Jared",                  freq: "Monthly",    amount: -2637    },
+      { id: 2,  day: 5,  name: "Paycheck",                        freq: "Bi-Monthly", amount: 4009     },
+      { id: 3,  day: 7,  name: "Jared Transfer to Shared",        freq: "Monthly",    amount: -1900    },
+      { id: 4,  day: 10, name: "UESP",                            freq: "Monthly",    amount: -100     },
+      { id: 5,  day: 19, name: "Transfer Reserve Account",        freq: "Monthly",    amount: -500     },
+      { id: 6,  day: 20, name: "Paycheck",                        freq: "Bi-Monthly", amount: 4009     },
+      { id: 7,  day: 24, name: "Jared Transfer to Personal Macu", freq: "Monthly",    amount: -629.84  },
+      { id: 8,  day: 27, name: "Transfer to Long-Term Purchases", freq: "Monthly",    amount: -250     },
+      { id: 9,  day: 27, name: "Transfer to Emergency Fund",      freq: "Monthly",    amount: -250     },
+      { id: 10, day: 27, name: "Jared Transfer to Shared",        freq: "Monthly",    amount: -1900    },
+      { id: 11, day: 28, name: "Transfer to Joint Savings",       freq: "Monthly",    amount: -385     },
+      { id: 12, day: 30, name: "Transfer for PTO Reserve",        freq: "Monthly",    amount: -320     },
+      { id: 13, day: 30, name: "Personal IRA Transfer",           freq: "Monthly",    amount: -500     },
+      { id: 14, day: 30, name: "Jared Transfer to Shared",        freq: "Monthly",    amount: -1900,   defaultPending: true },
+      { id: 15, day: 30, name: "Paycheck (Month End)",            freq: "Monthly",    amount: 4009,    defaultPending: true },
     ],
   },
   {
@@ -58,9 +58,9 @@ const DEFAULT_ACCOUNTS = [
     name: "MACU Checking",
     defaultStart: 1201,
     transactions: [
-      { id: 1, day: 5,  name: "Child Support Out",               freq: "Bi-Monthly", amount: -314.93 },
-      { id: 2, day: 19, name: "Child Support Out",               freq: "Bi-Monthly", amount: -314.93 },
-      { id: 3, day: 23, name: "Jared Transfer to Personal Macu", freq: "Monthly",    amount: 629.84  },
+      { id: 1, day: 5,  name: "Child Support Out",   freq: "Bi-Monthly", amount: -314.93 },
+      { id: 2, day: 19, name: "Child Support Out",   freq: "Bi-Monthly", amount: -314.93 },
+      { id: 3, day: 23, name: "Jared Transfer (Personal)", freq: "Monthly", amount: 629.84 },
     ],
   },
   {
@@ -68,22 +68,23 @@ const DEFAULT_ACCOUNTS = [
     name: "Shared Checking",
     defaultStart: 3610,
     transactions: [
-      { id: 1,  day: 1,  name: "Other Misc. Shared",              freq: "Bi-Monthly", amount: -500   },
-      { id: 2,  day: 1,  name: "House Payment",                   freq: "Bi-Monthly", amount: -2017  },
-      { id: 3,  day: 2,  name: "Personal Jared",                  freq: "Monthly",    amount: 2637   },
-      { id: 4,  day: 7,  name: "Jared Transfer In",               freq: "Monthly",    amount: 1900   },
-      { id: 5,  day: 12, name: "Alta Transfer",                   freq: "Bi-Weekly",  amount: 1500   },
-      { id: 6,  day: 15, name: "Car Payment",                     freq: "Monthly",    amount: -289   },
-      { id: 7,  day: 24, name: "Alta Transfer",                   freq: "Bi-Weekly",  amount: 1500   },
-      { id: 8,  day: 24, name: "Transfer for Credit Card",        freq: "Monthly",    amount: -6000  },
-      { id: 9,  day: 28, name: "Jared Transfer In",               freq: "Monthly",    amount: 1900   },
-      { id: 10, day: 28, name: "Misc. Utilities",                 freq: "Monthly",    amount: -500   },
-      { id: 11, day: 30, name: "Jared Transfer In",               freq: "Monthly",    amount: 1900   },
+      { id: 1,  day: 1,  name: "Other Misc. Shared",       freq: "Bi-Monthly", amount: -500   },
+      { id: 2,  day: 1,  name: "House Payment",            freq: "Bi-Monthly", amount: -2017  },
+      { id: 3,  day: 2,  name: "Personal Jared",           freq: "Monthly",    amount: 2637   },
+      { id: 4,  day: 7,  name: "Jared Transfer In",        freq: "Monthly",    amount: 1900   },
+      { id: 5,  day: 12, name: "Alta Transfer",            freq: "Bi-Weekly",  amount: 1500   },
+      { id: 6,  day: 15, name: "Car Payment",              freq: "Monthly",    amount: -289   },
+      { id: 7,  day: 24, name: "Alta Transfer",            freq: "Bi-Weekly",  amount: 1500   },
+      { id: 8,  day: 24, name: "Transfer for Credit Card", freq: "Monthly",    amount: -6000  },
+      { id: 9,  day: 28, name: "Jared Transfer In",        freq: "Monthly",    amount: 1900   },
+      { id: 10, day: 28, name: "Misc. Utilities",          freq: "Monthly",    amount: -500   },
+      { id: 11, day: 30, name: "Jared Transfer In",        freq: "Monthly",    amount: 1900,  defaultPending: true },
+      { id: 12, day: 30, name: "Alta Transfer",            freq: "Bi-Weekly",  amount: 1500,  defaultPending: true },
     ],
   },
 ];
 
-// Flat list of all cashflow rows for matching / dropdowns
+// Flat list of all cashflow rows for matching
 const ALL_ROWS = DEFAULT_ACCOUNTS.flatMap(acct =>
   acct.transactions.map(t => ({
     accountId: acct.id,
@@ -113,33 +114,65 @@ const DEFAULT_FIXED = [
   { name: "Car Payment",                        amount: -289,    freq: "Monthly",    note: "" },
 ];
 
+// ── 3-paycheck month detection ────────────────────────────────────────────────
+function computeThreePaycheckMonths(year, baseDateNum) {
+  const by = Math.floor(baseDateNum / 10000);
+  const bm = Math.floor((baseDateNum % 10000) / 100) - 1;
+  const bd = baseDateNum % 100;
+  const base = new Date(by, bm, bd);
+  const yearStart = new Date(year, 0, 1);
+  const yearEnd = new Date(year, 11, 31);
+  const diffDays = Math.floor((yearStart - base) / 86400000);
+  const offsetCycles = Math.ceil(diffDays / 14);
+  let current = new Date(base.getTime() + offsetCycles * 14 * 86400000);
+  const count = {};
+  while (current <= yearEnd) {
+    if (current.getFullYear() === year) {
+      const m = current.getMonth();
+      count[m] = (count[m] || 0) + 1;
+    }
+    current = new Date(current.getTime() + 14 * 86400000);
+  }
+  return new Set(
+    Object.entries(count).filter(([, c]) => c >= 3).map(([m]) => parseInt(m))
+  );
+}
+
+function baseDateToDisplay(num) {
+  const y = Math.floor(num / 10000);
+  const m = Math.floor((num % 10000) / 100);
+  const d = num % 100;
+  return `${MONTHS[m - 1]} ${d}, ${y}`;
+}
+
+function displayToBaseDateNum(dateStr) {
+  // Accepts "YYYY-MM-DD" from <input type="date">
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return y * 10000 + m * 100 + d;
+}
+
 // ── Matching algorithm ────────────────────────────────────────────────────────
 // Plaid: positive amount = expense (money out), negative = income (money in)
 function scoreMatch(plaidTxn, row, presetsMap) {
-  const plaidCashflowAmt = -plaidTxn.amount; // convert to cashflow sign convention
+  const plaidCashflowAmt = -plaidTxn.amount;
   const expectedAmt = presetsMap[row.txnName] ?? row.defaultAmount;
   const plaidDay = new Date(plaidTxn.date + "T12:00:00").getDate();
   const merchant = (plaidTxn.merchant_name || plaidTxn.name || "").toLowerCase();
 
   let score = 0;
-
-  // Wrong direction is a dealbreaker
   if ((plaidCashflowAmt > 0) !== (expectedAmt > 0)) return -99;
 
-  // Amount match
   if (Math.abs(expectedAmt) > 0) {
     const ratio = Math.abs(plaidCashflowAmt) / Math.abs(expectedAmt);
     if (ratio >= 0.97 && ratio <= 1.03) score += 5;
     else if (ratio >= 0.9 && ratio <= 1.1) score += 2;
   }
 
-  // Day proximity
   const dayDiff = Math.abs(plaidDay - row.txnDay);
   if (dayDiff === 0) score += 3;
   else if (dayDiff <= 2) score += 2;
   else if (dayDiff <= 5) score += 1;
 
-  // Name/keyword overlap (skip short words)
   const txnWords = row.txnName.toLowerCase().split(/[\s_\-&.,]+/).filter(w => w.length > 3);
   const overlap = txnWords.filter(w => merchant.includes(w)).length;
   score += Math.min(overlap * 2, 4);
@@ -147,18 +180,7 @@ function scoreMatch(plaidTxn, row, presetsMap) {
   return score;
 }
 
-function suggestMatch(plaidTxn, presetsMap) {
-  let best = null;
-  let bestScore = 3; // minimum threshold
-  for (const row of ALL_ROWS) {
-    const s = scoreMatch(plaidTxn, row, presetsMap);
-    if (s > bestScore) { bestScore = s; best = row; }
-  }
-  return best;
-}
-
-// Match a Plaid account name to a cashflow account: check if the account's
-// id or any long word in its display name appears in the Plaid name.
+// Match a Plaid account name to a cashflow account
 function matchPlaidToAccount(plaidName, acctId, acctDisplayName) {
   const p = plaidName.toLowerCase();
   if (p.includes(acctId.toLowerCase())) return true;
@@ -199,15 +221,19 @@ function SummaryBar({ takeHome, expenses, freeCashflow }) {
   );
 }
 
-function AccountTable({ account, startingBalance, presetsMap, monthStates, onTogglePending, onEditAmount, onEditStart, onAddRow, onDeleteRow }) {
+function AccountTable({ account, startingBalance, presetsMap, monthStates, isThreePaycheckMonth, onTogglePending, onEditAmount, onEditStart, onAddRow, onDeleteRow }) {
   const sorted = [...account.transactions].sort((a, b) => a.day - b.day);
+  // Hide rows flagged defaultPending in non-3-paycheck months
+  const filtered = sorted.filter(t => !t.defaultPending || isThreePaycheckMonth);
   const effectiveAmt = (t) => presetsMap[t.name] ?? t.amount;
 
   let running = startingBalance;
   let pendingBal = startingBalance;
-  const rows = sorted.map((t) => {
+  const rows = filtered.map((t) => {
     const state = monthStates[`${account.id}_${t.id}`] || {};
-    const isPending = state.isPending ?? false;
+    const isPending = state.isPending !== undefined
+      ? state.isPending
+      : !!(t.defaultPending && isThreePaycheckMonth);
     const amt = effectiveAmt(t);
     if (isPending) pendingBal += amt;
     running += amt;
@@ -312,7 +338,7 @@ function AccountTable({ account, startingBalance, presetsMap, monthStates, onTog
 }
 
 // ── Fixed Amounts Panel (editable) ────────────────────────────────────────────
-function FixedAmountsPanel({ presets, onEditPreset }) {
+function FixedAmountsPanel({ presets, year, payBaseDate, threePaycheckMonths, onEditPreset, onEditPayCycle }) {
   const [editingName, setEditingName] = useState(null);
   const [editVal, setEditVal] = useState("");
 
@@ -328,6 +354,8 @@ function FixedAmountsPanel({ presets, onEditPreset }) {
   const expenses = presets.filter((i) => i.amount <= 0);
   const totalIn = income.reduce((s, i) => s + i.amount, 0);
   const totalOut = expenses.reduce((s, i) => s + i.amount, 0);
+
+  const payCycleMonthNames = Array.from(threePaycheckMonths).sort((a, b) => a - b).map(m => MONTHS[m]);
 
   return (
     <div style={styles.fixedPanel}>
@@ -371,106 +399,25 @@ function FixedAmountsPanel({ presets, onEditPreset }) {
         <span style={{ color: "var(--muted)", fontSize: 12, fontFamily: "var(--font-mono)" }}>|</span>
         <span style={{ color: "var(--accent)", fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 600 }}>Net: {fmt(totalIn + totalOut, true)}</span>
       </div>
-    </div>
-  );
-}
-
-// ── Verify Queue ──────────────────────────────────────────────────────────────
-function VerifyItem({ plaidTxn, suggested, presetsMap, onConfirm, onSkip }) {
-  const [showPicker, setShowPicker] = useState(false);
-  const [pickerVal, setPickerVal] = useState(
-    suggested ? `${suggested.accountId}:${suggested.txnId}` : ""
-  );
-
-  const merchant = plaidTxn.merchant_name || plaidTxn.name || "Unknown";
-  // Plaid positive = expense; negative = income
-  const displayAmt = -plaidTxn.amount;
-  const isIncome = displayAmt > 0;
-
-  const confirmSelected = () => {
-    if (!pickerVal) return;
-    const [accountId, txnIdStr] = pickerVal.split(":");
-    const row = ALL_ROWS.find(r => r.accountId === accountId && r.txnId === parseInt(txnIdStr));
-    if (row) onConfirm(plaidTxn, row);
-  };
-
-  return (
-    <div style={styles.verifyItem}>
-      <div style={styles.verifyLeft}>
-        <span style={styles.verifyDate}>{plaidTxn.date}</span>
-        <span style={styles.verifyMerchant}>{merchant}</span>
-        <span style={{ fontFamily: "var(--font-mono)", fontSize: 13, fontWeight: 600, color: isIncome ? "var(--green)" : "var(--red)" }}>
-          {fmt(displayAmt, true)}
+      <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--border2)", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-mono)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+          Pay cycle:
         </span>
-      </div>
-
-      <span style={styles.verifyArrow}>→</span>
-
-      <div style={styles.verifyRight}>
-        {showPicker ? (
-          <select
-            value={pickerVal}
-            onChange={(e) => setPickerVal(e.target.value)}
-            style={{ ...styles.fieldSelect, flex: 1, fontSize: 11, padding: "4px 8px" }}
-          >
-            <option value="">— skip —</option>
-            {DEFAULT_ACCOUNTS.map(acct => (
-              <optgroup key={acct.id} label={acct.name}>
-                {acct.transactions.map(t => (
-                  <option key={`${acct.id}:${t.id}`} value={`${acct.id}:${t.id}`}>
-                    Day {t.day} · {t.name} ({fmt(presetsMap[t.name] ?? t.amount)})
-                  </option>
-                ))}
-              </optgroup>
-            ))}
-          </select>
-        ) : (
-          <span style={{ fontSize: 12, color: suggested ? "var(--text)" : "var(--muted)", flex: 1 }}>
-            {suggested
-              ? <><span style={{ color: "var(--muted)", fontSize: 10 }}>{suggested.accountName} · </span>{suggested.txnName}</>
-              : "No suggestion — pick manually"}
+        <span
+          onClick={onEditPayCycle}
+          style={{ fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--text)", cursor: "pointer", borderBottom: "1px dashed var(--border2)" }}
+          title="Click to change pay cycle base date"
+        >
+          {baseDateToDisplay(payBaseDate)}
+        </span>
+        <span style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-mono)" }}>·</span>
+        <span style={{ fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--muted)" }}>
+          3-paycheck months {year}:{" "}
+          <span style={{ color: "var(--accent)" }}>
+            {payCycleMonthNames.length ? payCycleMonthNames.join(", ") : "none"}
           </span>
-        )}
-        <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-          {showPicker ? (
-            <>
-              <button onClick={confirmSelected} style={styles.confirmBtn} title="Confirm selection">✓</button>
-              <button onClick={() => setShowPicker(false)} style={styles.changeBtn}>Cancel</button>
-            </>
-          ) : (
-            <>
-              {suggested && <button onClick={() => onConfirm(plaidTxn, suggested)} style={styles.confirmBtn} title="Confirm suggested match">✓ Confirm</button>}
-              <button onClick={() => setShowPicker(true)} style={styles.changeBtn} title="Pick a different row">↕</button>
-            </>
-          )}
-          <button onClick={() => onSkip(plaidTxn.transaction_id)} style={styles.skipBtn} title="Skip">✗</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function VerifyQueue({ queue, presetsMap, onConfirm, onSkip }) {
-  if (queue.length === 0) return null;
-
-  return (
-    <div style={styles.verifySection}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
-        <p style={styles.verifyTitle}>Verify Transactions <span style={styles.verifyBadge}>{queue.length}</span></p>
-        <span style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)" }}>
-          Match bank activity to expected cashflow rows
         </span>
       </div>
-      {queue.map(item => (
-        <VerifyItem
-          key={item.plaidTxn.transaction_id}
-          plaidTxn={item.plaidTxn}
-          suggested={item.suggested}
-          presetsMap={presetsMap}
-          onConfirm={onConfirm}
-          onSkip={onSkip}
-        />
-      ))}
     </div>
   );
 }
@@ -542,6 +489,39 @@ function EditPresetModal({ presetName, currentAmount, onSave, onClose }) {
   );
 }
 
+function EditPayCycleModal({ currentDateNum, onSave, onClose }) {
+  const y = Math.floor(currentDateNum / 10000);
+  const m = String(Math.floor((currentDateNum % 10000) / 100)).padStart(2, "0");
+  const d = String(currentDateNum % 100).padStart(2, "0");
+  const [val, setVal] = useState(`${y}-${m}-${d}`);
+
+  return (
+    <div style={styles.modalOverlay} onClick={onClose}>
+      <div style={styles.modal} onClick={e => e.stopPropagation()}>
+        <p style={styles.modalTitle}>Pay Cycle Base Date</p>
+        <p style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", marginBottom: 4 }}>
+          Enter any known payday. 3-paycheck months are computed from bi-weekly intervals.
+        </p>
+        <label style={styles.fieldLabel}>Payday Date</label>
+        <input
+          type="date"
+          value={val}
+          onChange={e => setVal(e.target.value)}
+          style={styles.fieldInput}
+          autoFocus
+        />
+        <div style={styles.modalActions}>
+          <button onClick={onClose} style={styles.cancelBtn}>Cancel</button>
+          <button
+            onClick={() => { if (val) onSave(displayToBaseDateNum(val)); }}
+            style={styles.saveBtn}
+          >Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main CashFlow View ────────────────────────────────────────────────────────
 export default function CashFlow() {
   const now = new Date();
@@ -550,18 +530,17 @@ export default function CashFlow() {
   const monthKey = toMonthKey(year, monthIdx);
 
   const [presets, setPresets] = useState(DEFAULT_FIXED);
+  const [payBaseDate, setPayBaseDate] = useState(20260405);
   const [startingBals, setStartingBals] = useState(() =>
     Object.fromEntries(DEFAULT_ACCOUNTS.map(a => [a.id, a.defaultStart]))
   );
-  // Track which accounts the user has manually set a starting balance for —
-  // those won't be overwritten by the live Plaid balance.
   const [userSetStartIds, setUserSetStartIds] = useState(new Set());
   const [monthStates, setMonthStates] = useState({});
   const [accounts, setAccounts] = useState(DEFAULT_ACCOUNTS);
   const [mappings, setMappings] = useState([]);
   const [recentTxns, setRecentTxns] = useState([]);
-  const [dismissed, setDismissed] = useState(new Set());
   const [modal, setModal] = useState(null);
+  const autoConfirmedRef = useRef(new Set());
 
   const presetsMap = useMemo(() => {
     const m = {};
@@ -569,112 +548,12 @@ export default function CashFlow() {
     return m;
   }, [presets]);
 
-  // Load presets from DB once
-  useEffect(() => {
-    fetchCashflowPresets().then((dbPresets) => {
-      if (!Array.isArray(dbPresets) || dbPresets.length === 0) return;
-      const merged = DEFAULT_FIXED.map(d => {
-        const db = dbPresets.find(p => p.name === d.name);
-        return db ? { ...d, amount: db.amount, freq: db.freq ?? d.freq, note: db.note ?? d.note } : d;
-      });
-      dbPresets.forEach(p => {
-        if (!merged.find(m => m.name === p.name) && !p.name.startsWith("__start_")) {
-          merged.push(p);
-        }
-      });
-      setPresets(merged);
+  const threePaycheckMonths = useMemo(
+    () => computeThreePaycheckMonths(year, payBaseDate),
+    [year, payBaseDate]
+  );
 
-      // Starting balances stored as __start_accountId presets (user-set overrides)
-      const newBals = {};
-      const newUserSet = new Set();
-      DEFAULT_ACCOUNTS.forEach(a => {
-        const db = dbPresets.find(p => p.name === `__start_${a.id}`);
-        if (db) { newBals[a.id] = db.amount; newUserSet.add(a.id); }
-      });
-      if (Object.keys(newBals).length > 0) setStartingBals(prev => ({ ...prev, ...newBals }));
-      if (newUserSet.size > 0) setUserSetStartIds(newUserSet);
-    }).catch(() => {});
-  }, []);
-
-  // Load live Plaid balances and use them as starting balances for linked accounts
-  useEffect(() => {
-    fetchAccounts().then(data => {
-      const plaidAccts = data?.accounts ?? [];
-      if (!plaidAccts.length) return;
-      setStartingBals(prev => {
-        const next = { ...prev };
-        DEFAULT_ACCOUNTS.forEach(acct => {
-          if (userSetStartIds.has(acct.id)) return; // user manually set this, don't overwrite
-          const match = plaidAccts.find(p => matchPlaidToAccount(p.name, acct.id, acct.name));
-          if (match?.balances?.current != null) next[acct.id] = match.balances.current;
-        });
-        return next;
-      });
-    }).catch(() => {});
-  }, [userSetStartIds]);
-
-  // Load mapping rules once
-  useEffect(() => {
-    fetchCashflowMappings().then(rows => {
-      if (Array.isArray(rows)) setMappings(rows);
-    }).catch(() => {});
-  }, []);
-
-  // Load per-month states + recent transactions when month changes
-  useEffect(() => {
-    fetchCashflowStates(monthKey).then((rows) => {
-      if (!Array.isArray(rows)) return;
-      const map = {};
-      rows.forEach(r => {
-        map[`${r.account_id}_${r.txn_id}`] = { isPending: r.is_pending, plaidTxnId: r.plaid_txn_id };
-      });
-      setMonthStates(map);
-    }).catch(() => {});
-
-    fetchTransactionsForMonth(monthKey).then(data => {
-      const txns = data?.transactions ?? [];
-      setRecentTxns(txns);
-      setDismissed(new Set());
-    }).catch(() => {});
-  }, [monthKey]);
-
-  // Compute verify queue
-  const verifyQueue = useMemo(() => {
-    const confirmedIds = new Set(
-      Object.values(monthStates)
-        .map(s => s.plaidTxnId)
-        .filter(Boolean)
-    );
-    const mappingMap = {};
-    mappings.forEach(m => { mappingMap[m.merchant_pattern] = m; });
-
-    const queue = [];
-    for (const txn of recentTxns) {
-      if (confirmedIds.has(txn.transaction_id)) continue;
-      if (dismissed.has(txn.transaction_id)) continue;
-
-      // Skip tiny amounts (< $5) — likely fees already in cashflow
-      if (Math.abs(txn.amount) < 5) continue;
-
-      // Check saved mapping rules
-      const merchant = (txn.merchant_name || txn.name || "").toLowerCase();
-      const matchedRule = Object.keys(mappingMap).find(pat => merchant.includes(pat));
-      if (matchedRule) {
-        const rule = mappingMap[matchedRule];
-        const row = ALL_ROWS.find(r => r.accountId === rule.account_id && r.txnName === rule.txn_name);
-        if (row) {
-          // Auto-confirm via saved rule — don't add to queue
-          handleConfirm(txn, row, false);
-          continue;
-        }
-      }
-
-      const suggested = suggestMatch(txn, presetsMap);
-      queue.push({ plaidTxn: txn, suggested });
-    }
-    return queue;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recentTxns, monthStates, mappings, dismissed, presetsMap]);
+  const isThreePaycheckMonth = threePaycheckMonths.has(monthIdx);
 
   const handleConfirm = useCallback((plaidTxn, row, saveMappingRule = true) => {
     const { accountId, txnId, txnName } = row;
@@ -694,9 +573,120 @@ export default function CashFlow() {
     }
   }, [monthKey]);
 
-  const handleSkip = useCallback((txnId) => {
-    setDismissed(prev => new Set([...prev, txnId]));
+  // Load presets from DB once (includes pay cycle base date and starting balance overrides)
+  useEffect(() => {
+    fetchCashflowPresets().then((dbPresets) => {
+      if (!Array.isArray(dbPresets) || dbPresets.length === 0) return;
+
+      const cyclePref = dbPresets.find(p => p.name === "__pay_cycle_date");
+      if (cyclePref?.amount) setPayBaseDate(cyclePref.amount);
+
+      const merged = DEFAULT_FIXED.map(d => {
+        const db = dbPresets.find(p => p.name === d.name);
+        return db ? { ...d, amount: db.amount, freq: db.freq ?? d.freq, note: db.note ?? d.note } : d;
+      });
+      dbPresets.forEach(p => {
+        if (!merged.find(m => m.name === p.name) && !p.name.startsWith("__")) {
+          merged.push(p);
+        }
+      });
+      setPresets(merged);
+
+      const newBals = {};
+      const newUserSet = new Set();
+      DEFAULT_ACCOUNTS.forEach(a => {
+        const db = dbPresets.find(p => p.name === `__start_${a.id}`);
+        if (db) { newBals[a.id] = db.amount; newUserSet.add(a.id); }
+      });
+      if (Object.keys(newBals).length > 0) setStartingBals(prev => ({ ...prev, ...newBals }));
+      if (newUserSet.size > 0) setUserSetStartIds(newUserSet);
+    }).catch(() => {});
   }, []);
+
+  // Load live Plaid balances for linked accounts
+  useEffect(() => {
+    fetchAccounts().then(data => {
+      const plaidAccts = data?.accounts ?? [];
+      if (!plaidAccts.length) return;
+      setStartingBals(prev => {
+        const next = { ...prev };
+        DEFAULT_ACCOUNTS.forEach(acct => {
+          if (userSetStartIds.has(acct.id)) return;
+          const match = plaidAccts.find(p => matchPlaidToAccount(p.name, acct.id, acct.name));
+          if (match?.balances?.current != null) next[acct.id] = match.balances.current;
+        });
+        return next;
+      });
+    }).catch(() => {});
+  }, [userSetStartIds]);
+
+  // Load mapping rules once
+  useEffect(() => {
+    fetchCashflowMappings().then(rows => {
+      if (Array.isArray(rows)) setMappings(rows);
+    }).catch(() => {});
+  }, []);
+
+  // Load per-month states + recent transactions when month changes
+  useEffect(() => {
+    autoConfirmedRef.current.clear();
+
+    fetchCashflowStates(monthKey).then((rows) => {
+      if (!Array.isArray(rows)) return;
+      const map = {};
+      rows.forEach(r => {
+        map[`${r.account_id}_${r.txn_id}`] = { isPending: r.is_pending, plaidTxnId: r.plaid_txn_id };
+      });
+      setMonthStates(map);
+    }).catch(() => {});
+
+    fetchTransactionsForMonth(monthKey).then(data => {
+      setRecentTxns(data?.transactions ?? []);
+    }).catch(() => {});
+  }, [monthKey]);
+
+  // Silent auto-confirm: saved mapping rules → high-confidence score match (≥7)
+  useEffect(() => {
+    if (!recentTxns.length) return;
+
+    const confirmedIds = new Set(
+      Object.values(monthStates).map(s => s.plaidTxnId).filter(Boolean)
+    );
+
+    for (const txn of recentTxns) {
+      const id = txn.transaction_id;
+      if (confirmedIds.has(id)) continue;
+      if (autoConfirmedRef.current.has(id)) continue;
+      if (Math.abs(txn.amount) < 5) continue;
+
+      const merchant = (txn.merchant_name || txn.name || "").toLowerCase();
+
+      // Try saved mapping rules first
+      const matchedRule = mappings.find(m => merchant.includes(m.merchant_pattern));
+      let row = null;
+      let isRuleMatch = false;
+      if (matchedRule) {
+        row = ALL_ROWS.find(r => r.accountId === matchedRule.account_id && r.txnName === matchedRule.txn_name);
+        if (row) isRuleMatch = true;
+      }
+
+      // Fall back to high-confidence score matching
+      if (!row) {
+        let best = null;
+        let bestScore = 7;
+        for (const r of ALL_ROWS) {
+          const s = scoreMatch(txn, r, presetsMap);
+          if (s > bestScore) { bestScore = s; best = r; }
+        }
+        row = best;
+      }
+
+      if (!row) continue;
+
+      autoConfirmedRef.current.add(id);
+      handleConfirm(txn, row, !isRuleMatch);
+    }
+  }, [recentTxns, mappings, monthStates, presetsMap, handleConfirm]);
 
   const togglePending = useCallback((accountId, txnId) => {
     const key = `${accountId}_${txnId}`;
@@ -734,14 +724,19 @@ export default function CashFlow() {
   }, [presets]);
 
   const editStartingBalance = useCallback((accountId) => {
-    const current = startingBals[accountId];
-    setModal({ type: "editStart", accountId, amount: current });
+    setModal({ type: "editStart", accountId, amount: startingBals[accountId] });
   }, [startingBals]);
 
   const saveStartingBalance = useCallback((accountId, amount) => {
     setStartingBals(prev => ({ ...prev, [accountId]: amount }));
     setUserSetStartIds(prev => new Set([...prev, accountId]));
     saveCashflowPreset(`__start_${accountId}`, amount, null, null).catch(() => {});
+    setModal(null);
+  }, []);
+
+  const savePayCycleDate = useCallback((newDateNum) => {
+    setPayBaseDate(newDateNum);
+    saveCashflowPreset("__pay_cycle_date", newDateNum, null, null).catch(() => {});
     setModal(null);
   }, []);
 
@@ -794,6 +789,7 @@ export default function CashFlow() {
             startingBalance={startingBals[acct.id] ?? acct.defaultStart}
             presetsMap={presetsMap}
             monthStates={monthStates}
+            isThreePaycheckMonth={isThreePaycheckMonth}
             onTogglePending={togglePending}
             onEditAmount={editAmount}
             onEditStart={() => editStartingBalance(acct.id)}
@@ -803,21 +799,14 @@ export default function CashFlow() {
         ))}
       </div>
 
-      {verifyQueue.length > 0 && (
-        <div className="fade-up-3">
-          <VerifyQueue
-            queue={verifyQueue}
-            presetsMap={presetsMap}
-            onConfirm={handleConfirm}
-            onSkip={handleSkip}
-          />
-        </div>
-      )}
-
       <div className="fade-up-3">
         <FixedAmountsPanel
           presets={presets}
+          year={year}
+          payBaseDate={payBaseDate}
+          threePaycheckMonths={threePaycheckMonths}
           onEditPreset={savePreset}
+          onEditPayCycle={() => setModal({ type: "editPayCycle" })}
         />
       </div>
 
@@ -841,6 +830,13 @@ export default function CashFlow() {
           presetName={`Starting Balance — ${accounts.find(a => a.id === modal.accountId)?.name}`}
           currentAmount={modal.amount}
           onSave={(newAmt) => saveStartingBalance(modal.accountId, newAmt)}
+          onClose={() => setModal(null)}
+        />
+      )}
+      {modal?.type === "editPayCycle" && (
+        <EditPayCycleModal
+          currentDateNum={payBaseDate}
+          onSave={savePayCycleDate}
           onClose={() => setModal(null)}
         />
       )}
@@ -886,20 +882,6 @@ const styles = {
   pendingBtn: { border: "none", borderRadius: 4, fontSize: 10, fontWeight: 700, fontFamily: "var(--font-mono)", padding: "2px 7px", cursor: "pointer", transition: "background 0.15s" },
   deleteBtn: { background: "none", border: "none", color: "var(--muted)", fontSize: 14, cursor: "pointer", width: 28, padding: 0, textAlign: "center", lineHeight: 1, opacity: 0.5 },
   addRowBtn: { display: "block", width: "calc(100% - 40px)", margin: "8px 20px 4px", padding: "7px 0", background: "none", border: "1px dashed var(--border2)", borderRadius: "var(--radius)", color: "var(--muted)", fontSize: 11, fontFamily: "var(--font-mono)", cursor: "pointer" },
-
-  // Verify queue
-  verifySection: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", padding: "20px 24px", marginBottom: 24 },
-  verifyTitle: { fontSize: 13, fontWeight: 700, color: "var(--text)", display: "flex", alignItems: "center", gap: 8 },
-  verifyBadge: { background: "var(--accent)", color: "#fff", borderRadius: 10, fontSize: 11, fontWeight: 700, padding: "1px 7px", fontFamily: "var(--font-mono)" },
-  verifyItem: { display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: "1px solid var(--border)" },
-  verifyLeft: { display: "flex", flexDirection: "column", gap: 2, minWidth: 200, flexShrink: 0 },
-  verifyDate: { fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-mono)" },
-  verifyMerchant: { fontSize: 13, color: "var(--text)", fontWeight: 500 },
-  verifyArrow: { fontSize: 16, color: "var(--muted)", flexShrink: 0 },
-  verifyRight: { display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0 },
-  confirmBtn: { background: "var(--green)", border: "none", borderRadius: "var(--radius)", color: "#fff", fontSize: 12, fontWeight: 700, fontFamily: "var(--font-mono)", padding: "5px 10px", cursor: "pointer", whiteSpace: "nowrap" },
-  changeBtn: { background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: "var(--radius)", color: "var(--muted)", fontSize: 12, fontFamily: "var(--font-mono)", padding: "5px 10px", cursor: "pointer", whiteSpace: "nowrap" },
-  skipBtn: { background: "none", border: "1px solid var(--border)", borderRadius: "var(--radius)", color: "var(--muted)", fontSize: 12, fontFamily: "var(--font-mono)", padding: "5px 8px", cursor: "pointer" },
 
   // Fixed panel
   fixedPanel: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", padding: "20px 24px" },
