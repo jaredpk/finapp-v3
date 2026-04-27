@@ -250,6 +250,39 @@ export async function initDb() {
     ALTER TABLE merchant_overrides ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
   `);
 
+  // Cashflow presets, per-month transaction states, and merchant mapping rules
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS cashflow_presets (
+      name TEXT PRIMARY KEY,
+      amount NUMERIC(12,2) NOT NULL,
+      freq TEXT,
+      note TEXT,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS cashflow_txn_states (
+      account_id TEXT NOT NULL,
+      txn_id INTEGER NOT NULL,
+      month_key TEXT NOT NULL,
+      is_pending BOOLEAN DEFAULT FALSE,
+      actual_amount NUMERIC(12,2),
+      plaid_txn_id TEXT,
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (account_id, txn_id, month_key)
+    );
+
+    CREATE TABLE IF NOT EXISTS cashflow_mappings (
+      merchant_pattern TEXT PRIMARY KEY,
+      account_id TEXT NOT NULL,
+      txn_name TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    ALTER TABLE cashflow_txn_states ADD COLUMN IF NOT EXISTS plaid_txn_id TEXT;
+  `);
+
   // Trigger to silently block duplicate transaction inserts from any source.
   // csv_ rows are deduplicated by occurrence-index hash before insert, so skip the check for them.
   await pool.query(`
@@ -1122,6 +1155,58 @@ export async function upsertManualAccount(id, name, institution, subtype, balanc
 export async function deleteManualAccount(id) {
   const { rowCount } = await pool.query(`DELETE FROM manual_accounts WHERE id=$1`, [id]);
   return rowCount > 0;
+}
+
+// ── Cashflow presets ──────────────────────────────────────────────────────────
+export async function getCashflowPresets() {
+  const { rows } = await pool.query(
+    `SELECT name, amount::float, freq, note FROM cashflow_presets ORDER BY name`
+  );
+  return rows;
+}
+
+export async function upsertCashflowPreset(name, amount, freq, note) {
+  await pool.query(
+    `INSERT INTO cashflow_presets (name, amount, freq, note, updated_at)
+     VALUES ($1, $2, $3, $4, NOW())
+     ON CONFLICT (name) DO UPDATE SET amount = $2, freq = $3, note = $4, updated_at = NOW()`,
+    [name, amount, freq || null, note || null]
+  );
+}
+
+export async function getCashflowStates(monthKey) {
+  const { rows } = await pool.query(
+    `SELECT account_id, txn_id, is_pending, actual_amount::float, plaid_txn_id
+     FROM cashflow_txn_states WHERE month_key = $1`,
+    [monthKey]
+  );
+  return rows;
+}
+
+export async function upsertCashflowState(accountId, txnId, monthKey, isPending, actualAmount, plaidTxnId) {
+  await pool.query(
+    `INSERT INTO cashflow_txn_states (account_id, txn_id, month_key, is_pending, actual_amount, plaid_txn_id, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, NOW())
+     ON CONFLICT (account_id, txn_id, month_key) DO UPDATE
+       SET is_pending = $4, actual_amount = $5, plaid_txn_id = $6, updated_at = NOW()`,
+    [accountId, txnId, monthKey, isPending, actualAmount ?? null, plaidTxnId ?? null]
+  );
+}
+
+export async function getCashflowMappings() {
+  const { rows } = await pool.query(
+    `SELECT merchant_pattern, account_id, txn_name FROM cashflow_mappings ORDER BY merchant_pattern`
+  );
+  return rows;
+}
+
+export async function upsertCashflowMapping(merchantPattern, accountId, txnName) {
+  await pool.query(
+    `INSERT INTO cashflow_mappings (merchant_pattern, account_id, txn_name)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (merchant_pattern) DO UPDATE SET account_id = $2, txn_name = $3`,
+    [merchantPattern, accountId, txnName]
+  );
 }
 
 export default pool;

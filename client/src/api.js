@@ -247,3 +247,57 @@ export async function runDeduplication(groups) {
   });
   return r.json();
 }
+
+// ── Cashflow ──────────────────────────────────────────────────────────────────
+export async function fetchCashflowPresets() {
+  const r = await fetch(`${BASE}/cashflow/presets`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function saveCashflowPreset(name, amount, freq, note) {
+  const r = await fetch(`${BASE}/cashflow/presets`, {
+    method: "PUT",
+    headers: await authHeaders(),
+    body: JSON.stringify({ name, amount, freq, note }),
+  });
+  return r.json();
+}
+
+export async function fetchCashflowStates(monthKey) {
+  const r = await fetch(`${BASE}/cashflow/states/${monthKey}`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function saveCashflowState(accountId, txnId, monthKey, isPending, actualAmount, plaidTxnId) {
+  const r = await fetch(`${BASE}/cashflow/states`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ accountId, txnId, monthKey, isPending, actualAmount, plaidTxnId }),
+  });
+  return r.json();
+}
+
+export async function fetchCashflowMappings() {
+  const r = await fetch(`${BASE}/cashflow/mappings`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function saveCashflowMapping(merchantPattern, accountId, txnName) {
+  const r = await fetch(`${BASE}/cashflow/mappings`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ merchantPattern, accountId, txnName }),
+  });
+  return r.json();
+}
+
+export async function fetchTransactionsForMonth(monthKey) {
+  const [year, month] = monthKey.split("-");
+  const startDate = `${year}-${month}-01`;
+  const lastDay = new Date(parseInt(year), parseInt(month), 0).getDate();
+  const endDate = `${year}-${month}-${String(lastDay).padStart(2, "0")}`;
+  const r = await fetch(`${BASE}/transactions?start_date=${startDate}&end_date=${endDate}&limit=200`, {
+    headers: await authHeaders(),
+  });
+  return r.json();
+}

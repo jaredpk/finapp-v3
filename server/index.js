@@ -33,6 +33,8 @@ import {
   upsertInvestmentHoldings, getLatestHoldings,
   getProperties, upsertProperty, deleteProperty, updatePropertyValue, setPropertyBaseline,
   getManualAccounts, upsertManualAccount, deleteManualAccount,
+  getCashflowPresets, upsertCashflowPreset, getCashflowStates, upsertCashflowState,
+  getCashflowMappings, upsertCashflowMapping,
 } from "./db.js";
 import pool from "./db.js";
 
@@ -1127,6 +1129,61 @@ app.post("/mcp", async (req, res) => {
   const server = buildMcpServer();
   await server.connect(transport);
   await transport.handleRequest(req, res, req.body);
+});
+
+// ── Cashflow presets + states ─────────────────────────────────────────────────
+app.get("/api/cashflow/presets", requireAuth, async (req, res) => {
+  try {
+    res.json(await getCashflowPresets());
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.put("/api/cashflow/presets", requireAuth, async (req, res) => {
+  try {
+    const { name, amount, freq, note } = req.body;
+    await upsertCashflowPreset(name, parseFloat(amount), freq, note);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/cashflow/states/:monthKey", requireAuth, async (req, res) => {
+  try {
+    res.json(await getCashflowStates(req.params.monthKey));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/cashflow/states", requireAuth, async (req, res) => {
+  try {
+    const { accountId, txnId, monthKey, isPending, actualAmount, plaidTxnId } = req.body;
+    await upsertCashflowState(accountId, txnId, monthKey, isPending, actualAmount ?? null, plaidTxnId ?? null);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/cashflow/mappings", requireAuth, async (req, res) => {
+  try {
+    res.json(await getCashflowMappings());
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/cashflow/mappings", requireAuth, async (req, res) => {
+  try {
+    const { merchantPattern, accountId, txnName } = req.body;
+    await upsertCashflowMapping(merchantPattern, accountId, txnName);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ── SPA fallback ──────────────────────────────────────────────────────────────
