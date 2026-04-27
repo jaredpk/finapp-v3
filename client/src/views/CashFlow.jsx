@@ -36,31 +36,31 @@ const DEFAULT_ACCOUNTS = [
     name: "Amex Checking",
     defaultStart: 1712,
     transactions: [
-      { id: 1,  day: 1,  name: "Personal Jared",                  freq: "Monthly",    amount: -2637    },
-      { id: 2,  day: 5,  name: "Paycheck",                        freq: "Bi-Monthly", amount: 4009     },
-      { id: 3,  day: 7,  name: "Jared Transfer to Shared",        freq: "Monthly",    amount: -1900    },
-      { id: 4,  day: 10, name: "UESP",                            freq: "Monthly",    amount: -100     },
-      { id: 5,  day: 19, name: "Transfer Reserve Account",        freq: "Monthly",    amount: -500     },
-      { id: 6,  day: 20, name: "Paycheck",                        freq: "Bi-Monthly", amount: 4009     },
-      { id: 7,  day: 24, name: "Jared Transfer to Personal Macu", freq: "Monthly",    amount: -629.84  },
-      { id: 8,  day: 27, name: "Transfer to Long-Term Purchases", freq: "Monthly",    amount: -250     },
-      { id: 9,  day: 27, name: "Transfer to Emergency Fund",      freq: "Monthly",    amount: -250     },
-      { id: 10, day: 27, name: "Jared Transfer to Shared",        freq: "Monthly",    amount: -1900    },
-      { id: 11, day: 28, name: "Transfer to Joint Savings",       freq: "Monthly",    amount: -385     },
-      { id: 12, day: 30, name: "Transfer for PTO Reserve",        freq: "Monthly",    amount: -320     },
-      { id: 13, day: 30, name: "Personal IRA Transfer",           freq: "Monthly",    amount: -500     },
-      { id: 14, day: 30, name: "Jared Transfer to Shared",        freq: "Monthly",    amount: -1900,   defaultPending: true },
-      { id: 15, day: 30, name: "Paycheck (Month End)",            freq: "Monthly",    amount: 4009,    defaultPending: true },
+      { id: 1,  day: 1,  name: "Personal Jared",                  freq: "Monthly",    amount: -2637,   isTransfer: true                        },
+      { id: 2,  day: 5,  name: "Paycheck",                        freq: "Bi-Monthly", amount: 4009                                             },
+      { id: 3,  day: 7,  name: "Jared Transfer to Shared",        freq: "Monthly",    amount: -1900,   isTransfer: true                        },
+      { id: 4,  day: 10, name: "UESP",                            freq: "Monthly",    amount: -100                                             },
+      { id: 5,  day: 19, name: "Transfer Reserve Account",        freq: "Monthly",    amount: -500                                             },
+      { id: 6,  day: 20, name: "Paycheck",                        freq: "Bi-Monthly", amount: 4009                                             },
+      { id: 7,  day: 24, name: "Jared Transfer to Personal Macu", freq: "Monthly",    amount: -629.84, isTransfer: true                        },
+      { id: 8,  day: 27, name: "Transfer to Long-Term Purchases", freq: "Monthly",    amount: -250                                             },
+      { id: 9,  day: 27, name: "Transfer to Emergency Fund",      freq: "Monthly",    amount: -250                                             },
+      { id: 10, day: 27, name: "Jared Transfer to Shared",        freq: "Monthly",    amount: -1900,   isTransfer: true                        },
+      { id: 11, day: 28, name: "Transfer to Joint Savings",       freq: "Monthly",    amount: -385                                             },
+      { id: 12, day: 30, name: "Transfer for PTO Reserve",        freq: "Monthly",    amount: -320                                             },
+      { id: 13, day: 30, name: "Personal IRA Transfer",           freq: "Monthly",    amount: -500                                             },
+      { id: 14, day: 30, name: "Jared Transfer to Shared",        freq: "Monthly",    amount: -1900,   isTransfer: true, defaultPending: true  },
+      { id: 15, day: 30, name: "Paycheck (Month End)",            freq: "Monthly",    amount: 4009,                     defaultPending: true  },
     ],
   },
   {
     id: "macu",
     name: "MACU Checking",
-    defaultStart: 1201,
+    defaultStart: 1500,
     transactions: [
-      { id: 1, day: 5,  name: "Child Support Out",   freq: "Bi-Monthly", amount: -314.93 },
-      { id: 2, day: 19, name: "Child Support Out",   freq: "Bi-Monthly", amount: -314.93 },
-      { id: 3, day: 23, name: "Jared Transfer (Personal)", freq: "Monthly", amount: 629.84 },
+      { id: 1, day: 5,  name: "Child Support Out",         freq: "Bi-Monthly", amount: -314.93                    },
+      { id: 2, day: 19, name: "Child Support Out",         freq: "Bi-Monthly", amount: -314.93                    },
+      { id: 3, day: 23, name: "Jared Transfer (Personal)", freq: "Monthly",    amount: 629.84,  isTransfer: true  },
     ],
   },
   {
@@ -68,23 +68,22 @@ const DEFAULT_ACCOUNTS = [
     name: "Shared Checking",
     defaultStart: 3610,
     transactions: [
-      { id: 1,  day: 1,  name: "Other Misc. Shared",       freq: "Bi-Monthly", amount: -500   },
-      { id: 2,  day: 1,  name: "House Payment",            freq: "Bi-Monthly", amount: -2017  },
-      { id: 3,  day: 2,  name: "Personal Jared",           freq: "Monthly",    amount: 2637   },
-      { id: 4,  day: 7,  name: "Jared Transfer In",        freq: "Monthly",    amount: 1900   },
-      { id: 5,  day: 12, name: "Alta Transfer",            freq: "Bi-Weekly",  amount: 1500   },
-      { id: 6,  day: 15, name: "Car Payment",              freq: "Monthly",    amount: -289   },
-      { id: 7,  day: 24, name: "Alta Transfer",            freq: "Bi-Weekly",  amount: 1500   },
-      { id: 8,  day: 24, name: "Transfer for Credit Card", freq: "Monthly",    amount: -6000  },
-      { id: 9,  day: 28, name: "Jared Transfer In",        freq: "Monthly",    amount: 1900   },
-      { id: 10, day: 28, name: "Misc. Utilities",          freq: "Monthly",    amount: -500   },
-      { id: 11, day: 30, name: "Jared Transfer In",        freq: "Monthly",    amount: 1900,  defaultPending: true },
-      { id: 12, day: 30, name: "Alta Transfer",            freq: "Bi-Weekly",  amount: 1500,  defaultPending: true },
+      { id: 1,  day: 1,  name: "Other Misc. Shared",       freq: "Bi-Monthly", amount: -500                       },
+      { id: 2,  day: 1,  name: "House Payment",            freq: "Bi-Monthly", amount: -2017                      },
+      { id: 3,  day: 2,  name: "Personal Jared",           freq: "Monthly",    amount: 2637,   isTransfer: true   },
+      { id: 4,  day: 7,  name: "Jared Transfer In",        freq: "Monthly",    amount: 1900,   isTransfer: true   },
+      { id: 5,  day: 12, name: "Alta Transfer",            freq: "Bi-Weekly",  amount: 1500                       },
+      { id: 6,  day: 15, name: "Car Payment",              freq: "Monthly",    amount: -500                       },
+      { id: 7,  day: 24, name: "Alta Transfer",            freq: "Bi-Weekly",  amount: 1500                       },
+      { id: 8,  day: 24, name: "Transfer for Credit Card", freq: "Monthly",    amount: -6000                      },
+      { id: 9,  day: 28, name: "Jared Transfer In",        freq: "Monthly",    amount: 1900,   isTransfer: true   },
+      { id: 10, day: 28, name: "Misc. Utilities",          freq: "Monthly",    amount: -500                       },
+      { id: 11, day: 30, name: "Jared Transfer In",        freq: "Monthly",    amount: 1900,   isTransfer: true,  defaultPending: true },
+      { id: 12, day: 30, name: "Alta Transfer",            freq: "Bi-Weekly",  amount: 1500,                      defaultPending: true },
     ],
   },
 ];
 
-// Flat list of all cashflow rows for matching
 const ALL_ROWS = DEFAULT_ACCOUNTS.flatMap(acct =>
   acct.transactions.map(t => ({
     accountId: acct.id,
@@ -97,7 +96,7 @@ const ALL_ROWS = DEFAULT_ACCOUNTS.flatMap(acct =>
 );
 
 const DEFAULT_FIXED = [
-  { name: "Paycheck",                           amount: 4009,    freq: "Bi-Monthly", note: "Estimated w/ 15% into 401k" },
+  { name: "Paycheck",                           amount: 4009,    freq: "Bi-Monthly", note: "Take-home w/ 15% into 401k" },
   { name: "Child Support Out",                  amount: -314.93, freq: "Bi-Monthly", note: "" },
   { name: "UESP",                               amount: -100,    freq: "Monthly",    note: "" },
   { name: "Transfer for PTO Reserve",           amount: -320,    freq: "Monthly",    note: "" },
@@ -111,7 +110,7 @@ const DEFAULT_FIXED = [
   { name: "Transfer to Emergency Fund",         amount: -250,    freq: "Monthly",    note: "" },
   { name: "Transfer Reserve Account",           amount: -500,    freq: "Monthly",    note: "" },
   { name: "Personal IRA Transfer",              amount: -500,    freq: "Monthly",    note: "" },
-  { name: "Car Payment",                        amount: -289,    freq: "Monthly",    note: "" },
+  { name: "Car Payment",                        amount: -500,    freq: "Monthly",    note: "" },
 ];
 
 // ── 3-paycheck month detection ────────────────────────────────────────────────
@@ -146,13 +145,11 @@ function baseDateToDisplay(num) {
 }
 
 function displayToBaseDateNum(dateStr) {
-  // Accepts "YYYY-MM-DD" from <input type="date">
   const [y, m, d] = dateStr.split("-").map(Number);
   return y * 10000 + m * 100 + d;
 }
 
 // ── Matching algorithm ────────────────────────────────────────────────────────
-// Plaid: positive amount = expense (money out), negative = income (money in)
 function scoreMatch(plaidTxn, row, presetsMap) {
   const plaidCashflowAmt = -plaidTxn.amount;
   const expectedAmt = presetsMap[row.txnName] ?? row.defaultAmount;
@@ -180,13 +177,46 @@ function scoreMatch(plaidTxn, row, presetsMap) {
   return score;
 }
 
-// Match a Plaid account name to a cashflow account
-function matchPlaidToAccount(plaidName, acctId, acctDisplayName) {
+function matchPlaidToAccount(plaidName, institutionName, acctId, acctDisplayName) {
   const p = plaidName.toLowerCase();
+  const inst = (institutionName || "").toLowerCase();
   if (p.includes(acctId.toLowerCase())) return true;
+  // MACU accounts are named "PERSONAL MYFREE", "ASHTON", etc. — match by institution
+  if (acctId === "macu" && inst.includes("mountain america")) return true;
   return acctDisplayName.toLowerCase().split(/\s+/)
     .filter(w => w.length > 3)
     .some(w => p.includes(w));
+}
+
+// ── Summary helper ────────────────────────────────────────────────────────────
+function computeSummary(accounts, presetsMap, isThreePaycheck) {
+  const allTxns = accounts.flatMap(a =>
+    a.transactions.filter(t => !t.defaultPending || isThreePaycheck)
+  );
+  const eff = t => presetsMap[t.name] ?? t.amount;
+  // Take-home = all non-transfer income (paychecks + Alta transfers)
+  const takeHome = allTxns
+    .filter(t => !t.isTransfer && eff(t) > 0)
+    .reduce((s, t) => s + eff(t), 0);
+  // Expenses = all non-transfer outflows
+  const expenses = allTxns
+    .filter(t => !t.isTransfer && eff(t) < 0)
+    .reduce((s, t) => s + eff(t), 0);
+  return { takeHome, expenses, freeCashflow: takeHome + expenses };
+}
+
+// ── Projected ending balance helper ──────────────────────────────────────────
+function computeProjectedEndBals(accounts, startBals, presetsMap, isThreePaycheck) {
+  const result = {};
+  accounts.forEach(acct => {
+    const start = startBals[acct.id] ?? acct.defaultStart;
+    const sorted = [...acct.transactions].sort((a, b) => a.day - b.day);
+    const filtered = sorted.filter(t => !t.defaultPending || isThreePaycheck);
+    let running = start;
+    filtered.forEach(t => { running += presetsMap[t.name] ?? t.amount; });
+    result[acct.id] = running;
+  });
+  return result;
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
@@ -202,7 +232,7 @@ function SummaryBar({ takeHome, expenses, freeCashflow }) {
   return (
     <div style={styles.summaryBar}>
       <div style={styles.summaryItem}>
-        <span style={styles.summaryLabel}>Monthly Take-Home</span>
+        <span style={styles.summaryLabel}>Take-Home Income</span>
         <span style={{ ...styles.summaryVal, color: "var(--green)" }}>{fmt(takeHome)}</span>
       </div>
       <div style={styles.summaryDivider} />
@@ -221,9 +251,8 @@ function SummaryBar({ takeHome, expenses, freeCashflow }) {
   );
 }
 
-function AccountTable({ account, startingBalance, presetsMap, monthStates, isThreePaycheckMonth, onTogglePending, onEditAmount, onEditStart, onAddRow, onDeleteRow }) {
+function AccountTable({ account, startingBalance, allowEditStart, presetsMap, monthStates, isThreePaycheckMonth, onTogglePending, onEditAmount, onEditStart, onAddRow, onDeleteRow }) {
   const sorted = [...account.transactions].sort((a, b) => a.day - b.day);
-  // Hide rows flagged defaultPending in non-3-paycheck months
   const filtered = sorted.filter(t => !t.defaultPending || isThreePaycheckMonth);
   const effectiveAmt = (t) => presetsMap[t.name] ?? t.amount;
 
@@ -251,11 +280,16 @@ function AccountTable({ account, startingBalance, presetsMap, monthStates, isThr
         <div>
           <p style={styles.accountName}>{account.name}</p>
           <p
-            style={{ ...styles.accountStartBal, cursor: "pointer", borderBottom: "1px dashed var(--border2)" }}
-            onClick={onEditStart}
-            title="Click to edit starting balance"
+            style={{
+              ...styles.accountStartBal,
+              cursor: allowEditStart ? "pointer" : "default",
+              borderBottom: allowEditStart ? "1px dashed var(--border2)" : "none",
+            }}
+            onClick={allowEditStart ? onEditStart : undefined}
+            title={allowEditStart ? "Click to edit starting balance" : "Projected from prior month"}
           >
             Starting: {fmt(startingBalance)}
+            {!allowEditStart && <span style={{ fontSize: 9, color: "var(--muted)", marginLeft: 6, opacity: 0.6 }}>projected</span>}
           </p>
         </div>
         <div style={{ textAlign: "right" }}>
@@ -337,7 +371,7 @@ function AccountTable({ account, startingBalance, presetsMap, monthStates, isThr
   );
 }
 
-// ── Fixed Amounts Panel (editable) ────────────────────────────────────────────
+// ── Fixed Amounts Panel ───────────────────────────────────────────────────────
 function FixedAmountsPanel({ presets, year, payBaseDate, threePaycheckMonths, onEditPreset, onEditPayCycle }) {
   const [editingName, setEditingName] = useState(null);
   const [editVal, setEditVal] = useState("");
@@ -523,11 +557,21 @@ function EditPayCycleModal({ currentDateNum, onSave, onClose }) {
 }
 
 // ── Main CashFlow View ────────────────────────────────────────────────────────
+const now = new Date();
+
 export default function CashFlow() {
-  const now = new Date();
-  const [monthIdx, setMonthIdx] = useState(now.getMonth());
-  const [year] = useState(now.getFullYear());
-  const monthKey = toMonthKey(year, monthIdx);
+  // monthOffset: 0 = current month is first, 1 = next month is first, etc.
+  const [monthOffset, setMonthOffset] = useState(0);
+
+  // Compute the 3 months to display
+  const months = useMemo(() => {
+    return [0, 1, 2].map(i => {
+      const d = new Date(now.getFullYear(), now.getMonth() + monthOffset + i, 1);
+      const mi = d.getMonth();
+      const y = d.getFullYear();
+      return { monthIdx: mi, year: y, monthKey: toMonthKey(y, mi) };
+    });
+  }, [monthOffset]);
 
   const [presets, setPresets] = useState(DEFAULT_FIXED);
   const [payBaseDate, setPayBaseDate] = useState(20260405);
@@ -535,10 +579,12 @@ export default function CashFlow() {
     Object.fromEntries(DEFAULT_ACCOUNTS.map(a => [a.id, a.defaultStart]))
   );
   const [userSetStartIds, setUserSetStartIds] = useState(new Set());
-  const [monthStates, setMonthStates] = useState({});
   const [accounts, setAccounts] = useState(DEFAULT_ACCOUNTS);
   const [mappings, setMappings] = useState([]);
-  const [recentTxns, setRecentTxns] = useState([]);
+  // allMonthStates: { [monthKey]: { [acctId_txnId]: { isPending, plaidTxnId } } }
+  const [allMonthStates, setAllMonthStates] = useState({});
+  // allRecentTxns: { [monthKey]: txns[] }
+  const [allRecentTxns, setAllRecentTxns] = useState({});
   const [modal, setModal] = useState(null);
   const autoConfirmedRef = useRef(new Set());
 
@@ -548,32 +594,40 @@ export default function CashFlow() {
     return m;
   }, [presets]);
 
-  const threePaycheckMonths = useMemo(
-    () => computeThreePaycheckMonths(year, payBaseDate),
-    [year, payBaseDate]
-  );
+  // 3-paycheck months keyed by year (to handle year boundaries in 3-month window)
+  const threePaycheckMonthsByYear = useMemo(() => {
+    const years = [...new Set(months.map(m => m.year))];
+    const result = {};
+    years.forEach(y => { result[y] = computeThreePaycheckMonths(y, payBaseDate); });
+    return result;
+  }, [months, payBaseDate]);
 
-  const isThreePaycheckMonth = threePaycheckMonths.has(monthIdx);
+  const isThreePaycheck = useCallback((monthIdx, year) => {
+    return !!(threePaycheckMonthsByYear[year]?.has(monthIdx));
+  }, [threePaycheckMonthsByYear]);
 
-  const handleConfirm = useCallback((plaidTxn, row, saveMappingRule = true) => {
-    const { accountId, txnId, txnName } = row;
-    const key = `${accountId}_${txnId}`;
-    setMonthStates(prev => ({ ...prev, [key]: { isPending: true, plaidTxnId: plaidTxn.transaction_id } }));
-    saveCashflowState(accountId, txnId, monthKey, true, Math.abs(plaidTxn.amount), plaidTxn.transaction_id).catch(() => {});
-
-    if (saveMappingRule) {
-      const pattern = (plaidTxn.merchant_name || plaidTxn.name || "").toLowerCase().trim();
-      if (pattern.length > 3) {
-        saveCashflowMapping(pattern, accountId, txnName).catch(() => {});
-        setMappings(prev => {
-          const filtered = prev.filter(m => m.merchant_pattern !== pattern);
-          return [...filtered, { merchant_pattern: pattern, account_id: accountId, txn_name: txnName }];
-        });
-      }
+  // Carry-forward starting balances: month 0 uses real startingBals,
+  // month 1 uses projected end of month 0, month 2 uses projected end of month 1.
+  const startBalsPerMonth = useMemo(() => {
+    const result = [startingBals];
+    let prev = startingBals;
+    for (let i = 0; i < 2; i++) {
+      const { monthIdx, year } = months[i];
+      const endBals = computeProjectedEndBals(accounts, prev, presetsMap, isThreePaycheck(monthIdx, year));
+      result.push(endBals);
+      prev = endBals;
     }
-  }, [monthKey]);
+    return result;
+  }, [months, startingBals, accounts, presetsMap, isThreePaycheck]);
 
-  // Load presets from DB once (includes pay cycle base date and starting balance overrides)
+  // Summary per month
+  const summaries = useMemo(() => {
+    return months.map(({ monthIdx, year }, i) => {
+      return computeSummary(accounts, presetsMap, isThreePaycheck(monthIdx, year));
+    });
+  }, [months, accounts, presetsMap, isThreePaycheck]);
+
+  // Load presets from DB once
   useEffect(() => {
     fetchCashflowPresets().then((dbPresets) => {
       if (!Array.isArray(dbPresets) || dbPresets.length === 0) return;
@@ -603,7 +657,7 @@ export default function CashFlow() {
     }).catch(() => {});
   }, []);
 
-  // Load live Plaid balances for linked accounts
+  // Load live Plaid balances for linked accounts (skip accounts user manually set)
   useEffect(() => {
     fetchAccounts().then(data => {
       const plaidAccts = data?.accounts ?? [];
@@ -612,7 +666,9 @@ export default function CashFlow() {
         const next = { ...prev };
         DEFAULT_ACCOUNTS.forEach(acct => {
           if (userSetStartIds.has(acct.id)) return;
-          const match = plaidAccts.find(p => matchPlaidToAccount(p.name, acct.id, acct.name));
+          const match = plaidAccts.find(p =>
+            matchPlaidToAccount(p.name, p.institutionName, acct.id, acct.name)
+          );
           if (match?.balances?.current != null) next[acct.id] = match.balances.current;
         });
         return next;
@@ -627,75 +683,96 @@ export default function CashFlow() {
     }).catch(() => {});
   }, []);
 
-  // Load per-month states + recent transactions when month changes
+  // Load per-month states + transactions when the window shifts
   useEffect(() => {
-    autoConfirmedRef.current.clear();
+    months.forEach(({ monthKey }) => {
+      fetchCashflowStates(monthKey).then((rows) => {
+        if (!Array.isArray(rows)) return;
+        const map = {};
+        rows.forEach(r => {
+          map[`${r.account_id}_${r.txn_id}`] = { isPending: r.is_pending, plaidTxnId: r.plaid_txn_id };
+        });
+        setAllMonthStates(prev => ({ ...prev, [monthKey]: map }));
+      }).catch(() => {});
 
-    fetchCashflowStates(monthKey).then((rows) => {
-      if (!Array.isArray(rows)) return;
-      const map = {};
-      rows.forEach(r => {
-        map[`${r.account_id}_${r.txn_id}`] = { isPending: r.is_pending, plaidTxnId: r.plaid_txn_id };
-      });
-      setMonthStates(map);
-    }).catch(() => {});
+      fetchTransactionsForMonth(monthKey).then(data => {
+        setAllRecentTxns(prev => ({ ...prev, [monthKey]: data?.transactions ?? [] }));
+      }).catch(() => {});
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [monthOffset]);
 
-    fetchTransactionsForMonth(monthKey).then(data => {
-      setRecentTxns(data?.transactions ?? []);
-    }).catch(() => {});
-  }, [monthKey]);
-
-  // Silent auto-confirm: saved mapping rules → high-confidence score match (≥7)
+  // Silent auto-confirm via saved mapping rules or high-confidence score matching
   useEffect(() => {
-    if (!recentTxns.length) return;
+    months.forEach(({ monthKey }) => {
+      const recentTxns = allRecentTxns[monthKey] ?? [];
+      if (!recentTxns.length) return;
+      const monthStates = allMonthStates[monthKey] ?? {};
 
-    const confirmedIds = new Set(
-      Object.values(monthStates).map(s => s.plaidTxnId).filter(Boolean)
-    );
+      const confirmedIds = new Set(
+        Object.values(monthStates).map(s => s.plaidTxnId).filter(Boolean)
+      );
 
-    for (const txn of recentTxns) {
-      const id = txn.transaction_id;
-      if (confirmedIds.has(id)) continue;
-      if (autoConfirmedRef.current.has(id)) continue;
-      if (Math.abs(txn.amount) < 5) continue;
+      for (const txn of recentTxns) {
+        const id = txn.transaction_id;
+        if (confirmedIds.has(id)) continue;
+        if (autoConfirmedRef.current.has(id)) continue;
+        if (Math.abs(txn.amount) < 5) continue;
 
-      const merchant = (txn.merchant_name || txn.name || "").toLowerCase();
-
-      // Try saved mapping rules first
-      const matchedRule = mappings.find(m => merchant.includes(m.merchant_pattern));
-      let row = null;
-      let isRuleMatch = false;
-      if (matchedRule) {
-        row = ALL_ROWS.find(r => r.accountId === matchedRule.account_id && r.txnName === matchedRule.txn_name);
-        if (row) isRuleMatch = true;
-      }
-
-      // Fall back to high-confidence score matching
-      if (!row) {
-        let best = null;
-        let bestScore = 7;
-        for (const r of ALL_ROWS) {
-          const s = scoreMatch(txn, r, presetsMap);
-          if (s > bestScore) { bestScore = s; best = r; }
+        const merchant = (txn.merchant_name || txn.name || "").toLowerCase();
+        const matchedRule = mappings.find(m => merchant.includes(m.merchant_pattern));
+        let row = null;
+        let isRuleMatch = false;
+        if (matchedRule) {
+          row = ALL_ROWS.find(r => r.accountId === matchedRule.account_id && r.txnName === matchedRule.txn_name);
+          if (row) isRuleMatch = true;
         }
-        row = best;
+
+        if (!row) {
+          let best = null;
+          let bestScore = 7;
+          for (const r of ALL_ROWS) {
+            const s = scoreMatch(txn, r, presetsMap);
+            if (s > bestScore) { bestScore = s; best = r; }
+          }
+          row = best;
+        }
+
+        if (!row) continue;
+
+        autoConfirmedRef.current.add(id);
+        const { accountId, txnId, txnName } = row;
+        const key = `${accountId}_${txnId}`;
+        setAllMonthStates(prev => ({
+          ...prev,
+          [monthKey]: { ...(prev[monthKey] ?? {}), [key]: { isPending: true, plaidTxnId: id } },
+        }));
+        saveCashflowState(accountId, txnId, monthKey, true, Math.abs(txn.amount), id).catch(() => {});
+        if (!isRuleMatch) {
+          const pattern = merchant.trim();
+          if (pattern.length > 3) {
+            saveCashflowMapping(pattern, accountId, txnName).catch(() => {});
+            setMappings(prev => {
+              const filtered = prev.filter(m => m.merchant_pattern !== pattern);
+              return [...filtered, { merchant_pattern: pattern, account_id: accountId, txn_name: txnName }];
+            });
+          }
+        }
       }
+    });
+  }, [months, allRecentTxns, mappings, allMonthStates, presetsMap]);
 
-      if (!row) continue;
-
-      autoConfirmedRef.current.add(id);
-      handleConfirm(txn, row, !isRuleMatch);
-    }
-  }, [recentTxns, mappings, monthStates, presetsMap, handleConfirm]);
-
-  const togglePending = useCallback((accountId, txnId) => {
+  const togglePending = useCallback((monthKey, accountId, txnId) => {
     const key = `${accountId}_${txnId}`;
-    const current = monthStates[key]?.isPending ?? false;
+    const current = allMonthStates[monthKey]?.[key]?.isPending ?? false;
     const next = !current;
-    setMonthStates(prev => ({ ...prev, [key]: { ...prev[key], isPending: next } }));
-    const existing = monthStates[key];
+    setAllMonthStates(prev => ({
+      ...prev,
+      [monthKey]: { ...(prev[monthKey] ?? {}), [key]: { ...(prev[monthKey]?.[key] ?? {}), isPending: next } },
+    }));
+    const existing = allMonthStates[monthKey]?.[key];
     saveCashflowState(accountId, txnId, monthKey, next, null, existing?.plaidTxnId ?? null).catch(() => {});
-  }, [monthStates, monthKey]);
+  }, [allMonthStates]);
 
   const editAmount = useCallback((accountId, txnId, txnName) => {
     const amt = presetsMap[txnName];
@@ -755,56 +832,87 @@ export default function CashFlow() {
     ));
   };
 
-  const summary = useMemo(() => {
-    const allTxns = accounts.flatMap(a => a.transactions);
-    const eff = t => presetsMap[t.name] ?? t.amount;
-    const takeHome = allTxns.filter(t => t.name.toLowerCase().includes("paycheck")).reduce((s, t) => s + eff(t), 0);
-    const expenses = allTxns.filter(t => eff(t) < 0).reduce((s, t) => s + eff(t), 0);
-    return { takeHome, expenses, freeCashflow: takeHome + expenses };
-  }, [accounts, presetsMap]);
+  // Label for the 3-month window in the navigator
+  const windowLabel = (() => {
+    const first = months[0];
+    const last = months[2];
+    if (first.year === last.year) {
+      return `${MONTHS[first.monthIdx]} – ${MONTHS[last.monthIdx]} ${first.year}`;
+    }
+    return `${MONTHS[first.monthIdx]} ${first.year} – ${MONTHS[last.monthIdx]} ${last.year}`;
+  })();
+
+  // The primary year shown in FixedAmountsPanel (use first month's year)
+  const primaryYear = months[0].year;
+  const primaryThreePaycheckMonths = threePaycheckMonthsByYear[primaryYear] ?? new Set();
 
   return (
     <div style={styles.wrap}>
       <div className="fade-up" style={styles.topRow}>
         <div>
           <h1 style={styles.heading}>Cash Flow</h1>
-          <p style={styles.sub}>Projected balances by account with pending tracking</p>
+          <p style={styles.sub}>3-month projected balances with carry-forward</p>
         </div>
         <div style={styles.monthNav}>
-          <button onClick={() => setMonthIdx(m => (m - 1 + 12) % 12)} style={styles.navBtn}>‹</button>
-          <MonthBadge label={`${MONTHS[monthIdx]} ${year}`} />
-          <button onClick={() => setMonthIdx(m => (m + 1) % 12)} style={styles.navBtn}>›</button>
+          <button onClick={() => setMonthOffset(o => o - 1)} style={styles.navBtn}>‹</button>
+          <div style={styles.monthBadge}>
+            <span style={styles.monthLabel}>{windowLabel}</span>
+          </div>
+          <button onClick={() => setMonthOffset(o => o + 1)} style={styles.navBtn}>›</button>
         </div>
       </div>
 
-      <div className="fade-up">
-        <SummaryBar {...summary} />
-      </div>
+      {months.map(({ monthIdx, year, monthKey }, i) => {
+        const isThree = isThreePaycheck(monthIdx, year);
+        const monthStates = allMonthStates[monthKey] ?? {};
+        const startBals = startBalsPerMonth[i];
+        const summary = summaries[i];
+        const isFirstMonth = i === 0;
 
-      <div className="fade-up-2" style={styles.accountsGrid}>
-        {accounts.map(acct => (
-          <AccountTable
-            key={acct.id}
-            account={acct}
-            startingBalance={startingBals[acct.id] ?? acct.defaultStart}
-            presetsMap={presetsMap}
-            monthStates={monthStates}
-            isThreePaycheckMonth={isThreePaycheckMonth}
-            onTogglePending={togglePending}
-            onEditAmount={editAmount}
-            onEditStart={() => editStartingBalance(acct.id)}
-            onAddRow={addRow}
-            onDeleteRow={deleteRow}
-          />
-        ))}
-      </div>
+        return (
+          <div key={monthKey} style={i > 0 ? styles.monthSection : undefined}>
+            {/* Month header */}
+            <div className={i === 0 ? "fade-up" : undefined} style={styles.monthHeader}>
+              <div style={styles.monthBadge}>
+                <span style={styles.monthLabel}>{MONTHS[monthIdx]} {year}</span>
+              </div>
+              {isThree && (
+                <span style={styles.threePaycheckBadge}>3-paycheck month</span>
+              )}
+            </div>
 
-      <div className="fade-up-3">
+            <div className={i === 0 ? "fade-up" : undefined}>
+              <SummaryBar {...summary} />
+            </div>
+
+            <div className={i === 0 ? "fade-up-2" : undefined} style={styles.accountsGrid}>
+              {accounts.map(acct => (
+                <AccountTable
+                  key={acct.id}
+                  account={acct}
+                  startingBalance={startBals[acct.id] ?? acct.defaultStart}
+                  allowEditStart={isFirstMonth}
+                  presetsMap={presetsMap}
+                  monthStates={monthStates}
+                  isThreePaycheckMonth={isThree}
+                  onTogglePending={(aId, tId) => togglePending(monthKey, aId, tId)}
+                  onEditAmount={editAmount}
+                  onEditStart={() => editStartingBalance(acct.id)}
+                  onAddRow={addRow}
+                  onDeleteRow={deleteRow}
+                />
+              ))}
+            </div>
+          </div>
+        );
+      })}
+
+      <div className="fade-up-3" style={{ marginTop: 8 }}>
         <FixedAmountsPanel
           presets={presets}
-          year={year}
+          year={primaryYear}
           payBaseDate={payBaseDate}
-          threePaycheckMonths={threePaycheckMonths}
+          threePaycheckMonths={primaryThreePaycheckMonths}
           onEditPreset={savePreset}
           onEditPayCycle={() => setModal({ type: "editPayCycle" })}
         />
@@ -856,6 +964,10 @@ const styles = {
   monthLabel: { fontSize: 13, fontWeight: 600, fontFamily: "var(--font-mono)", color: "var(--text)" },
   navBtn: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius)", color: "var(--text)", fontSize: 18, width: 32, height: 32, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" },
 
+  monthSection: { marginTop: 40, paddingTop: 32, borderTop: "1px solid var(--border)" },
+  monthHeader: { display: "flex", alignItems: "center", gap: 12, marginBottom: 16 },
+  threePaycheckBadge: { fontSize: 10, fontWeight: 700, fontFamily: "var(--font-mono)", color: "var(--accent)", background: "rgba(240,180,41,0.12)", border: "1px solid rgba(240,180,41,0.3)", borderRadius: "var(--radius)", padding: "3px 8px", textTransform: "uppercase", letterSpacing: "0.08em" },
+
   summaryBar: { display: "flex", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", padding: "18px 28px", marginBottom: 24, gap: 0 },
   summaryItem: { flex: 1, display: "flex", flexDirection: "column", gap: 4 },
   summaryDivider: { width: 1, background: "var(--border)", margin: "0 28px" },
@@ -883,7 +995,6 @@ const styles = {
   deleteBtn: { background: "none", border: "none", color: "var(--muted)", fontSize: 14, cursor: "pointer", width: 28, padding: 0, textAlign: "center", lineHeight: 1, opacity: 0.5 },
   addRowBtn: { display: "block", width: "calc(100% - 40px)", margin: "8px 20px 4px", padding: "7px 0", background: "none", border: "1px dashed var(--border2)", borderRadius: "var(--radius)", color: "var(--muted)", fontSize: 11, fontFamily: "var(--font-mono)", cursor: "pointer" },
 
-  // Fixed panel
   fixedPanel: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", padding: "20px 24px" },
   fixedTitle: { fontSize: 11, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--muted)", fontFamily: "var(--font-mono)" },
   fixedGrid: { display: "flex", flexDirection: "column", gap: 6 },
@@ -891,7 +1002,6 @@ const styles = {
   fixedFooter: { display: "flex", gap: 16, alignItems: "center", marginTop: 14, paddingTop: 10, borderTop: "1px solid var(--border2)" },
   presetInput: { width: 80, padding: "2px 6px", background: "var(--surface)", border: "1px solid var(--accent)", borderRadius: 4, color: "var(--text)", fontSize: 12, fontFamily: "var(--font-mono)", outline: "none", textAlign: "right" },
 
-  // Modals
   modalOverlay: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 },
   modal: { background: "var(--surface2)", border: "1px solid var(--border2)", borderRadius: "var(--radius2)", padding: 28, width: 340, display: "flex", flexDirection: "column", gap: 14 },
   modalTitle: { fontSize: 16, fontWeight: 700, color: "var(--text)", marginBottom: 4 },
