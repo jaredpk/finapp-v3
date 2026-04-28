@@ -5,6 +5,7 @@ import {
   fetchCashflowMappings, saveCashflowMapping,
   fetchTransactionsForMonth,
   fetchAccounts,
+  importMacuCsv,
 } from "../api";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -252,7 +253,12 @@ function SummaryBar({ takeHome, expenses, freeCashflow }) {
 }
 
 function AccountTable({ account, startingBalance, allowEditStart, presetsMap, monthStates, isThreePaycheckMonth, onTogglePending, onEditAmount, onEditStart, onAddRow, onDeleteRow }) {
-  const sorted = [...account.transactions].sort((a, b) => a.day - b.day);
+  // Sort by actual confirmed day when available, template day otherwise
+  const sorted = [...account.transactions].sort((a, b) => {
+    const aDay = monthStates[`${account.id}_${a.id}`]?.actualDay ?? a.day;
+    const bDay = monthStates[`${account.id}_${b.id}`]?.actualDay ?? b.day;
+    return aDay - bDay;
+  });
   const filtered = sorted.filter(t => !t.defaultPending || isThreePaycheckMonth);
   const effectiveAmt = (t) => presetsMap[t.name] ?? t.amount;
 
@@ -260,19 +266,29 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
   let pendingBal = startingBalance;
   const rows = filtered.map((t) => {
     const state = monthStates[`${account.id}_${t.id}`] || {};
+    const displayDay = state.actualDay ?? t.day;
     const isPending = state.isPending !== undefined
       ? state.isPending
       : !!(t.defaultPending && isThreePaycheckMonth);
     const amt = effectiveAmt(t);
     if (isPending) pendingBal += amt;
     running += amt;
-    return { ...t, effectiveAmt: amt, isPending, runningBalance: running, pendingBalance: isPending ? pendingBal : 0 };
+    return { ...t, displayDay, effectiveAmt: amt, isPending, runningBalance: running, pendingBalance: isPending ? pendingBal : 0 };
   });
 
   const endBal = rows.length ? rows[rows.length - 1].runningBalance : startingBalance;
-  const minBal = rows.reduce((m, r) => Math.min(m, r.runningBalance), startingBalance);
+
+  // Track minimum balance and which day it occurs
+  let minBal = startingBalance;
+  let minDay = null;
+  rows.forEach(r => {
+    if (r.runningBalance < minBal) { minBal = r.runningBalance; minDay = r.displayDay; }
+  });
+
   const pendingRows = rows.filter((r) => r.isPending);
   const pendingTotal = pendingRows.reduce((s, r) => s + r.effectiveAmt, 0);
+
+  const minColor = minBal < 0 ? "var(--red)" : minBal < 500 ? "var(--accent)" : "var(--muted)";
 
   return (
     <div style={styles.accountBlock}>
@@ -292,12 +308,20 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
             {!allowEditStart && <span style={{ fontSize: 9, color: "var(--muted)", marginLeft: 6, opacity: 0.6 }}>projected</span>}
           </p>
         </div>
-        <div style={{ textAlign: "right" }}>
-          <p style={styles.accountEndLabel}>Est. Ending</p>
-          <p style={{ ...styles.accountEndBal, color: endBal >= 0 ? "var(--green)" : "var(--red)" }}>{fmtShort(endBal)}</p>
-          <p style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-mono)", marginTop: 2 }}>
-            Min: {fmtShort(minBal)}
-          </p>
+        <div style={{ textAlign: "right", display: "flex", gap: 24, alignItems: "flex-start" }}>
+          <div>
+            <p style={styles.accountEndLabel}>Est. Min</p>
+            <p style={{ ...styles.accountEndBal, fontSize: 18, color: minColor }}>{fmtShort(minBal)}</p>
+            {minDay != null && (
+              <p style={{ fontSize: 10, color: minColor, fontFamily: "var(--font-mono)", marginTop: 2, fontWeight: minBal < 500 ? 600 : 400 }}>
+                day {minDay}
+              </p>
+            )}
+          </div>
+          <div>
+            <p style={styles.accountEndLabel}>Est. Ending</p>
+            <p style={{ ...styles.accountEndBal, color: endBal >= 0 ? "var(--green)" : "var(--red)" }}>{fmtShort(endBal)}</p>
+          </div>
         </div>
       </div>
 
@@ -332,7 +356,10 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
               borderLeft: t.isPending ? "2px solid var(--accent)" : "2px solid transparent",
             }}
           >
-            <span style={styles.txnDay}>{t.day}</span>
+            <span style={{ ...styles.txnDay, color: t.displayDay !== t.day ? "var(--accent)" : "var(--muted)" }}
+              title={t.displayDay !== t.day ? `Template day: ${t.day}` : undefined}>
+              {t.displayDay}
+            </span>
             <span style={{ flex: 1, fontSize: 12, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", paddingRight: 8 }}>
               {t.name}
               {presetsMap[t.name] !== undefined && (
@@ -556,6 +583,70 @@ function EditPayCycleModal({ currentDateNum, onSave, onClose }) {
   );
 }
 
+// ── MACU CSV Import Modal ─────────────────────────────────────────────────────
+function ImportCsvModal({ onClose, onImported }) {
+  const [accountName, setAccountName] = useState("MACU Shared Checking");
+  const [status, setStatus] = useState(null);
+  const [error, setError] = useState(null);
+
+  const handleFile = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setStatus("loading");
+    setError(null);
+    try {
+      const text = await file.text();
+      const result = await importMacuCsv(text, accountName);
+      if (result.error) throw new Error(result.error);
+      setStatus(result);
+      if (result.imported > 0) onImported();
+    } catch (err) {
+      setError(err.message);
+      setStatus(null);
+    }
+  };
+
+  return (
+    <div style={styles.modalOverlay} onClick={onClose}>
+      <div style={styles.modal} onClick={e => e.stopPropagation()}>
+        <p style={styles.modalTitle}>Import MACU Transactions</p>
+        <p style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", marginBottom: 4 }}>
+          Upload exportedtransactions.csv from Mountain America online banking. Duplicates are automatically skipped.
+        </p>
+        <label style={styles.fieldLabel}>Account Label</label>
+        <input
+          type="text"
+          value={accountName}
+          onChange={e => setAccountName(e.target.value)}
+          style={styles.fieldInput}
+        />
+        <label style={styles.fieldLabel}>CSV File</label>
+        <input
+          type="file"
+          accept=".csv,.CSV"
+          onChange={handleFile}
+          disabled={status === "loading"}
+          style={{ ...styles.fieldInput, padding: "6px 12px", cursor: "pointer" }}
+        />
+        {status === "loading" && (
+          <p style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)" }}>Importing…</p>
+        )}
+        {status && status !== "loading" && (
+          <p style={{ fontSize: 12, color: "var(--green)", fontFamily: "var(--font-mono)", fontWeight: 600 }}>
+            {status.imported} imported · {status.skipped} already present
+          </p>
+        )}
+        {error && (
+          <p style={{ fontSize: 11, color: "var(--red)", fontFamily: "var(--font-mono)" }}>{error}</p>
+        )}
+        <div style={styles.modalActions}>
+          <button onClick={onClose} style={styles.saveBtn}>Done</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main CashFlow View ────────────────────────────────────────────────────────
 const now = new Date();
 
@@ -586,6 +677,7 @@ export default function CashFlow() {
   // allRecentTxns: { [monthKey]: txns[] }
   const [allRecentTxns, setAllRecentTxns] = useState({});
   const [modal, setModal] = useState(null);
+  const [importVersion, setImportVersion] = useState(0);
   const autoConfirmedRef = useRef(new Set());
 
   const presetsMap = useMemo(() => {
@@ -690,7 +782,7 @@ export default function CashFlow() {
         if (!Array.isArray(rows)) return;
         const map = {};
         rows.forEach(r => {
-          map[`${r.account_id}_${r.txn_id}`] = { isPending: r.is_pending, plaidTxnId: r.plaid_txn_id };
+          map[`${r.account_id}_${r.txn_id}`] = { isPending: r.is_pending, plaidTxnId: r.plaid_txn_id, actualDay: r.actual_day ?? null };
         });
         setAllMonthStates(prev => ({ ...prev, [monthKey]: map }));
       }).catch(() => {});
@@ -700,7 +792,7 @@ export default function CashFlow() {
       }).catch(() => {});
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [monthOffset]);
+  }, [monthOffset, importVersion]);
 
   // Silent auto-confirm via saved mapping rules or high-confidence score matching
   useEffect(() => {
@@ -743,11 +835,12 @@ export default function CashFlow() {
         autoConfirmedRef.current.add(id);
         const { accountId, txnId, txnName } = row;
         const key = `${accountId}_${txnId}`;
+        const actualDay = new Date(txn.date + "T12:00:00").getDate();
         setAllMonthStates(prev => ({
           ...prev,
-          [monthKey]: { ...(prev[monthKey] ?? {}), [key]: { isPending: true, plaidTxnId: id } },
+          [monthKey]: { ...(prev[monthKey] ?? {}), [key]: { isPending: true, plaidTxnId: id, actualDay } },
         }));
-        saveCashflowState(accountId, txnId, monthKey, true, Math.abs(txn.amount), id).catch(() => {});
+        saveCashflowState(accountId, txnId, monthKey, true, Math.abs(txn.amount), id, actualDay).catch(() => {});
         if (!isRuleMatch) {
           const pattern = merchant.trim();
           if (pattern.length > 3) {
@@ -764,14 +857,13 @@ export default function CashFlow() {
 
   const togglePending = useCallback((monthKey, accountId, txnId) => {
     const key = `${accountId}_${txnId}`;
-    const current = allMonthStates[monthKey]?.[key]?.isPending ?? false;
-    const next = !current;
+    const existing = allMonthStates[monthKey]?.[key] ?? {};
+    const next = !existing.isPending;
     setAllMonthStates(prev => ({
       ...prev,
-      [monthKey]: { ...(prev[monthKey] ?? {}), [key]: { ...(prev[monthKey]?.[key] ?? {}), isPending: next } },
+      [monthKey]: { ...(prev[monthKey] ?? {}), [key]: { ...existing, isPending: next } },
     }));
-    const existing = allMonthStates[monthKey]?.[key];
-    saveCashflowState(accountId, txnId, monthKey, next, null, existing?.plaidTxnId ?? null).catch(() => {});
+    saveCashflowState(accountId, txnId, monthKey, next, null, existing.plaidTxnId ?? null, existing.actualDay ?? null).catch(() => {});
   }, [allMonthStates]);
 
   const editAmount = useCallback((accountId, txnId, txnName) => {
@@ -853,12 +945,21 @@ export default function CashFlow() {
           <h1 style={styles.heading}>Cash Flow</h1>
           <p style={styles.sub}>3-month projected balances with carry-forward</p>
         </div>
-        <div style={styles.monthNav}>
-          <button onClick={() => setMonthOffset(o => o - 1)} style={styles.navBtn}>‹</button>
-          <div style={styles.monthBadge}>
-            <span style={styles.monthLabel}>{windowLabel}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <button
+            onClick={() => setModal({ type: "importCsv" })}
+            style={styles.importBtn}
+            title="Import Mountain America CSV"
+          >
+            Import MACU CSV
+          </button>
+          <div style={styles.monthNav}>
+            <button onClick={() => setMonthOffset(o => o - 1)} style={styles.navBtn}>‹</button>
+            <div style={styles.monthBadge}>
+              <span style={styles.monthLabel}>{windowLabel}</span>
+            </div>
+            <button onClick={() => setMonthOffset(o => o + 1)} style={styles.navBtn}>›</button>
           </div>
-          <button onClick={() => setMonthOffset(o => o + 1)} style={styles.navBtn}>›</button>
         </div>
       </div>
 
@@ -918,6 +1019,12 @@ export default function CashFlow() {
         />
       </div>
 
+      {modal?.type === "importCsv" && (
+        <ImportCsvModal
+          onClose={() => setModal(null)}
+          onImported={() => setImportVersion(v => v + 1)}
+        />
+      )}
       {modal?.type === "add" && (
         <AddModal
           accountName={accounts.find(a => a.id === modal.accountId)?.name}
@@ -959,6 +1066,7 @@ const styles = {
   heading: { fontSize: 32, fontWeight: 800, letterSpacing: "-0.04em", color: "var(--text)", marginBottom: 4 },
   sub: { fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-mono)" },
 
+  importBtn: { padding: "6px 14px", background: "none", border: "1px solid var(--border)", borderRadius: "var(--radius)", color: "var(--muted)", fontSize: 11, fontFamily: "var(--font-mono)", cursor: "pointer", whiteSpace: "nowrap" },
   monthNav: { display: "flex", alignItems: "center", gap: 8 },
   monthBadge: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: "6px 16px" },
   monthLabel: { fontSize: 13, fontWeight: 600, fontFamily: "var(--font-mono)", color: "var(--text)" },

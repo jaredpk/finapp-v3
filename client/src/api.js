@@ -268,11 +268,20 @@ export async function fetchCashflowStates(monthKey) {
   return r.json();
 }
 
-export async function saveCashflowState(accountId, txnId, monthKey, isPending, actualAmount, plaidTxnId) {
+export async function saveCashflowState(accountId, txnId, monthKey, isPending, actualAmount, plaidTxnId, actualDay) {
   const r = await fetch(`${BASE}/cashflow/states`, {
     method: "POST",
     headers: await authHeaders(),
-    body: JSON.stringify({ accountId, txnId, monthKey, isPending, actualAmount, plaidTxnId }),
+    body: JSON.stringify({ accountId, txnId, monthKey, isPending, actualAmount, plaidTxnId, actualDay }),
+  });
+  return r.json();
+}
+
+export async function importMacuCsv(csvText, accountName) {
+  const r = await fetch(`${BASE}/import-macu-csv`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ csv: csvText, accountName }),
   });
   return r.json();
 }

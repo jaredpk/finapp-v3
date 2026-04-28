@@ -283,6 +283,10 @@ export async function initDb() {
     ALTER TABLE cashflow_txn_states ADD COLUMN IF NOT EXISTS plaid_txn_id TEXT;
   `);
 
+  await pool.query(`
+    ALTER TABLE cashflow_txn_states ADD COLUMN IF NOT EXISTS actual_day INTEGER;
+  `);
+
   // Trigger to silently block duplicate transaction inserts from any source.
   // csv_ rows are deduplicated by occurrence-index hash before insert, so skip the check for them.
   await pool.query(`
@@ -694,6 +698,91 @@ export function parseCsvText(csvText) {
 
     const id = 'csv_' + createHash('sha256').update(`${key}|${idx}`).digest('hex').slice(0, 16);
     rows.push({ id, date, merchant, category, amount, account });
+  }
+
+  return rows;
+}
+
+// Splits a single CSV line respecting double-quoted fields.
+function splitCsvLine(line) {
+  const result = [];
+  let cur = '';
+  let inQ = false;
+  for (const ch of line) {
+    if (ch === '"') { inQ = !inQ; }
+    else if (ch === ',' && !inQ) { result.push(cur); cur = ''; }
+    else { cur += ch; }
+  }
+  result.push(cur);
+  return result;
+}
+
+// Parses a Mountain America CU exportedtransactions.csv.
+// Accepts the common "Number,Date,Description,Debit,Credit,Balance" format
+// as well as simpler "Date,Description,Amount,Balance" exports.
+// Debit rows → positive amount (expense); Credit rows → negative amount (income).
+export function parseMacuCsvText(csvText, accountName = "MACU Shared Checking") {
+  const lines = csvText.split('\n').map(l => l.trim()).filter(Boolean);
+
+  // Find the header row: must contain "date" and ("debit" or "amount")
+  let headerIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const low = lines[i].toLowerCase();
+    if (low.includes('date') && (low.includes('debit') || low.includes('amount'))) {
+      headerIdx = i;
+      break;
+    }
+  }
+  if (headerIdx === -1) return [];
+
+  const header = splitCsvLine(lines[headerIdx]).map(h => h.toLowerCase().trim().replace(/[^a-z]/g, ''));
+  const col = (name) => header.indexOf(name);
+  const dateIdx   = col('date');
+  const descIdx   = col('description');
+  const debitIdx  = col('debit');
+  const creditIdx = col('credit');
+  const amountIdx = col('amount');
+
+  if (dateIdx === -1) return [];
+
+  const counts = new Map();
+  const rows = [];
+
+  for (let i = headerIdx + 1; i < lines.length; i++) {
+    const parts = splitCsvLine(lines[i]);
+    const dateRaw = parts[dateIdx]?.trim();
+    if (!dateRaw) continue;
+
+    // Normalise date: MM/DD/YYYY → YYYY-MM-DD
+    let date;
+    const mdy = dateRaw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (mdy) {
+      date = `${mdy[3]}-${mdy[1].padStart(2, '0')}-${mdy[2].padStart(2, '0')}`;
+    } else {
+      date = dateRaw;
+    }
+
+    const merchant = descIdx >= 0 ? (parts[descIdx]?.trim() || null) : null;
+
+    let amount;
+    if (debitIdx >= 0 && creditIdx >= 0) {
+      const debit  = parseFloat(parts[debitIdx]?.trim()  || '0') || 0;
+      const credit = parseFloat(parts[creditIdx]?.trim() || '0') || 0;
+      amount = debit > 0 ? debit : -credit;
+    } else if (amountIdx >= 0) {
+      amount = parseFloat(parts[amountIdx]?.trim() || '0');
+    } else {
+      continue;
+    }
+
+    if (!date || isNaN(amount)) continue;
+
+    const key = `${date}|${merchant}|${amount}|${accountName}`;
+    const idx = counts.get(key) ?? 0;
+    counts.set(key, idx + 1);
+
+    const id = 'csv_' + createHash('sha256').update(`${key}|${idx}`).digest('hex').slice(0, 16);
+    rows.push({ id, date, merchant, category: null, amount, account: accountName });
   }
 
   return rows;
@@ -1176,20 +1265,20 @@ export async function upsertCashflowPreset(name, amount, freq, note) {
 
 export async function getCashflowStates(monthKey) {
   const { rows } = await pool.query(
-    `SELECT account_id, txn_id, is_pending, actual_amount::float, plaid_txn_id
+    `SELECT account_id, txn_id, is_pending, actual_amount::float, plaid_txn_id, actual_day
      FROM cashflow_txn_states WHERE month_key = $1`,
     [monthKey]
   );
   return rows;
 }
 
-export async function upsertCashflowState(accountId, txnId, monthKey, isPending, actualAmount, plaidTxnId) {
+export async function upsertCashflowState(accountId, txnId, monthKey, isPending, actualAmount, plaidTxnId, actualDay) {
   await pool.query(
-    `INSERT INTO cashflow_txn_states (account_id, txn_id, month_key, is_pending, actual_amount, plaid_txn_id, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, NOW())
+    `INSERT INTO cashflow_txn_states (account_id, txn_id, month_key, is_pending, actual_amount, plaid_txn_id, actual_day, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
      ON CONFLICT (account_id, txn_id, month_key) DO UPDATE
-       SET is_pending = $4, actual_amount = $5, plaid_txn_id = $6, updated_at = NOW()`,
-    [accountId, txnId, monthKey, isPending, actualAmount ?? null, plaidTxnId ?? null]
+       SET is_pending = $4, actual_amount = $5, plaid_txn_id = $6, actual_day = $7, updated_at = NOW()`,
+    [accountId, txnId, monthKey, isPending, actualAmount ?? null, plaidTxnId ?? null, actualDay ?? null]
   );
 }
 

@@ -34,7 +34,7 @@ import {
   getProperties, upsertProperty, deleteProperty, updatePropertyValue, setPropertyBaseline,
   getManualAccounts, upsertManualAccount, deleteManualAccount,
   getCashflowPresets, upsertCashflowPreset, getCashflowStates, upsertCashflowState,
-  getCashflowMappings, upsertCashflowMapping,
+  getCashflowMappings, upsertCashflowMapping, parseMacuCsvText,
 } from "./db.js";
 import pool from "./db.js";
 
@@ -634,6 +634,23 @@ app.post("/api/import-csv", requireApiKeyOrAuth, async (req, res) => {
   }
 });
 
+// ── MACU CSV Import (Mountain America exportedtransactions.csv) ───────────────
+app.post("/api/import-macu-csv", requireAuth, async (req, res) => {
+  try {
+    const { csv, accountName } = req.body;
+    if (!csv || typeof csv !== "string") return res.status(400).json({ error: "csv string required" });
+    const rows = parseMacuCsvText(csv, accountName || "MACU Shared Checking");
+    let imported = 0;
+    for (const row of rows) {
+      if (await upsertCsvTransaction(row)) imported++;
+    }
+    res.json({ imported, skipped: rows.length - imported });
+  } catch (err) {
+    console.error("MACU CSV import error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post("/api/import-xlsx", requireApiKeyOrAuth, async (req, res) => {
   try {
     const { xlsx, snapshot_date } = req.body;
@@ -1160,8 +1177,8 @@ app.get("/api/cashflow/states/:monthKey", requireAuth, async (req, res) => {
 
 app.post("/api/cashflow/states", requireAuth, async (req, res) => {
   try {
-    const { accountId, txnId, monthKey, isPending, actualAmount, plaidTxnId } = req.body;
-    await upsertCashflowState(accountId, txnId, monthKey, isPending, actualAmount ?? null, plaidTxnId ?? null);
+    const { accountId, txnId, monthKey, isPending, actualAmount, plaidTxnId, actualDay } = req.body;
+    await upsertCashflowState(accountId, txnId, monthKey, isPending, actualAmount ?? null, plaidTxnId ?? null, actualDay ?? null);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
