@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { getApiKey, generateApiKey, importXlsx, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi, setPropertyBaselineApi, fetchManualAccounts, saveManualAccount, deleteManualAccountApi } from "../api.js";
+import { getApiKey, generateApiKey, importXlsx, importMacuCsv, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi, setPropertyBaselineApi, fetchManualAccounts, saveManualAccount, deleteManualAccountApi } from "../api.js";
 
 export default function Settings({ reloadData, user }) {
   const [apiKey, setApiKey] = useState(null);
@@ -13,6 +13,14 @@ export default function Settings({ reloadData, user }) {
   const [xlsxBase64, setXlsxBase64] = useState(null);
   const [xlsxImporting, setXlsxImporting] = useState(false);
   const [xlsxImportResult, setXlsxImportResult] = useState(null);
+
+  // MACU CSV import state
+  const macuFileRef = useRef(null);
+  const [macuFileName, setMacuFileName] = useState(null);
+  const [macuCsvText, setMacuCsvText] = useState(null);
+  const [macuAccountName, setMacuAccountName] = useState("MACU Shared Checking");
+  const [macuImporting, setMacuImporting] = useState(false);
+  const [macuImportResult, setMacuImportResult] = useState(null);
 
   // Properties state
   const [properties, setProperties]         = useState([]);
@@ -102,6 +110,38 @@ export default function Settings({ reloadData, user }) {
       setXlsxImportResult(`Error: ${err.message}`);
     } finally {
       setXlsxImporting(false);
+    }
+  }
+
+  // ── MACU CSV import ───────────────────────────────────────────────────────────
+  function handleMacuFileChange(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setMacuFileName(file.name);
+    setMacuImportResult(null);
+    file.text().then(setMacuCsvText);
+  }
+
+  async function handleMacuImport() {
+    if (!macuCsvText) return;
+    setMacuImporting(true);
+    try {
+      const res = await importMacuCsv(macuCsvText, macuAccountName);
+      if (res.error) {
+        setMacuImportResult(`Error: ${res.error}`);
+      } else {
+        const parts = [`Imported ${res.imported} transaction${res.imported !== 1 ? "s" : ""}`];
+        if (res.skipped) parts.push(`${res.skipped} already present`);
+        setMacuImportResult(parts.join(" · ") + ".");
+        setMacuFileName(null);
+        setMacuCsvText(null);
+        if (macuFileRef.current) macuFileRef.current.value = "";
+        if (reloadData) reloadData();
+      }
+    } catch (err) {
+      setMacuImportResult(`Error: ${err.message}`);
+    } finally {
+      setMacuImporting(false);
     }
   }
 
@@ -442,6 +482,36 @@ export default function Settings({ reloadData, user }) {
         {xlsxImportResult && (
           <p style={xlsxImportResult.startsWith("Error") ? styles.importError : styles.importSuccess}>
             {xlsxImportResult}
+          </p>
+        )}
+      </section>
+
+      {/* MACU CSV Import */}
+      <section style={styles.card}>
+        <h2 style={styles.cardTitle}>Import Mountain America CSV</h2>
+        <p style={styles.description}>
+          Upload <strong>ExportedTransactions.csv</strong> from Mountain America online banking. Transactions are deduplicated automatically.
+        </p>
+        <label style={styles.label}>Account label</label>
+        <input
+          type="text"
+          value={macuAccountName}
+          onChange={e => setMacuAccountName(e.target.value)}
+          style={styles.propInput}
+        />
+        <input ref={macuFileRef} type="file" accept=".csv,.CSV" style={{ display: "none" }} onChange={handleMacuFileChange} />
+        <button style={{ ...styles.generateBtn, marginTop: 8 }} onClick={() => macuFileRef.current?.click()}>Select CSV File</button>
+        {macuFileName && (
+          <div style={styles.importPreview}>
+            <p style={styles.previewText}>Ready to import: <strong>{macuFileName}</strong></p>
+            <button style={styles.generateBtn} onClick={handleMacuImport} disabled={macuImporting}>
+              {macuImporting ? "Importing…" : "Import Now"}
+            </button>
+          </div>
+        )}
+        {macuImportResult && (
+          <p style={macuImportResult.startsWith("Error") ? styles.importError : styles.importSuccess}>
+            {macuImportResult}
           </p>
         )}
       </section>

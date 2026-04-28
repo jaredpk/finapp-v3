@@ -5,7 +5,6 @@ import {
   fetchCashflowMappings, saveCashflowMapping,
   fetchTransactionsForMonth,
   fetchAccounts,
-  importMacuCsv,
 } from "../api";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -583,70 +582,6 @@ function EditPayCycleModal({ currentDateNum, onSave, onClose }) {
   );
 }
 
-// ── MACU CSV Import Modal ─────────────────────────────────────────────────────
-function ImportCsvModal({ onClose, onImported }) {
-  const [accountName, setAccountName] = useState("MACU Shared Checking");
-  const [status, setStatus] = useState(null);
-  const [error, setError] = useState(null);
-
-  const handleFile = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    setStatus("loading");
-    setError(null);
-    try {
-      const text = await file.text();
-      const result = await importMacuCsv(text, accountName);
-      if (result.error) throw new Error(result.error);
-      setStatus(result);
-      if (result.imported > 0) onImported();
-    } catch (err) {
-      setError(err.message);
-      setStatus(null);
-    }
-  };
-
-  return (
-    <div style={styles.modalOverlay} onClick={onClose}>
-      <div style={styles.modal} onClick={e => e.stopPropagation()}>
-        <p style={styles.modalTitle}>Import MACU Transactions</p>
-        <p style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", marginBottom: 4 }}>
-          Upload exportedtransactions.csv from Mountain America online banking. Duplicates are automatically skipped.
-        </p>
-        <label style={styles.fieldLabel}>Account Label</label>
-        <input
-          type="text"
-          value={accountName}
-          onChange={e => setAccountName(e.target.value)}
-          style={styles.fieldInput}
-        />
-        <label style={styles.fieldLabel}>CSV File</label>
-        <input
-          type="file"
-          accept=".csv,.CSV"
-          onChange={handleFile}
-          disabled={status === "loading"}
-          style={{ ...styles.fieldInput, padding: "6px 12px", cursor: "pointer" }}
-        />
-        {status === "loading" && (
-          <p style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)" }}>Importing…</p>
-        )}
-        {status && status !== "loading" && (
-          <p style={{ fontSize: 12, color: "var(--green)", fontFamily: "var(--font-mono)", fontWeight: 600 }}>
-            {status.imported} imported · {status.skipped} already present
-          </p>
-        )}
-        {error && (
-          <p style={{ fontSize: 11, color: "var(--red)", fontFamily: "var(--font-mono)" }}>{error}</p>
-        )}
-        <div style={styles.modalActions}>
-          <button onClick={onClose} style={styles.saveBtn}>Done</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ── Main CashFlow View ────────────────────────────────────────────────────────
 const now = new Date();
 
@@ -677,7 +612,6 @@ export default function CashFlow() {
   // allRecentTxns: { [monthKey]: txns[] }
   const [allRecentTxns, setAllRecentTxns] = useState({});
   const [modal, setModal] = useState(null);
-  const [importVersion, setImportVersion] = useState(0);
   const autoConfirmedRef = useRef(new Set());
 
   const presetsMap = useMemo(() => {
@@ -792,7 +726,7 @@ export default function CashFlow() {
       }).catch(() => {});
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [monthOffset, importVersion]);
+  }, [monthOffset]);
 
   // Silent auto-confirm via saved mapping rules or high-confidence score matching
   useEffect(() => {
@@ -946,13 +880,6 @@ export default function CashFlow() {
           <p style={styles.sub}>3-month projected balances with carry-forward</p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <button
-            onClick={() => setModal({ type: "importCsv" })}
-            style={styles.importBtn}
-            title="Import Mountain America CSV"
-          >
-            Import MACU CSV
-          </button>
           <div style={styles.monthNav}>
             <button onClick={() => setMonthOffset(o => o - 1)} style={styles.navBtn}>‹</button>
             <div style={styles.monthBadge}>
@@ -1019,12 +946,6 @@ export default function CashFlow() {
         />
       </div>
 
-      {modal?.type === "importCsv" && (
-        <ImportCsvModal
-          onClose={() => setModal(null)}
-          onImported={() => setImportVersion(v => v + 1)}
-        />
-      )}
       {modal?.type === "add" && (
         <AddModal
           accountName={accounts.find(a => a.id === modal.accountId)?.name}
@@ -1066,7 +987,6 @@ const styles = {
   heading: { fontSize: 32, fontWeight: 800, letterSpacing: "-0.04em", color: "var(--text)", marginBottom: 4 },
   sub: { fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-mono)" },
 
-  importBtn: { padding: "6px 14px", background: "none", border: "1px solid var(--border)", borderRadius: "var(--radius)", color: "var(--muted)", fontSize: 11, fontFamily: "var(--font-mono)", cursor: "pointer", whiteSpace: "nowrap" },
   monthNav: { display: "flex", alignItems: "center", gap: 8 },
   monthBadge: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: "6px 16px" },
   monthLabel: { fontSize: 13, fontWeight: 600, fontFamily: "var(--font-mono)", color: "var(--text)" },
