@@ -820,7 +820,7 @@ export function parseXlsxBase64(base64, snapshotDate) {
 
   const balancesWs = wb.Sheets['Account Balances'];
   const balances = balancesWs
-    ? utils.sheet_to_json(balancesWs, { raw: true }).map(r => {
+    ? utils.sheet_to_json(balancesWs, { raw: true, range: 1 }).map(r => {
         const bal = parseFloat(r['Balance (USD)']);
         if (!r['Account'] || isNaN(bal)) return null;
         return {
@@ -835,7 +835,7 @@ export function parseXlsxBase64(base64, snapshotDate) {
 
   const holdingsWs = wb.Sheets['Investment Holdings'];
   const holdings = holdingsWs
-    ? utils.sheet_to_json(holdingsWs, { raw: true }).map(r => {
+    ? utils.sheet_to_json(holdingsWs, { raw: true, range: 1 }).map(r => {
         const value = parseFloat(r['Value (USD)']);
         if (!r['Ticker'] || isNaN(value)) return null;
         return {
@@ -843,7 +843,7 @@ export function parseXlsxBase64(base64, snapshotDate) {
           institution: r['Institution']?.toString().trim() || null,
           account: r['Account']?.toString().trim() || null,
           value,
-          day_change: r['Day Change']?.toString().trim() || null,
+          day_change: r['Day Chg %']?.toString().trim() || r['Day Change']?.toString().trim() || null,
           gain_loss: r['Gain/Loss (USD)'] != null ? parseFloat(r['Gain/Loss (USD)']) : null,
           gain_loss_pct: r['Gain/Loss %']?.toString().trim() || null,
         };
@@ -853,13 +853,13 @@ export function parseXlsxBase64(base64, snapshotDate) {
   const txnWs = wb.Sheets['Transactions'];
   const counts = new Map();
   const transactions = txnWs
-    ? utils.sheet_to_json(txnWs, { raw: true, cellDates: true }).map(r => {
+    ? utils.sheet_to_json(txnWs, { raw: true, cellDates: true, range: 1 }).map(r => {
         const date = r['Date'] instanceof Date
           ? r['Date'].toISOString().slice(0, 10)
           : r['Date']?.toString().trim();
         const merchant = r['Merchant']?.toString().trim() || null;
         const category = r['Category']?.toString().trim() || null;
-        const amount = parseFloat(r['Amount']);
+        const amount = parseFloat(r['Amount (USD)'] ?? r['Amount']);
         const account = r['Account']?.toString().trim() || null;
         if (!date || isNaN(amount)) return null;
 
