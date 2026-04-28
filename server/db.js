@@ -718,30 +718,49 @@ function splitCsvLine(line) {
 }
 
 // Parses a Mountain America CU exportedtransactions.csv.
-// Accepts the common "Number,Date,Description,Debit,Credit,Balance" format
-// as well as simpler "Date,Description,Amount,Balance" exports.
-// Debit rows → positive amount (expense); Credit rows → negative amount (income).
+//
+// Actual MACU format (quoted fields, signed Amount column):
+//   "Transaction ID","Posting Date","Effective Date","Transaction Type",
+//   "Amount","Check Number","Reference Number","Description",
+//   "Transaction Category","Type","Balance","Memo","Extended Description"
+//
+// Also handles simpler "Number,Date,Description,Debit,Credit,Balance"
+// and "Date,Description,Amount,Balance" variants.
+//
+// MACU sign convention: positive = credit (income), negative = debit (expense).
+// Our DB / Plaid convention: positive = expense, negative = income.
+// → negate the amount before storing.
 export function parseMacuCsvText(csvText, accountName = "MACU Shared Checking") {
   const lines = csvText.split('\n').map(l => l.trim()).filter(Boolean);
 
-  // Find the header row: must contain "date" and ("debit" or "amount")
+  // Find the header row: must contain "date" somewhere in the line
   let headerIdx = -1;
   for (let i = 0; i < lines.length; i++) {
     const low = lines[i].toLowerCase();
-    if (low.includes('date') && (low.includes('debit') || low.includes('amount'))) {
-      headerIdx = i;
-      break;
-    }
+    if (low.includes('date')) { headerIdx = i; break; }
   }
   if (headerIdx === -1) return [];
 
+  // Strip quotes and non-alpha chars for easy matching
   const header = splitCsvLine(lines[headerIdx]).map(h => h.toLowerCase().trim().replace(/[^a-z]/g, ''));
-  const col = (name) => header.indexOf(name);
-  const dateIdx   = col('date');
-  const descIdx   = col('description');
-  const debitIdx  = col('debit');
-  const creditIdx = col('credit');
-  const amountIdx = col('amount');
+
+  // Partial-match lookup so "postingdate" matches when we search for "date"
+  const findCol = (name) => {
+    const exact = header.indexOf(name);
+    if (exact >= 0) return exact;
+    return header.findIndex(h => h.includes(name));
+  };
+
+  // Prefer "posting date" over "effective date" — findIndex returns first match
+  const dateIdx   = findCol('postingdate') >= 0 ? findCol('postingdate') : findCol('date');
+  // Prefer plain "description" over "extended description"
+  const descIdx   = (() => {
+    const plain = header.indexOf('description');
+    return plain >= 0 ? plain : findCol('description');
+  })();
+  const debitIdx  = findCol('debit');
+  const creditIdx = findCol('credit');
+  const amountIdx = findCol('amount');
 
   if (dateIdx === -1) return [];
 
@@ -750,10 +769,11 @@ export function parseMacuCsvText(csvText, accountName = "MACU Shared Checking") 
 
   for (let i = headerIdx + 1; i < lines.length; i++) {
     const parts = splitCsvLine(lines[i]);
+    if (parts.length <= dateIdx) continue;
     const dateRaw = parts[dateIdx]?.trim();
     if (!dateRaw) continue;
 
-    // Normalise date: MM/DD/YYYY → YYYY-MM-DD
+    // Normalise date: M/D/YYYY or MM/DD/YYYY → YYYY-MM-DD
     let date;
     const mdy = dateRaw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
     if (mdy) {
@@ -766,11 +786,15 @@ export function parseMacuCsvText(csvText, accountName = "MACU Shared Checking") 
 
     let amount;
     if (debitIdx >= 0 && creditIdx >= 0) {
+      // Separate Debit / Credit columns — both are positive values
       const debit  = parseFloat(parts[debitIdx]?.trim()  || '0') || 0;
       const credit = parseFloat(parts[creditIdx]?.trim() || '0') || 0;
+      // Our convention: debit (expense) = positive, credit (income) = negative
       amount = debit > 0 ? debit : -credit;
     } else if (amountIdx >= 0) {
-      amount = parseFloat(parts[amountIdx]?.trim() || '0');
+      // Signed Amount column: MACU positive = income, negative = expense.
+      // Flip sign to match Plaid / our DB convention.
+      amount = -(parseFloat(parts[amountIdx]?.trim() || '0') || 0);
     } else {
       continue;
     }
