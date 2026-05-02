@@ -521,8 +521,8 @@ export default function Settings({ reloadData, user, accounts = [] }) {
               const isDirty = (nicknames[a.account_id] ?? a.name) !== a.name;
               return (
                 <div key={a.account_id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <div style={{ flex: "0 0 200px", fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={original}>
-                    {original}{a.balances?.current != null ? ` ($${a.balances.current.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })})` : ""}
+                  <div style={{ flex: "0 0 160px", fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={original}>
+                    {original}
                   </div>
                   <input
                     style={{ ...styles.nickInput, flex: 1 }}
@@ -538,6 +538,11 @@ export default function Settings({ reloadData, user, accounts = [] }) {
                   >
                     {savingNick[a.account_id] ? "…" : "Save"}
                   </button>
+                  {a.balances?.current != null && (
+                    <div style={{ flex: "0 0 90px", fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-mono)", textAlign: "right", whiteSpace: "nowrap" }}>
+                      ${a.balances.current.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </div>
+                  )}
                 </div>
               );
             })}
