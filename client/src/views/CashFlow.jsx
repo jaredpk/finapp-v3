@@ -311,7 +311,6 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
   };
   const effectiveAmt = (t) => presetsMap[t.name] ?? t.amount;
 
-  let confirmedBal = startingBalance;
   let projectedBal = startingBalance;
   const rows = filtered.map((t) => {
     const state = monthStates[`${account.id}_${t.id}`] || {};
@@ -320,13 +319,9 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
       ? state.isPending
       : !!(t.defaultPending && isThreePaycheckMonth);
     const amt = effectiveAmt(t);
-    if (isPending) {
-      confirmedBal += amt;
-      projectedBal = confirmedBal; // Y happened → snap projected to real balance
-    } else {
-      projectedBal += amt;         // N upcoming → project forward
-    }
-    return { ...t, displayDay, effectiveAmt: amt, isPending, runningBalance: projectedBal, confirmedBalance: confirmedBal };
+    // Y = already in starting balance, don't move the projection
+    if (!isPending) projectedBal += amt;
+    return { ...t, displayDay, effectiveAmt: amt, isPending, runningBalance: projectedBal, confirmedBalance: startingBalance };
   });
 
   const endBal = rows.length ? rows[rows.length - 1].runningBalance : startingBalance;
@@ -339,7 +334,8 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
   });
 
   const pendingRows = rows.filter((r) => r.isPending);
-  const pendingTotal = pendingRows.reduce((s, r) => s + r.effectiveAmt, 0);
+  const nRows = rows.filter((r) => !r.isPending);
+  const nTotal = nRows.reduce((s, r) => s + r.effectiveAmt, 0);
 
   const minColor = minBal < 0 ? "var(--red)" : minBal < 500 ? "var(--accent)" : "var(--muted)";
 
@@ -382,8 +378,8 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
         <div style={styles.pendingBar}>
           <span style={styles.pendingDot} />
           <span style={{ fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--muted)" }}>
-            {pendingRows.length} confirmed · {fmt(pendingTotal, true)} ·{" "}
-            <span style={{ color: "var(--accent)" }}>confirmed balance: {fmt(confirmedBal)}</span>
+            {pendingRows.length} done · {nRows.length} remaining ·{" "}
+            <span style={{ color: "var(--accent)" }}>projected net: {fmt(nTotal, true)}</span>
           </span>
         </div>
       )}
