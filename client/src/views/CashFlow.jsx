@@ -285,6 +285,10 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
     filtered = sorted.filter(t => !t.defaultPending || isThreePaycheckMonth);
   }
 
+  // Keep a ref so handleDrop always reads the latest filtered order, not a stale closure
+  const filteredRef = useRef([]);
+  filteredRef.current = filtered;
+
   const handleDragStart = (e, id) => {
     dragItemId.current = id;
     e.dataTransfer.effectAllowed = "move";
@@ -295,7 +299,7 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
     e.preventDefault();
     const fromId = dragItemId.current;
     if (!fromId || fromId === targetId) { setDragOverId(null); return; }
-    const ids = filtered.map(t => t.id);
+    const ids = filteredRef.current.map(t => t.id);
     const fromIdx = ids.indexOf(fromId);
     const toIdx = ids.indexOf(targetId);
     if (fromIdx === -1 || toIdx === -1) { setDragOverId(null); return; }
@@ -318,7 +322,7 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
     const amt = effectiveAmt(t);
     if (isPending) pendingBal += amt;
     running += amt;
-    return { ...t, displayDay, effectiveAmt: amt, isPending, runningBalance: running, pendingBalance: isPending ? pendingBal : 0 };
+    return { ...t, displayDay, effectiveAmt: amt, isPending, runningBalance: running, confirmedBalance: pendingBal };
   });
 
   const endBal = rows.length ? rows[rows.length - 1].runningBalance : startingBalance;
@@ -438,8 +442,8 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
                 {t.isPending ? "Y" : "N"}
               </button>
             </span>
-            <span style={{ width: 90, textAlign: "right", fontSize: 12, fontFamily: "var(--font-mono)", color: "var(--muted)" }}>
-              {t.isPending ? fmtShort(t.pendingBalance) : "—"}
+            <span style={{ width: 90, textAlign: "right", fontSize: 12, fontFamily: "var(--font-mono)", color: t.isPending ? "var(--accent)" : "var(--muted)", opacity: t.isPending ? 1 : 0.45 }}>
+              {fmtShort(t.confirmedBalance)}
             </span>
             <button onClick={() => onDeleteRow(account.id, t.id)} style={styles.deleteBtn} title="Remove">×</button>
           </div>
