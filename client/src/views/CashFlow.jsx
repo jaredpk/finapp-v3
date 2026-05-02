@@ -734,12 +734,16 @@ export default function CashFlow() {
 
       const newBals = {};
       const newUserSet = new Set();
+      const newOrders = {};
       DEFAULT_ACCOUNTS.forEach(a => {
         const db = dbPresets.find(p => p.name === `__start_${a.id}`);
         if (db) { newBals[a.id] = db.amount; newUserSet.add(a.id); }
+        const orderPref = dbPresets.find(p => p.name === `__order_${a.id}`);
+        if (orderPref?.note) { try { newOrders[a.id] = JSON.parse(orderPref.note); } catch {} }
       });
       if (Object.keys(newBals).length > 0) setStartingBals(prev => ({ ...prev, ...newBals }));
       if (newUserSet.size > 0) setUserSetStartIds(newUserSet);
+      if (Object.keys(newOrders).length > 0) setTxnOrders(newOrders);
     }).catch(() => {});
   }, []);
 
@@ -921,6 +925,7 @@ export default function CashFlow() {
 
   const reorderAccount = useCallback((accountId, newOrderedIds) => {
     setTxnOrders(prev => ({ ...prev, [accountId]: newOrderedIds }));
+    saveCashflowPreset(`__order_${accountId}`, 0, null, JSON.stringify(newOrderedIds)).catch(() => {});
   }, []);
 
   const addRow = (accountId) => setModal({ type: "add", accountId });
