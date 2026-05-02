@@ -810,7 +810,7 @@ export default function CashFlow() {
           const newOrders = {};
           DEFAULT_ACCOUNTS.forEach(a => {
             const db = dbPresets.find(p => p.name === `__start_${a.id}`);
-            if (db) { newBals[a.id] = db.amount; userSetIds.add(a.id); }
+            if (db) { newBals[a.id] = db.amount; } // DB value is a fallback only; live balances always win
             const orderPref = dbPresets.find(p => p.name === `__order_${a.id}`);
             if (orderPref?.note) { try { newOrders[a.id] = JSON.parse(orderPref.note); } catch {} }
           });
@@ -828,7 +828,7 @@ export default function CashFlow() {
 
       if (cancelled) return;
 
-      // 2. Live Plaid balances — skip any account whose balance came from DB above
+      // 2. Live Plaid balances — always overwrites DB defaults for all accounts
       try {
         const data = await fetchAccounts();
         const plaidAccts = data?.accounts ?? [];
@@ -847,7 +847,7 @@ export default function CashFlow() {
 
       if (cancelled) return;
 
-      // 3. Imported account balances (fallback when Plaid sandbox has no real data)
+      // 3. Imported account balances — overwrites Plaid if more recent data is available
       try {
         const rows = await fetchAccountBalances();
         if (!cancelled && Array.isArray(rows) && rows.length) {
