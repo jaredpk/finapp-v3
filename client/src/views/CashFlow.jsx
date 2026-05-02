@@ -1236,7 +1236,7 @@ const styles = {
   saveBtn: { padding: "8px 18px", background: "var(--accent)", border: "none", borderRadius: "var(--radius)", color: "#fff", fontSize: 13, fontWeight: 700, fontFamily: "var(--font-display)", cursor: "pointer" },
 
   noteText: { fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-mono)", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", borderBottom: "1px dashed var(--border2)" },
-  noteAdd: { fontSize: 10, color: "var(--border2)", fontFamily: "var(--font-mono)", cursor: "pointer", opacity: 0.5 },
+  noteAdd: { fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-mono)", cursor: "pointer", opacity: 0.55 },
   noteInput: { fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text)", background: "transparent", border: "none", borderBottom: "1px solid var(--accent)", outline: "none", width: "100%", padding: "1px 0" },
 
   notesSection: { marginTop: 12, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", padding: "14px 18px" },
