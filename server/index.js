@@ -422,6 +422,7 @@ app.get("/api/accounts", requireAuth, async (req, res) => {
   const [balRows, holdingRows] = await Promise.all([getLatestBalances(), getLatestHoldings()]);
   if (!balRows.length && !holdingRows.length) return res.json({ accounts: [] });
 
+  const balKeySeen = {};
   const accounts = balRows.map((r) => {
     const type = normalizePlaidType(r.type);
     const isLiability = type === "credit" || type === "loan";
@@ -429,8 +430,11 @@ app.get("/api/accounts", requireAuth, async (req, res) => {
     // (positive = amount owed) so the Dashboard net worth formula works consistently.
     const current = isLiability ? Math.abs(parseFloat(r.balance)) : parseFloat(r.balance);
     const available = r.available != null ? Math.abs(parseFloat(r.available)) : null;
+    const baseKey = `balance_${r.institution || ""}_${r.account}_${r.type || ""}`;
+    const count = (balKeySeen[baseKey] = (balKeySeen[baseKey] || 0) + 1);
+    const account_id = count === 1 ? baseKey : `${baseKey}_${count}`;
     return {
-      account_id: `balance_${r.institution}_${r.account}`,
+      account_id,
       name: r.account,
       official_name: r.account,
       type,
