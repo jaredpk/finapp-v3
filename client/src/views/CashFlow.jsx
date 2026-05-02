@@ -39,18 +39,18 @@ const DEFAULT_ACCOUNTS = [
     transactions: [
       { id: 1,  day: 1,  name: "Personal Jared",                  freq: "Monthly",    amount: -2637,   isTransfer: true                        },
       { id: 2,  day: 5,  name: "Paycheck",                        freq: "Bi-Monthly", amount: 4009                                             },
-      { id: 3,  day: 7,  name: "Jared Transfer to Shared",        freq: "Monthly",    amount: -1900,   isTransfer: true                        },
+      { id: 3,  day: 7,  name: "Jared Transfer to Shared",        freq: "Monthly",    amount: -500,    isTransfer: true                        },
       { id: 4,  day: 10, name: "UESP",                            freq: "Monthly",    amount: -100                                             },
       { id: 5,  day: 19, name: "Transfer Reserve Account",        freq: "Monthly",    amount: -500                                             },
       { id: 6,  day: 20, name: "Paycheck",                        freq: "Bi-Monthly", amount: 4009                                             },
       { id: 7,  day: 24, name: "Jared Transfer to Personal Macu", freq: "Monthly",    amount: -629.84, isTransfer: true                        },
       { id: 8,  day: 27, name: "Transfer to Long-Term Purchases", freq: "Monthly",    amount: -250                                             },
       { id: 9,  day: 27, name: "Transfer to Emergency Fund",      freq: "Monthly",    amount: -250                                             },
-      { id: 10, day: 27, name: "Jared Transfer to Shared",        freq: "Monthly",    amount: -1900,   isTransfer: true                        },
+      { id: 10, day: 27, name: "Jared Transfer to Shared",        freq: "Monthly",    amount: -500,    isTransfer: true                        },
       { id: 11, day: 28, name: "Transfer to Joint Savings",       freq: "Monthly",    amount: -385                                             },
       { id: 12, day: 30, name: "Transfer for PTO Reserve",        freq: "Monthly",    amount: -320                                             },
       { id: 13, day: 30, name: "Personal IRA Transfer",           freq: "Monthly",    amount: -500                                             },
-      { id: 14, day: 30, name: "Jared Transfer to Shared",        freq: "Monthly",    amount: -1900,   isTransfer: true, defaultPending: true  },
+      { id: 14, day: 30, name: "Jared Transfer to Shared",        freq: "Monthly",    amount: -500,    isTransfer: true, defaultPending: true  },
       { id: 15, day: 30, name: "Paycheck (Month End)",            freq: "Monthly",    amount: 4009,                     defaultPending: true  },
       { id: 16, day: 1,  name: "Supplementary Transfer In",       freq: "As Needed",  amount: 0                                               },
       { id: 17, day: 1,  name: "Extra Transfer Out",              freq: "As Needed",  amount: 0                                               },
@@ -74,15 +74,16 @@ const DEFAULT_ACCOUNTS = [
       { id: 1,  day: 1,  name: "Other Misc. Shared",       freq: "Bi-Monthly", amount: -500                       },
       { id: 2,  day: 1,  name: "House Payment",            freq: "Bi-Monthly", amount: -2017                      },
       { id: 3,  day: 2,  name: "Personal Jared",           freq: "Monthly",    amount: 2637,   isTransfer: true   },
-      { id: 4,  day: 7,  name: "Jared Transfer In",        freq: "Monthly",    amount: 1900,   isTransfer: true   },
+      { id: 4,  day: 7,  name: "Jared Transfer In",        freq: "Monthly",    amount: 500,    isTransfer: true   },
       { id: 5,  day: 12, name: "Alta Transfer",            freq: "Bi-Weekly",  amount: 1500                       },
       { id: 6,  day: 15, name: "Car Payment",              freq: "Monthly",    amount: -500                       },
       { id: 7,  day: 24, name: "Alta Transfer",            freq: "Bi-Weekly",  amount: 1500                       },
       { id: 8,  day: 24, name: "Transfer for Credit Card", freq: "Monthly",    amount: -6000                      },
-      { id: 9,  day: 28, name: "Jared Transfer In",        freq: "Monthly",    amount: 1900,   isTransfer: true   },
+      { id: 9,  day: 28, name: "Jared Transfer In",        freq: "Monthly",    amount: 500,    isTransfer: true   },
       { id: 10, day: 28, name: "Misc. Utilities",          freq: "Monthly",    amount: -500                       },
-      { id: 11, day: 30, name: "Jared Transfer In",        freq: "Monthly",    amount: 1900,   isTransfer: true,  defaultPending: true },
+      { id: 11, day: 30, name: "Jared Transfer In",        freq: "Monthly",    amount: 500,    isTransfer: true,  defaultPending: true },
       { id: 12, day: 30, name: "Alta Transfer",            freq: "Bi-Weekly",  amount: 1500,                      defaultPending: true },
+      { id: 13, day: 1,  name: "Extra Transfer In",        freq: "As Needed",  amount: 0,      isTransfer: true   },
     ],
   },
 ];
@@ -104,7 +105,7 @@ const DEFAULT_FIXED = [
   { name: "UESP",                               amount: -100,    freq: "Monthly",    note: "" },
   { name: "Transfer for PTO Reserve",           amount: -320,    freq: "Monthly",    note: "" },
   { name: "Alta Transfer",                      amount: 1500,    freq: "Bi-Monthly", note: "" },
-  { name: "Jared Transfer to Shared",           amount: -1900,   freq: "Monthly",    note: "" },
+  { name: "Jared Transfer to Shared",           amount: -500,    freq: "Monthly",    note: "" },
   { name: "Jared Transfer to Personal Macu",    amount: -629.84, freq: "Monthly",    note: "Ashton/Brooklyn" },
   { name: "House Payment",                      amount: -2017,   freq: "Monthly",    note: "" },
   { name: "Transfer to Joint Savings",          amount: -385,    freq: "Monthly",    note: "" },
@@ -115,6 +116,14 @@ const DEFAULT_FIXED = [
   { name: "Personal IRA Transfer",              amount: -500,    freq: "Monthly",    note: "" },
   { name: "Car Payment",                        amount: -500,    freq: "Monthly",    note: "" },
 ];
+
+// When a preset is saved for these names, the paired name gets the negated amount automatically.
+const TRANSFER_MIRRORS = {
+  "Jared Transfer to Shared": "Jared Transfer In",
+  "Jared Transfer In":        "Jared Transfer to Shared",
+  "Extra Transfer Out":       "Extra Transfer In",
+  "Extra Transfer In":        "Extra Transfer Out",
+};
 
 // ── 3-paycheck month detection ────────────────────────────────────────────────
 function computeThreePaycheckMonths(year, baseDateNum) {
@@ -750,9 +759,13 @@ export default function CashFlow() {
       const cyclePref = dbPresets.find(p => p.name === "__pay_cycle_date");
       if (cyclePref?.amount) setPayBaseDate(cyclePref.amount);
 
+      // Stale default amounts that should be superseded by the new code defaults.
+      const STALE_DEFAULTS = { "Jared Transfer to Shared": -1900, "Jared Transfer In": 1900 };
       const merged = DEFAULT_FIXED.map(d => {
         const db = dbPresets.find(p => p.name === d.name);
-        return db ? { ...d, amount: db.amount, freq: db.freq ?? d.freq, note: db.note ?? d.note } : d;
+        if (!db) return d;
+        const isStale = STALE_DEFAULTS[d.name] !== undefined && db.amount === STALE_DEFAULTS[d.name];
+        return isStale ? d : { ...d, amount: db.amount, freq: db.freq ?? d.freq, note: db.note ?? d.note };
       });
       dbPresets.forEach(p => {
         if (!merged.find(m => m.name === p.name) && !p.name.startsWith("__")) {
@@ -938,6 +951,20 @@ export default function CashFlow() {
       return [...prev, { name, amount, freq: freq ?? "Monthly", note: note ?? "" }];
     });
     saveCashflowPreset(name, amount, freq ?? existing?.freq, note ?? existing?.note).catch(() => {});
+
+    const mirrorName = TRANSFER_MIRRORS[name];
+    if (mirrorName) {
+      const mirrorAmt = -amount;
+      setPresets(prev => {
+        const idx = prev.findIndex(p => p.name === mirrorName);
+        if (idx >= 0) {
+          const u = [...prev]; u[idx] = { ...u[idx], amount: mirrorAmt }; return u;
+        }
+        return [...prev, { name: mirrorName, amount: mirrorAmt, freq: freq ?? "Monthly", note: "" }];
+      });
+      saveCashflowPreset(mirrorName, mirrorAmt, null, null).catch(() => {});
+    }
+
     setModal(null);
   }, [presets]);
 
