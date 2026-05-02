@@ -251,14 +251,48 @@ function SummaryBar({ takeHome, expenses, freeCashflow }) {
   );
 }
 
-function AccountTable({ account, startingBalance, allowEditStart, presetsMap, monthStates, isThreePaycheckMonth, onTogglePending, onEditAmount, onEditStart, onAddRow, onDeleteRow }) {
-  // Sort by actual confirmed day when available, template day otherwise
-  const sorted = [...account.transactions].sort((a, b) => {
-    const aDay = monthStates[`${account.id}_${a.id}`]?.actualDay ?? a.day;
-    const bDay = monthStates[`${account.id}_${b.id}`]?.actualDay ?? b.day;
-    return aDay - bDay;
-  });
-  const filtered = sorted.filter(t => !t.defaultPending || isThreePaycheckMonth);
+function AccountTable({ account, startingBalance, allowEditStart, presetsMap, monthStates, isThreePaycheckMonth, onTogglePending, onEditAmount, onEditStart, onAddRow, onDeleteRow, txnOrder, onReorder }) {
+  const [dragOverId, setDragOverId] = useState(null);
+  const dragItemId = useRef(null);
+
+  // Use custom drag order if set, otherwise sort by day
+  let filtered;
+  if (txnOrder) {
+    const sortedByOrder = [...account.transactions].sort((a, b) => {
+      const ai = txnOrder.indexOf(a.id);
+      const bi = txnOrder.indexOf(b.id);
+      return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+    });
+    filtered = sortedByOrder.filter(t => !t.defaultPending || isThreePaycheckMonth);
+  } else {
+    const sorted = [...account.transactions].sort((a, b) => {
+      const aDay = monthStates[`${account.id}_${a.id}`]?.actualDay ?? a.day;
+      const bDay = monthStates[`${account.id}_${b.id}`]?.actualDay ?? b.day;
+      return aDay - bDay;
+    });
+    filtered = sorted.filter(t => !t.defaultPending || isThreePaycheckMonth);
+  }
+
+  const handleDragStart = (e, id) => {
+    dragItemId.current = id;
+    e.dataTransfer.effectAllowed = "move";
+  };
+  const handleDragEnter = (id) => setDragOverId(id);
+  const handleDragEnd = () => { setDragOverId(null); dragItemId.current = null; };
+  const handleDrop = (e, targetId) => {
+    e.preventDefault();
+    const fromId = dragItemId.current;
+    if (!fromId || fromId === targetId) { setDragOverId(null); return; }
+    const ids = filtered.map(t => t.id);
+    const fromIdx = ids.indexOf(fromId);
+    const toIdx = ids.indexOf(targetId);
+    if (fromIdx === -1 || toIdx === -1) { setDragOverId(null); return; }
+    const newOrder = [...ids];
+    newOrder.splice(fromIdx, 1);
+    newOrder.splice(toIdx, 0, fromId);
+    onReorder(account.id, newOrder);
+    setDragOverId(null);
+  };
   const effectiveAmt = (t) => presetsMap[t.name] ?? t.amount;
 
   let running = startingBalance;
@@ -336,6 +370,7 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
 
       <div style={styles.tableWrap}>
         <div style={styles.txnHeader}>
+          <span style={{ width: 20 }} />
           <span style={{ width: 30 }}>Day</span>
           <span style={{ flex: 1 }}>Transaction</span>
           <span style={{ width: 80 }}>Freq</span>
@@ -349,12 +384,19 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
         {rows.map((t) => (
           <div
             key={t.id}
+            draggable
+            onDragStart={(e) => handleDragStart(e, t.id)}
+            onDragEnter={() => handleDragEnter(t.id)}
+            onDragEnd={handleDragEnd}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => handleDrop(e, t.id)}
             style={{
               ...styles.txnRow,
-              background: t.isPending ? "rgba(240,180,41,0.04)" : "transparent",
+              background: dragOverId === t.id ? "rgba(240,180,41,0.1)" : t.isPending ? "rgba(240,180,41,0.04)" : "transparent",
               borderLeft: t.isPending ? "2px solid var(--accent)" : "2px solid transparent",
             }}
           >
+            <span style={styles.dragHandle} title="Drag to reorder">⠿</span>
             <span style={{ ...styles.txnDay, color: t.displayDay !== t.day ? "var(--accent)" : "var(--muted)" }}
               title={t.displayDay !== t.day ? `Template day: ${t.day}` : undefined}>
               {t.displayDay}
@@ -611,6 +653,7 @@ export default function CashFlow() {
   const [allMonthStates, setAllMonthStates] = useState({});
   // allRecentTxns: { [monthKey]: txns[] }
   const [allRecentTxns, setAllRecentTxns] = useState({});
+  const [txnOrders, setTxnOrders] = useState({});
   const [modal, setModal] = useState(null);
   const autoConfirmedRef = useRef(new Set());
 
@@ -843,6 +886,10 @@ export default function CashFlow() {
     setModal(null);
   }, []);
 
+  const reorderAccount = useCallback((accountId, newOrderedIds) => {
+    setTxnOrders(prev => ({ ...prev, [accountId]: newOrderedIds }));
+  }, []);
+
   const addRow = (accountId) => setModal({ type: "add", accountId });
 
   const saveAdd = (data) => {
@@ -928,6 +975,8 @@ export default function CashFlow() {
                   onEditStart={() => editStartingBalance(acct.id)}
                   onAddRow={addRow}
                   onDeleteRow={deleteRow}
+                  txnOrder={txnOrders[acct.id]}
+                  onReorder={reorderAccount}
                 />
               ))}
             </div>
@@ -1020,6 +1069,7 @@ const styles = {
   txnDay: { width: 30, fontSize: 12, fontFamily: "var(--font-mono)", color: "var(--muted)", textAlign: "center" },
 
   pendingBtn: { border: "none", borderRadius: 4, fontSize: 10, fontWeight: 700, fontFamily: "var(--font-mono)", padding: "2px 7px", cursor: "pointer", transition: "background 0.15s" },
+  dragHandle: { width: 20, textAlign: "center", fontSize: 13, color: "var(--border2)", cursor: "grab", userSelect: "none", flexShrink: 0 },
   deleteBtn: { background: "none", border: "none", color: "var(--muted)", fontSize: 14, cursor: "pointer", width: 28, padding: 0, textAlign: "center", lineHeight: 1, opacity: 0.5 },
   addRowBtn: { display: "block", width: "calc(100% - 40px)", margin: "8px 20px 4px", padding: "7px 0", background: "none", border: "1px dashed var(--border2)", borderRadius: "var(--radius)", color: "var(--muted)", fontSize: 11, fontFamily: "var(--font-mono)", cursor: "pointer" },
 
