@@ -10,6 +10,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { z } from "zod";
+import xlsxLib from "xlsx";
 import {
   initDb,
   getApiKeyForUser, createApiKey, getClerkUserIdByApiKey,
@@ -35,6 +36,7 @@ import {
   getManualAccounts, upsertManualAccount, deleteManualAccount,
   getCashflowPresets, upsertCashflowPreset, getCashflowStates, upsertCashflowState,
   getCashflowMappings, upsertCashflowMapping, parseMacuCsvText,
+  getAccountNicknames, upsertAccountNickname, deleteAccountNickname,
 } from "./db.js";
 import pool from "./db.js";
 
@@ -239,6 +241,7 @@ app.get("/api/config", (_, res) => res.json({
 app.get("/api/health", (_, res) => res.json({ ok: true }));
 
 
+
 // ── Plaid Link page ───────────────────────────────────────────────────────────
 app.get("/link", async (req, res) => {
   const { session } = req.query;
@@ -384,6 +387,7 @@ const ACCOUNT_TYPE_MAP = {
   "credit card":"credit",
   credit:       "credit",
   mortgage:     "loan",
+  auto:         "loan",
   loan:         "loan",
   heloc:        "loan",
 };
@@ -396,6 +400,9 @@ function normalizePlaidType(rawType) {
 
 app.get("/api/accounts", requireAuth, async (req, res) => {
   const items = await getUserItems();
+  const nicknames = await getAccountNicknames();
+  const applyNicknames = (accts) =>
+    accts.map((a) => nicknames[a.account_id] ? { ...a, name: nicknames[a.account_id], official_name: a.official_name || a.name } : a);
 
   if (items.length > 0) {
     try {
@@ -405,7 +412,7 @@ app.get("/api/accounts", requireAuth, async (req, res) => {
           return r.data.accounts.map((a) => ({ ...a, institutionName, itemId }));
         })
       );
-      return res.json({ accounts: allAccounts.flat() });
+      return res.json({ accounts: applyNicknames(allAccounts.flat()) });
     } catch (err) {
       console.error("Plaid accounts error, falling back to balance snapshot:", err.message);
     }
@@ -438,9 +445,13 @@ app.get("/api/accounts", requireAuth, async (req, res) => {
   // institution not already covered by account_balances (e.g. eTrade).
   // Group by account name first (distinguishes multiple accounts at same institution),
   // falling back to institution name.  Skip rows with neither.
-  const coveredInstitutions = new Set(balRows.map((r) => (r.institution || "").toLowerCase()));
+  // Strip non-alphanumeric chars (e.g. "E*TRADE" → "etrade") so name variants match.
+  const normInst = (s) => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const isSummaryTicker = (t) => /total|count|change|\btoday\b|portfolio|holding/i.test(t || "");
+  const coveredInstitutions = new Set(balRows.map((r) => normInst(r.institution)));
   const holdingsByAcct = {};
   for (const h of holdingRows) {
+    if (isSummaryTicker(h.ticker)) continue;
     const key = h.account || h.institution;
     if (!key) continue;
     if (!holdingsByAcct[key]) {
@@ -453,7 +464,7 @@ app.get("/api/accounts", requireAuth, async (req, res) => {
     holdingsByAcct[key].value += parseFloat(h.value) || 0;
   }
   const holdingAccounts = Object.values(holdingsByAcct)
-    .filter((g) => !coveredInstitutions.has((g.institution || "").toLowerCase()))
+    .filter((g) => !coveredInstitutions.has(normInst(g.institution)))
     .map((g) => ({
       account_id: `holdings_${g.displayName}`,
       name: g.displayName,
@@ -494,9 +505,22 @@ app.get("/api/accounts", requireAuth, async (req, res) => {
   }));
 
   res.json({
-    accounts: [...accounts, ...holdingAccounts, ...propertyAccounts, ...manualAccounts],
+    accounts: applyNicknames([...accounts, ...holdingAccounts, ...propertyAccounts, ...manualAccounts]),
     snapshotDate: balRows[0]?.snapshot_date || holdingRows[0]?.snapshot_date,
   });
+});
+
+// ── Account nicknames ─────────────────────────────────────────────────────────
+app.post("/api/account-nicknames", requireAuth, async (req, res) => {
+  const { account_id, nickname } = req.body;
+  if (!account_id || !nickname?.trim()) return res.status(400).json({ error: "account_id and nickname required" });
+  await upsertAccountNickname(account_id, nickname.trim());
+  res.json({ ok: true });
+});
+
+app.delete("/api/account-nicknames/:accountId", requireAuth, async (req, res) => {
+  await deleteAccountNickname(decodeURIComponent(req.params.accountId));
+  res.json({ ok: true });
 });
 
 // ── Transactions ──────────────────────────────────────────────────────────────
@@ -677,6 +701,70 @@ app.get("/api/account-balances", requireAuth, async (req, res) => {
 app.get("/api/investment-holdings", requireAuth, async (req, res) => {
   const rows = await getLatestHoldings();
   res.json(rows);
+});
+
+// ── Export XLSX (same format as import) ──────────────────────────────────────
+app.get("/api/export-xlsx", requireAuth, async (req, res) => {
+  try {
+    const { utils, write } = xlsxLib;
+    const [balRows, holdingRows, txnRows] = await Promise.all([
+      getLatestBalances(),
+      getLatestHoldings(),
+      getTransactions({ limit: 1000 }),
+    ]);
+
+    const wb = utils.book_new();
+
+    // Account Balances sheet
+    const balData = [
+      ["Account", "Institution", "Type", "Balance (USD)", "Available (USD)"],
+      ...balRows.map((r) => [
+        r.account,
+        r.institution ?? "",
+        r.type ?? "",
+        parseFloat(r.balance),
+        r.available != null ? parseFloat(r.available) : "",
+      ]),
+    ];
+    utils.book_append_sheet(wb, utils.aoa_to_sheet(balData), "Account Balances");
+
+    // Investment Holdings sheet
+    const holdData = [
+      ["Ticker", "Institution", "Account", "Value (USD)", "Day Chg %", "Gain/Loss (USD)", "Gain/Loss %"],
+      ...holdingRows.map((r) => [
+        r.ticker,
+        r.institution ?? "",
+        r.account ?? "",
+        parseFloat(r.value),
+        r.day_change ?? "",
+        r.gain_loss != null ? parseFloat(r.gain_loss) : "",
+        r.gain_loss_pct ?? "",
+      ]),
+    ];
+    utils.book_append_sheet(wb, utils.aoa_to_sheet(holdData), "Investment Holdings");
+
+    // Transactions sheet
+    const txnData = [
+      ["Date", "Merchant", "Category", "Amount (USD)", "Account"],
+      ...txnRows.map((t) => [
+        t.date,
+        t.merchant_name ?? "",
+        t.category ?? "",
+        t.amount,
+        t.account_id ?? "",
+      ]),
+    ];
+    utils.book_append_sheet(wb, utils.aoa_to_sheet(txnData), "Transactions");
+
+    const snapshotDate = balRows[0]?.snapshot_date ?? new Date().toISOString().slice(0, 10);
+    const buf = write(wb, { type: "buffer", bookType: "xlsx" });
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="finapp-${snapshotDate}.xlsx"`);
+    res.send(buf);
+  } catch (err) {
+    console.error("Export error:", err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ── Properties (FHFA) ────────────────────────────────────────────────────────

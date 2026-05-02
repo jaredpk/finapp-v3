@@ -126,6 +126,12 @@ export async function initDb() {
       balance NUMERIC(14,2) NOT NULL DEFAULT 0,
       updated_at TIMESTAMPTZ DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS account_nicknames (
+      account_id TEXT PRIMARY KEY,
+      nickname TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
   `);
 
   // Add FHFA-based property valuation columns
@@ -834,10 +840,11 @@ export function parseXlsxBase64(base64, snapshotDate) {
     : [];
 
   const holdingsWs = wb.Sheets['Investment Holdings'];
+  const isSummaryTicker = (t) => /total|count|change|\btoday\b|portfolio|holding/i.test(t);
   const holdings = holdingsWs
     ? utils.sheet_to_json(holdingsWs, { raw: true, range: 1 }).map(r => {
         const value = parseFloat(r['Value (USD)']);
-        if (!r['Ticker'] || isNaN(value)) return null;
+        if (!r['Ticker'] || isNaN(value) || isSummaryTicker(r['Ticker'])) return null;
         return {
           ticker: r['Ticker'].toString().trim(),
           institution: r['Institution']?.toString().trim() || null,
@@ -1320,6 +1327,25 @@ export async function upsertCashflowMapping(merchantPattern, accountId, txnName)
      ON CONFLICT (merchant_pattern) DO UPDATE SET account_id = $2, txn_name = $3`,
     [merchantPattern, accountId, txnName]
   );
+}
+
+// ── Account nicknames ─────────────────────────────────────────────────────────
+export async function getAccountNicknames() {
+  const { rows } = await pool.query(`SELECT account_id, nickname FROM account_nicknames`);
+  return Object.fromEntries(rows.map((r) => [r.account_id, r.nickname]));
+}
+
+export async function upsertAccountNickname(accountId, nickname) {
+  await pool.query(
+    `INSERT INTO account_nicknames (account_id, nickname)
+     VALUES ($1, $2)
+     ON CONFLICT (account_id) DO UPDATE SET nickname = $2`,
+    [accountId, nickname]
+  );
+}
+
+export async function deleteAccountNickname(accountId) {
+  await pool.query(`DELETE FROM account_nicknames WHERE account_id = $1`, [accountId]);
 }
 
 export default pool;

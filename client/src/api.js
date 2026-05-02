@@ -128,6 +128,42 @@ export async function saveMerchantOverride(transaction_id, merchant_name) {
   return r.json();
 }
 
+// ── Account nicknames ─────────────────────────────────────────────────────────
+export async function saveAccountNickname(account_id, nickname) {
+  const r = await fetch(`${BASE}/account-nicknames`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ account_id, nickname }),
+  });
+  return r.json();
+}
+
+export async function deleteAccountNicknameApi(account_id) {
+  const r = await fetch(`${BASE}/account-nicknames/${encodeURIComponent(account_id)}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+  });
+  return r.json();
+}
+
+// ── XLSX Export ───────────────────────────────────────────────────────────────
+export async function downloadXlsx() {
+  const headers = await authHeaders();
+  delete headers["Content-Type"];
+  const r = await fetch(`${BASE}/export-xlsx`, { headers });
+  if (!r.ok) throw new Error("Export failed");
+  const blob = await r.blob();
+  const disposition = r.headers.get("Content-Disposition") || "";
+  const match = disposition.match(/filename="([^"]+)"/);
+  const filename = match ? match[1] : "finapp-export.xlsx";
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 // ── XLSX Import ───────────────────────────────────────────────────────────────
 export async function importXlsx(base64) {
   const r = await fetch(`${BASE}/import-xlsx`, {

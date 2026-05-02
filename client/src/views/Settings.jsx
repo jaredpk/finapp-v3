@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
-import { getApiKey, generateApiKey, importXlsx, importMacuCsv, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi, setPropertyBaselineApi, fetchManualAccounts, saveManualAccount, deleteManualAccountApi } from "../api.js";
+import { getApiKey, generateApiKey, importXlsx, importMacuCsv, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi, setPropertyBaselineApi, fetchManualAccounts, saveManualAccount, deleteManualAccountApi, downloadXlsx, saveAccountNickname, deleteAccountNicknameApi } from "../api.js";
 
-export default function Settings({ reloadData, user }) {
+export default function Settings({ reloadData, user, accounts = [] }) {
   const [apiKey, setApiKey] = useState(null);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
@@ -43,6 +43,14 @@ export default function Settings({ reloadData, user }) {
   const [acctResult, setAcctResult]           = useState(null);
   const [editingAcct, setEditingAcct]         = useState(null); // { id, balance }
 
+  // Export state
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState(null);
+
+  // Account nickname state — keyed by account_id
+  const [nicknames, setNicknames] = useState({});
+  const [savingNick, setSavingNick] = useState({});
+
   // Dedup state
   const [deduping, setDeduping]         = useState(false);
   const [dupePreview, setDupePreview]   = useState(null);
@@ -57,6 +65,18 @@ export default function Settings({ reloadData, user }) {
     fetchProperties().then((data) => { setProperties(data.properties || []); setPropsLoading(false); });
     fetchManualAccounts().then((data) => { setManualAccounts(data.accounts || []); setManualLoading(false); });
   }, []);
+
+  // Seed nickname inputs from current account names whenever accounts load
+  useEffect(() => {
+    if (!accounts.length) return;
+    setNicknames((prev) => {
+      const next = { ...prev };
+      for (const a of accounts) {
+        if (!(a.account_id in next)) next[a.account_id] = a.name;
+      }
+      return next;
+    });
+  }, [accounts]);
 
   // ── API key ──────────────────────────────────────────────────────────────────
   async function handleGenerate() {
@@ -276,6 +296,33 @@ export default function Settings({ reloadData, user }) {
     finally { setDebugging(false); }
   }
 
+  async function handleSaveNickname(account_id, originalName) {
+    const nickname = (nicknames[account_id] ?? "").trim();
+    setSavingNick((p) => ({ ...p, [account_id]: true }));
+    try {
+      if (!nickname || nickname === originalName) {
+        await deleteAccountNicknameApi(account_id);
+      } else {
+        await saveAccountNickname(account_id, nickname);
+      }
+      await reloadData();
+    } finally {
+      setSavingNick((p) => ({ ...p, [account_id]: false }));
+    }
+  }
+
+  async function handleExportXlsx() {
+    setExporting(true);
+    setExportError(null);
+    try {
+      await downloadXlsx();
+    } catch (err) {
+      setExportError(err.message);
+    } finally {
+      setExporting(false);
+    }
+  }
+
   const sseUrl = apiKey ? `${window.location.origin}/sse?key=${apiKey}` : null;
   const mcpConfig = apiKey ? JSON.stringify({
     mcpServers: { finapp: { command: "npx", args: ["-y", "mcp-remote", `${window.location.origin}/mcp`, "--header", `x-api-key:${apiKey}`] } },
@@ -460,6 +507,55 @@ export default function Settings({ reloadData, user }) {
               <p style={propResult.startsWith("Error") ? styles.importError : styles.importSuccess}>{propResult}</p>
             )}
           </>
+        )}
+      </section>
+
+      {/* Account Nicknames */}
+      {accounts.length > 0 && (
+        <section style={styles.card}>
+          <h2 style={styles.cardTitle}>Account Names</h2>
+          <p style={styles.description}>Give any account a friendly display name. Leave blank or match the original to revert.</p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 8 }}>
+            {accounts.map((a) => {
+              const original = a.official_name || a.name;
+              const isDirty = (nicknames[a.account_id] ?? a.name) !== a.name;
+              return (
+                <div key={a.account_id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div style={{ flex: "0 0 200px", fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={original}>
+                    {original}{a.balances?.current != null ? ` ($${a.balances.current.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })})` : ""}
+                  </div>
+                  <input
+                    style={{ ...styles.nickInput, flex: 1 }}
+                    value={nicknames[a.account_id] ?? a.name}
+                    onChange={(e) => setNicknames((p) => ({ ...p, [a.account_id]: e.target.value }))}
+                    onKeyDown={(e) => e.key === "Enter" && handleSaveNickname(a.account_id, original)}
+                    placeholder={original}
+                  />
+                  <button
+                    style={{ ...styles.generateBtn, padding: "6px 14px", fontSize: 12, opacity: isDirty ? 1 : 0.4 }}
+                    onClick={() => handleSaveNickname(a.account_id, original)}
+                    disabled={savingNick[a.account_id]}
+                  >
+                    {savingNick[a.account_id] ? "…" : "Save"}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      {/* Excel Export */}
+      <section style={styles.card}>
+        <h2 style={styles.cardTitle}>Export to Excel</h2>
+        <p style={styles.description}>
+          Download your current account balances, investment holdings, and transactions as an <strong>.xlsx</strong> file — in the same format used for import. Use this to prompt Perplexity to regenerate an updated spreadsheet.
+        </p>
+        <button style={styles.generateBtn} onClick={handleExportXlsx} disabled={exporting}>
+          {exporting ? "Exporting…" : "Download Excel File"}
+        </button>
+        {exportError && (
+          <p style={styles.importError}>Error: {exportError}</p>
         )}
       </section>
 
@@ -674,6 +770,7 @@ const styles = {
   keyBox: { display: "flex", alignItems: "center", gap: 12, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 14px", marginBottom: 12 },
   keyText: { flex: 1, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text)", wordBreak: "break-all" },
   generateBtn: { background: "var(--accent)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 20px", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "var(--font-display)" },
+  nickInput: { background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "7px 12px", fontSize: 13, color: "var(--text)", fontFamily: "var(--font-display)", outline: "none" },
   regenerateBtn: { background: "none", color: "var(--muted)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 16px", fontWeight: 500, fontSize: 12, cursor: "pointer", fontFamily: "var(--font-display)" },
   copyBtn: { background: "var(--surface2)", color: "var(--text)", border: "none", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer", flexShrink: 0, fontFamily: "var(--font-display)" },
   configBox: { background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: 16, position: "relative" },
