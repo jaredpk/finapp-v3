@@ -33,6 +33,11 @@ export async function fetchAccounts() {
   return r.json();
 }
 
+export async function fetchAccountBalances() {
+  const r = await fetch(`${BASE}/account-balances`, { headers: await authHeaders() });
+  return r.json();
+}
+
 export async function fetchTransactions() {
   const r = await fetch(`${BASE}/transactions`, { headers: await authHeaders() });
   return r.json();

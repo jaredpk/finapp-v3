@@ -5,6 +5,7 @@ import {
   fetchCashflowMappings, saveCashflowMapping,
   fetchTransactionsForMonth,
   fetchAccounts,
+  fetchAccountBalances,
 } from "../api";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -186,6 +187,17 @@ function matchPlaidToAccount(plaidName, institutionName, acctId, acctDisplayName
   return acctDisplayName.toLowerCase().split(/\s+/)
     .filter(w => w.length > 3)
     .some(w => p.includes(w));
+}
+
+// Match imported account_balances row to a cashflow account ID
+function matchImportedBalance(row, acctId) {
+  const name = (row.account || "").toLowerCase();
+  const inst = (row.institution || "").toLowerCase();
+  const type = (row.type || "").toLowerCase();
+  if (acctId === "amex") return inst.includes("american express") && type === "checking";
+  if (acctId === "macu") return inst.includes("mountain america") && type === "checking" && (name.includes("personal") || name.includes("myfree") || name.includes("macu"));
+  if (acctId === "shared") return name.includes("shared") && type === "checking";
+  return false;
 }
 
 // ── Summary helper ────────────────────────────────────────────────────────────
@@ -739,6 +751,22 @@ export default function CashFlow() {
             matchPlaidToAccount(p.name, p.institutionName, acct.id, acct.name)
           );
           if (match?.balances?.current != null) next[acct.id] = match.balances.current;
+        });
+        return next;
+      });
+    }).catch(() => {});
+  }, [userSetStartIds]);
+
+  // Load balances from xlsx imports (fallback when Plaid sandbox doesn't have real data)
+  useEffect(() => {
+    fetchAccountBalances().then(rows => {
+      if (!Array.isArray(rows) || !rows.length) return;
+      setStartingBals(prev => {
+        const next = { ...prev };
+        DEFAULT_ACCOUNTS.forEach(acct => {
+          if (userSetStartIds.has(acct.id)) return;
+          const match = rows.find(r => matchImportedBalance(r, acct.id));
+          if (match?.balance != null) next[acct.id] = parseFloat(match.balance);
         });
         return next;
       });
