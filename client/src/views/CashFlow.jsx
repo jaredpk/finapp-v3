@@ -711,6 +711,7 @@ const now = new Date();
 export default function CashFlow() {
   // monthOffset: 0 = current month is first, 1 = next month is first, etc.
   const [monthOffset, setMonthOffset] = useState(0);
+  const [activeTab, setActiveTab] = useState("amex");
 
   // Compute the 3 months to display
   const months = useMemo(() => {
@@ -1090,6 +1091,22 @@ export default function CashFlow() {
         </div>
       </div>
 
+      <div style={styles.tabBar}>
+        {[
+          { id: "amex", label: "Amex" },
+          { id: "macu", label: "Personal MACU" },
+          { id: "shared", label: "Shared MACU" },
+        ].map(tab => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            style={activeTab === tab.id ? styles.tabBtnActive : styles.tabBtn}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
       {months.map(({ monthIdx, year, monthKey }, i) => {
         const isThree = isThreePaycheck(monthIdx, year);
         const monthStates = allMonthStates[monthKey] ?? {};
@@ -1114,7 +1131,7 @@ export default function CashFlow() {
             </div>
 
             <div className={i === 0 ? "fade-up-2" : undefined} style={styles.accountsGrid}>
-              {accounts.map(acct => (
+              {accounts.filter(a => a.id === activeTab).map(acct => (
                 <AccountTable
                   key={acct.id}
                   account={acct}
@@ -1199,6 +1216,10 @@ const styles = {
   monthBadge: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: "6px 16px" },
   monthLabel: { fontSize: 13, fontWeight: 600, fontFamily: "var(--font-mono)", color: "var(--text)" },
   navBtn: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius)", color: "var(--text)", fontSize: 18, width: 32, height: 32, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" },
+
+  tabBar: { display: "flex", gap: 2, marginBottom: 24, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: 4 },
+  tabBtn: { flex: 1, padding: "8px 16px", borderRadius: "calc(var(--radius) - 2px)", border: "none", cursor: "pointer", fontSize: 13, fontWeight: 500, fontFamily: "var(--font-display)", background: "transparent", color: "var(--muted)", transition: "all 0.15s" },
+  tabBtnActive: { flex: 1, padding: "8px 16px", borderRadius: "calc(var(--radius) - 2px)", border: "none", cursor: "pointer", fontSize: 13, fontWeight: 700, fontFamily: "var(--font-display)", background: "var(--accent)", color: "#fff", transition: "all 0.15s" },
 
   monthSection: { marginTop: 40, paddingTop: 32, borderTop: "1px solid var(--border)" },
   monthHeader: { display: "flex", alignItems: "center", gap: 12, marginBottom: 16 },
