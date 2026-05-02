@@ -311,8 +311,8 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
   };
   const effectiveAmt = (t) => presetsMap[t.name] ?? t.amount;
 
-  let running = startingBalance;
-  let pendingBal = startingBalance;
+  let confirmedBal = startingBalance;
+  let projectedBal = startingBalance;
   const rows = filtered.map((t) => {
     const state = monthStates[`${account.id}_${t.id}`] || {};
     const displayDay = state.actualDay ?? t.day;
@@ -320,9 +320,13 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
       ? state.isPending
       : !!(t.defaultPending && isThreePaycheckMonth);
     const amt = effectiveAmt(t);
-    if (isPending) pendingBal += amt;
-    running += amt;
-    return { ...t, displayDay, effectiveAmt: amt, isPending, runningBalance: running, confirmedBalance: pendingBal };
+    if (isPending) {
+      confirmedBal += amt;
+      projectedBal = confirmedBal; // Y happened → snap projected to real balance
+    } else {
+      projectedBal += amt;         // N upcoming → project forward
+    }
+    return { ...t, displayDay, effectiveAmt: amt, isPending, runningBalance: projectedBal, confirmedBalance: confirmedBal };
   });
 
   const endBal = rows.length ? rows[rows.length - 1].runningBalance : startingBalance;
@@ -379,7 +383,7 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
           <span style={styles.pendingDot} />
           <span style={{ fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--muted)" }}>
             {pendingRows.length} confirmed · {fmt(pendingTotal, true)} ·{" "}
-            <span style={{ color: "var(--accent)" }}>confirmed balance: {fmt(pendingBal)}</span>
+            <span style={{ color: "var(--accent)" }}>confirmed balance: {fmt(confirmedBal)}</span>
           </span>
         </div>
       )}
