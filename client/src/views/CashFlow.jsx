@@ -311,7 +311,8 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
   };
   const effectiveAmt = (t) => presetsMap[t.name] ?? t.amount;
 
-  let projectedBal = startingBalance;
+  let running = startingBalance;    // all items: full month projection
+  let confirmed = startingBalance;  // N items only: projection from real bank balance
   const rows = filtered.map((t) => {
     const state = monthStates[`${account.id}_${t.id}`] || {};
     const displayDay = state.actualDay ?? t.day;
@@ -319,9 +320,9 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
       ? state.isPending
       : !!(t.defaultPending && isThreePaycheckMonth);
     const amt = effectiveAmt(t);
-    // Y = already in starting balance, don't move the projection
-    if (!isPending) projectedBal += amt;
-    return { ...t, displayDay, effectiveAmt: amt, isPending, runningBalance: projectedBal, confirmedBalance: startingBalance };
+    running += amt;                    // always accumulate (full picture)
+    if (!isPending) confirmed += amt;  // Y already counted → skip; N not yet → accumulate
+    return { ...t, displayDay, effectiveAmt: amt, isPending, runningBalance: running, confirmedBalance: confirmed };
   });
 
   const endBal = rows.length ? rows[rows.length - 1].runningBalance : startingBalance;
@@ -379,7 +380,7 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
           <span style={styles.pendingDot} />
           <span style={{ fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--muted)" }}>
             {pendingRows.length} done · {nRows.length} remaining ·{" "}
-            <span style={{ color: "var(--accent)" }}>projected net: {fmt(nTotal, true)}</span>
+            <span style={{ color: "var(--accent)" }}>conf. projected ending: {fmt(confirmed)}</span>
           </span>
         </div>
       )}
