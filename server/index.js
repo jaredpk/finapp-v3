@@ -1269,8 +1269,8 @@ app.get("/api/cashflow/states/:monthKey", requireAuth, async (req, res) => {
 
 app.post("/api/cashflow/states", requireAuth, async (req, res) => {
   try {
-    const { accountId, txnId, monthKey, isPending, actualAmount, plaidTxnId, actualDay } = req.body;
-    await upsertCashflowState(accountId, txnId, monthKey, isPending, actualAmount ?? null, plaidTxnId ?? null, actualDay ?? null);
+    const { accountId, txnId, monthKey, isPending, actualAmount, plaidTxnId, actualDay, note } = req.body;
+    await upsertCashflowState(accountId, txnId, monthKey, isPending, actualAmount ?? null, plaidTxnId ?? null, actualDay ?? null, note ?? null);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });

@@ -274,8 +274,10 @@ function SummaryBar({ takeHome, expenses, freeCashflow }) {
   );
 }
 
-function AccountTable({ account, startingBalance, allowEditStart, presetsMap, monthStates, isThreePaycheckMonth, onTogglePending, onEditAmount, onEditStart, onAddRow, onDeleteRow, txnOrder, onReorder }) {
+function AccountTable({ account, startingBalance, allowEditStart, presetsMap, monthStates, isThreePaycheckMonth, onTogglePending, onEditNote, onEditAmount, onEditStart, onAddRow, onDeleteRow, txnOrder, onReorder }) {
   const [dragOverId, setDragOverId] = useState(null);
+  const [noteEditId, setNoteEditId] = useState(null);
+  const [noteEditVal, setNoteEditVal] = useState("");
   const dragItemId = useRef(null);
 
   // Use custom drag order if set, otherwise sort by day
@@ -333,7 +335,7 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
     const amt = effectiveAmt(t);
     running += amt;                    // always accumulate (full picture)
     if (!isPending) confirmed += amt;  // Y already counted → skip; N not yet → accumulate
-    return { ...t, displayDay, effectiveAmt: amt, isPending, runningBalance: running, confirmedBalance: confirmed };
+    return { ...t, displayDay, effectiveAmt: amt, isPending, note: state.note ?? null, runningBalance: running, confirmedBalance: confirmed };
   });
 
   const endBal = rows.length ? rows[rows.length - 1].runningBalance : startingBalance;
@@ -429,12 +431,32 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
               title={t.displayDay !== t.day ? `Template day: ${t.day}` : undefined}>
               {t.displayDay}
             </span>
-            <span style={{ flex: 1, fontSize: 12, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", paddingRight: 8 }}>
-              {t.name}
-              {presetsMap[t.name] !== undefined && (
-                <span style={{ fontSize: 9, color: "var(--accent)", fontFamily: "var(--font-mono)", marginLeft: 5, opacity: 0.6 }}>preset</span>
+            <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", paddingRight: 8, gap: 2 }}>
+              <span style={{ fontSize: 12, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {t.name}
+                {presetsMap[t.name] !== undefined && (
+                  <span style={{ fontSize: 9, color: "var(--accent)", fontFamily: "var(--font-mono)", marginLeft: 5, opacity: 0.6 }}>preset</span>
+                )}
+              </span>
+              {noteEditId === t.id ? (
+                <input
+                  autoFocus
+                  value={noteEditVal}
+                  onChange={e => setNoteEditVal(e.target.value)}
+                  onBlur={() => { onEditNote(account.id, t.id, noteEditVal); setNoteEditId(null); }}
+                  onKeyDown={e => { if (e.key === "Enter" || e.key === "Escape") { onEditNote(account.id, t.id, noteEditVal); setNoteEditId(null); } }}
+                  style={styles.noteInput}
+                  placeholder="Add a note…"
+                />
+              ) : (
+                <span
+                  onClick={() => { setNoteEditId(t.id); setNoteEditVal(t.note ?? ""); }}
+                  style={t.note ? styles.noteText : styles.noteAdd}
+                >
+                  {t.note || "+ note"}
+                </span>
               )}
-            </span>
+            </div>
             <span style={{ width: 80, fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-mono)" }}>{t.freq}</span>
             <span
               style={{ width: 80, textAlign: "right", fontSize: 12, fontFamily: "var(--font-mono)", color: t.effectiveAmt >= 0 ? "var(--green)" : "var(--red)", cursor: "pointer" }}
@@ -844,7 +866,7 @@ export default function CashFlow() {
         if (!Array.isArray(rows)) return;
         const map = {};
         rows.forEach(r => {
-          map[`${r.account_id}_${r.txn_id}`] = { isPending: r.is_pending, plaidTxnId: r.plaid_txn_id, actualDay: r.actual_day ?? null };
+          map[`${r.account_id}_${r.txn_id}`] = { isPending: r.is_pending, plaidTxnId: r.plaid_txn_id, actualDay: r.actual_day ?? null, note: r.note ?? null };
         });
         setAllMonthStates(prev => ({ ...prev, [monthKey]: map }));
       }).catch(() => {});
@@ -902,7 +924,7 @@ export default function CashFlow() {
           ...prev,
           [monthKey]: { ...(prev[monthKey] ?? {}), [key]: { isPending: true, plaidTxnId: id, actualDay } },
         }));
-        saveCashflowState(accountId, txnId, monthKey, true, Math.abs(txn.amount), id, actualDay).catch(() => {});
+        saveCashflowState(accountId, txnId, monthKey, true, Math.abs(txn.amount), id, actualDay, null).catch(() => {});
         if (!isRuleMatch) {
           const pattern = merchant.trim();
           if (pattern.length > 3) {
@@ -925,7 +947,18 @@ export default function CashFlow() {
       ...prev,
       [monthKey]: { ...(prev[monthKey] ?? {}), [key]: { ...existing, isPending: next } },
     }));
-    saveCashflowState(accountId, txnId, monthKey, next, null, existing.plaidTxnId ?? null, existing.actualDay ?? null).catch(() => {});
+    saveCashflowState(accountId, txnId, monthKey, next, null, existing.plaidTxnId ?? null, existing.actualDay ?? null, existing.note ?? null).catch(() => {});
+  }, [allMonthStates]);
+
+  const editNote = useCallback((monthKey, accountId, txnId, note) => {
+    const key = `${accountId}_${txnId}`;
+    const existing = allMonthStates[monthKey]?.[key] ?? {};
+    const trimmed = note?.trim() || null;
+    setAllMonthStates(prev => ({
+      ...prev,
+      [monthKey]: { ...(prev[monthKey] ?? {}), [key]: { ...existing, note: trimmed } },
+    }));
+    saveCashflowState(accountId, txnId, monthKey, existing.isPending ?? false, null, existing.plaidTxnId ?? null, existing.actualDay ?? null, trimmed).catch(() => {});
   }, [allMonthStates]);
 
   const editAmount = useCallback((accountId, txnId, txnName) => {
@@ -1076,6 +1109,7 @@ export default function CashFlow() {
                   monthStates={monthStates}
                   isThreePaycheckMonth={isThree}
                   onTogglePending={(aId, tId) => togglePending(monthKey, aId, tId)}
+                  onEditNote={(aId, tId, note) => editNote(monthKey, aId, tId, note)}
                   onEditAmount={editAmount}
                   onEditStart={() => editStartingBalance(acct.id)}
                   onAddRow={addRow}
@@ -1200,6 +1234,10 @@ const styles = {
   modalActions: { display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 6 },
   cancelBtn: { padding: "8px 18px", background: "none", border: "1px solid var(--border)", borderRadius: "var(--radius)", color: "var(--muted)", fontSize: 13, fontFamily: "var(--font-display)", cursor: "pointer" },
   saveBtn: { padding: "8px 18px", background: "var(--accent)", border: "none", borderRadius: "var(--radius)", color: "#fff", fontSize: 13, fontWeight: 700, fontFamily: "var(--font-display)", cursor: "pointer" },
+
+  noteText: { fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-mono)", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", borderBottom: "1px dashed var(--border2)" },
+  noteAdd: { fontSize: 10, color: "var(--border2)", fontFamily: "var(--font-mono)", cursor: "pointer", opacity: 0.5 },
+  noteInput: { fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text)", background: "transparent", border: "none", borderBottom: "1px solid var(--accent)", outline: "none", width: "100%", padding: "1px 0" },
 
   notesSection: { marginTop: 12, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", padding: "14px 18px" },
   notesLabel: { fontSize: 10, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--muted)", fontFamily: "var(--font-mono)", marginBottom: 8 },

@@ -293,6 +293,10 @@ export async function initDb() {
     ALTER TABLE cashflow_txn_states ADD COLUMN IF NOT EXISTS actual_day INTEGER;
   `);
 
+  await pool.query(`
+    ALTER TABLE cashflow_txn_states ADD COLUMN IF NOT EXISTS note TEXT;
+  `);
+
   // Trigger to silently block duplicate transaction inserts from any source.
   // csv_ rows are deduplicated by occurrence-index hash before insert, so skip the check for them.
   await pool.query(`
@@ -1298,20 +1302,20 @@ export async function upsertCashflowPreset(name, amount, freq, note) {
 
 export async function getCashflowStates(monthKey) {
   const { rows } = await pool.query(
-    `SELECT account_id, txn_id, is_pending, actual_amount::float, plaid_txn_id, actual_day
+    `SELECT account_id, txn_id, is_pending, actual_amount::float, plaid_txn_id, actual_day, note
      FROM cashflow_txn_states WHERE month_key = $1`,
     [monthKey]
   );
   return rows;
 }
 
-export async function upsertCashflowState(accountId, txnId, monthKey, isPending, actualAmount, plaidTxnId, actualDay) {
+export async function upsertCashflowState(accountId, txnId, monthKey, isPending, actualAmount, plaidTxnId, actualDay, note) {
   await pool.query(
-    `INSERT INTO cashflow_txn_states (account_id, txn_id, month_key, is_pending, actual_amount, plaid_txn_id, actual_day, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+    `INSERT INTO cashflow_txn_states (account_id, txn_id, month_key, is_pending, actual_amount, plaid_txn_id, actual_day, note, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
      ON CONFLICT (account_id, txn_id, month_key) DO UPDATE
-       SET is_pending = $4, actual_amount = $5, plaid_txn_id = $6, actual_day = $7, updated_at = NOW()`,
-    [accountId, txnId, monthKey, isPending, actualAmount ?? null, plaidTxnId ?? null, actualDay ?? null]
+       SET is_pending = $4, actual_amount = $5, plaid_txn_id = $6, actual_day = $7, note = $8, updated_at = NOW()`,
+    [accountId, txnId, monthKey, isPending, actualAmount ?? null, plaidTxnId ?? null, actualDay ?? null, note ?? null]
   );
 }
 

@@ -309,11 +309,11 @@ export async function fetchCashflowStates(monthKey) {
   return r.json();
 }
 
-export async function saveCashflowState(accountId, txnId, monthKey, isPending, actualAmount, plaidTxnId, actualDay) {
+export async function saveCashflowState(accountId, txnId, monthKey, isPending, actualAmount, plaidTxnId, actualDay, note) {
   const r = await fetch(`${BASE}/cashflow/states`, {
     method: "POST",
     headers: await authHeaders(),
-    body: JSON.stringify({ accountId, txnId, monthKey, isPending, actualAmount, plaidTxnId, actualDay }),
+    body: JSON.stringify({ accountId, txnId, monthKey, isPending, actualAmount, plaidTxnId, actualDay, note }),
   });
   return r.json();
 }
