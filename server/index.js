@@ -430,7 +430,7 @@ app.get("/api/accounts", requireAuth, async (req, res) => {
     const current = isLiability ? Math.abs(parseFloat(r.balance)) : parseFloat(r.balance);
     const available = r.available != null ? Math.abs(parseFloat(r.available)) : null;
     return {
-      account_id: `balance_${r.account}`,
+      account_id: `balance_${r.institution}_${r.account}`,
       name: r.account,
       official_name: r.account,
       type,
