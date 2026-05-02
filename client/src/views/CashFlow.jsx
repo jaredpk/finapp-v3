@@ -52,6 +52,8 @@ const DEFAULT_ACCOUNTS = [
       { id: 13, day: 30, name: "Personal IRA Transfer",           freq: "Monthly",    amount: -500                                             },
       { id: 14, day: 30, name: "Jared Transfer to Shared",        freq: "Monthly",    amount: -1900,   isTransfer: true, defaultPending: true  },
       { id: 15, day: 30, name: "Paycheck (Month End)",            freq: "Monthly",    amount: 4009,                     defaultPending: true  },
+      { id: 16, day: 1,  name: "Supplementary Transfer In",       freq: "As Needed",  amount: 0                                               },
+      { id: 17, day: 1,  name: "Extra Transfer Out",              freq: "As Needed",  amount: 0                                               },
     ],
   },
   {
@@ -578,19 +580,18 @@ function AddModal({ accountName, onSave, onClose }) {
 }
 
 function EditPresetModal({ presetName, currentAmount, onSave, onClose }) {
-  const [val, setVal] = useState(String(Math.abs(currentAmount)));
-  const sign = currentAmount <= 0 ? -1 : 1;
+  const [val, setVal] = useState(currentAmount != null ? String(currentAmount) : "");
 
   return (
     <div style={styles.modalOverlay} onClick={onClose}>
       <div style={styles.modal} onClick={e => e.stopPropagation()}>
         <p style={styles.modalTitle}>Edit: {presetName}</p>
         <p style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", marginBottom: 4 }}>
-          All rows with this name will update.
+          Positive = inflow · Negative = outflow · All rows with this name update.
         </p>
-        <label style={styles.fieldLabel}>Amount {sign < 0 ? "(enter positive, treated as outflow)" : ""}</label>
+        <label style={styles.fieldLabel}>Amount</label>
         <input
-          type="number" min="0" step="0.01"
+          type="number" step="0.01"
           value={val}
           onChange={e => setVal(e.target.value)}
           style={styles.fieldInput}
@@ -599,7 +600,7 @@ function EditPresetModal({ presetName, currentAmount, onSave, onClose }) {
         <div style={styles.modalActions}>
           <button onClick={onClose} style={styles.cancelBtn}>Cancel</button>
           <button
-            onClick={() => { const raw = parseFloat(val); if (!isNaN(raw)) onSave(sign * raw); }}
+            onClick={() => { const raw = parseFloat(val); if (!isNaN(raw)) onSave(raw); }}
             style={styles.saveBtn}
           >Save</button>
         </div>
@@ -641,6 +642,33 @@ function EditPayCycleModal({ currentDateNum, onSave, onClose }) {
   );
 }
 
+// ── Month Notes ───────────────────────────────────────────────────────────────
+function MonthNotes({ note, onSave }) {
+  const [text, setText] = useState(note ?? "");
+  const timerRef = useRef(null);
+
+  useEffect(() => { setText(note ?? ""); }, [note]);
+
+  const handleChange = (e) => {
+    const v = e.target.value;
+    setText(v);
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => onSave(v), 800);
+  };
+
+  return (
+    <div style={styles.notesSection}>
+      <p style={styles.notesLabel}>Notes</p>
+      <textarea
+        value={text}
+        onChange={handleChange}
+        style={styles.notesTextarea}
+        placeholder="Add notes for this month..."
+      />
+    </div>
+  );
+}
+
 // ── Main CashFlow View ────────────────────────────────────────────────────────
 const now = new Date();
 
@@ -671,6 +699,7 @@ export default function CashFlow() {
   // allRecentTxns: { [monthKey]: txns[] }
   const [allRecentTxns, setAllRecentTxns] = useState({});
   const [txnOrders, setTxnOrders] = useState({});
+  const [allMonthNotes, setAllMonthNotes] = useState({});
   const [modal, setModal] = useState(null);
   const autoConfirmedRef = useRef(new Set());
 
@@ -744,6 +773,12 @@ export default function CashFlow() {
       if (Object.keys(newBals).length > 0) setStartingBals(prev => ({ ...prev, ...newBals }));
       if (newUserSet.size > 0) setUserSetStartIds(newUserSet);
       if (Object.keys(newOrders).length > 0) setTxnOrders(newOrders);
+
+      const newNotes = {};
+      dbPresets.forEach(p => {
+        if (p.name.startsWith("__note_")) newNotes[p.name.replace("__note_", "")] = p.note ?? "";
+      });
+      if (Object.keys(newNotes).length > 0) setAllMonthNotes(newNotes);
     }).catch(() => {});
   }, []);
 
@@ -928,6 +963,11 @@ export default function CashFlow() {
     saveCashflowPreset(`__order_${accountId}`, 0, null, JSON.stringify(newOrderedIds)).catch(() => {});
   }, []);
 
+  const saveNote = useCallback((monthKey, text) => {
+    setAllMonthNotes(prev => ({ ...prev, [monthKey]: text }));
+    saveCashflowPreset(`__note_${monthKey}`, 0, null, text).catch(() => {});
+  }, []);
+
   const addRow = (accountId) => setModal({ type: "add", accountId });
 
   const saveAdd = (data) => {
@@ -1018,6 +1058,11 @@ export default function CashFlow() {
                 />
               ))}
             </div>
+
+            <MonthNotes
+              note={allMonthNotes[monthKey]}
+              onSave={(text) => saveNote(monthKey, text)}
+            />
           </div>
         );
       })}
@@ -1128,4 +1173,8 @@ const styles = {
   modalActions: { display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 6 },
   cancelBtn: { padding: "8px 18px", background: "none", border: "1px solid var(--border)", borderRadius: "var(--radius)", color: "var(--muted)", fontSize: 13, fontFamily: "var(--font-display)", cursor: "pointer" },
   saveBtn: { padding: "8px 18px", background: "var(--accent)", border: "none", borderRadius: "var(--radius)", color: "#fff", fontSize: 13, fontWeight: 700, fontFamily: "var(--font-display)", cursor: "pointer" },
+
+  notesSection: { marginTop: 12, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", padding: "14px 18px" },
+  notesLabel: { fontSize: 10, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--muted)", fontFamily: "var(--font-mono)", marginBottom: 8 },
+  notesTextarea: { width: "100%", minHeight: 64, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: "var(--radius)", color: "var(--text)", fontSize: 12, fontFamily: "var(--font-mono)", padding: "8px 10px", resize: "vertical", outline: "none", lineHeight: 1.5, boxSizing: "border-box" },
 };
