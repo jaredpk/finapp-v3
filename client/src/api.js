@@ -365,6 +365,14 @@ export async function insertAuditTransactions(auditId, transactions) {
   return r.json();
 }
 
+export async function deleteTransaction(id) {
+  const r = await fetch(`${BASE}/transactions/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+  });
+  return r.json();
+}
+
 export async function fetchTransactionsForMonth(monthKey) {
   const [year, month] = monthKey.split("-");
   const startDate = `${year}-${month}-01`;

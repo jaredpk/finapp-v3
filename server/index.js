@@ -25,7 +25,7 @@ import {
   seedCategories,
   getCategories, createCategory, updateCategory, deleteCategory,
   getAssignments, upsertAssignment,
-  getSplits, createSplit, deleteSplit, deleteSplitsForTransaction,
+  getSplits, createSplit, deleteSplit, deleteSplitsForTransaction, deleteTransaction,
   getMerchantOverrides, upsertMerchantOverride,
   parseCsvText, upsertCsvTransaction,
   parseXlsxBase64,
@@ -542,6 +542,16 @@ app.get("/api/transactions", requireApiKeyOrAuth, async (req, res) => {
     res.json({ transactions });
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch transactions" });
+  }
+});
+
+app.delete("/api/transactions/:id", requireAuth, async (req, res) => {
+  try {
+    const rowCount = await deleteTransaction(req.params.id);
+    if (rowCount === 0) return res.status(404).json({ error: "Transaction not found" });
+    res.json({ deleted: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

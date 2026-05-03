@@ -1201,6 +1201,14 @@ export async function deleteSplitsForTransaction(transactionId) {
   return rowCount;
 }
 
+export async function deleteTransaction(id) {
+  await pool.query("DELETE FROM splits WHERE transaction_id = $1", [id]);
+  await pool.query("DELETE FROM category_assignments WHERE transaction_id = $1", [id]);
+  await pool.query("DELETE FROM merchant_overrides WHERE transaction_id = $1", [id]);
+  const { rowCount } = await pool.query("DELETE FROM transactions WHERE id = $1", [id]);
+  return rowCount;
+}
+
 // ── Merchant Overrides ────────────────────────────────────────────────────────
 export async function getMerchantOverrides() {
   const { rows } = await pool.query(

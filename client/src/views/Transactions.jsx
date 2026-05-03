@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from "react";
-import { saveAssignment, saveMerchantOverride } from "../api.js";
+import { saveAssignment, saveMerchantOverride, deleteTransaction } from "../api.js";
 
 const toNum = (n) => n == null ? null : parseFloat(n);
 
@@ -29,6 +29,7 @@ export default function Transactions({
   merchantOverrides,
   setAssignments,
   setMerchantOverrides,
+  reloadData,
 }) {
   const [search, setSearch]         = useState("");
   const [catFilter, setCatFilter]   = useState("all");
@@ -42,6 +43,8 @@ export default function Transactions({
   const [saving, setSaving]         = useState({});
   const [editingMerchant, setEditingMerchant] = useState(null);
   const [merchantDraft, setMerchantDraft]     = useState("");
+  const [confirmDelete, setConfirmDelete]     = useState(null); // transaction_id
+  const [deleting, setDeleting]               = useState({});
 
   const acctMap = useMemo(() => {
     const m = {};
@@ -174,6 +177,17 @@ export default function Transactions({
     setEditingMerchant(null);
   }
 
+  async function handleDelete(txnId) {
+    setDeleting((p) => ({ ...p, [txnId]: true }));
+    try {
+      await deleteTransaction(txnId);
+      setConfirmDelete(null);
+      if (reloadData) reloadData();
+    } finally {
+      setDeleting((p) => ({ ...p, [txnId]: false }));
+    }
+  }
+
   const hasFilters = search || catFilter !== "all" || acctFilter !== "all" || minAmount || maxAmount || datePreset !== "all";
 
   return (
@@ -297,6 +311,7 @@ export default function Transactions({
               Amount {sortIcon("amount")}
             </span>
             <span>Category</span>
+            <span />
           </div>
           {filtered.map((t) => {
             const assigned   = assignments?.[t.transaction_id];
@@ -365,6 +380,23 @@ export default function Transactions({
                     ))}
                   </select>
                 </span>
+
+                <span style={styles.deleteCell}>
+                  {confirmDelete === t.transaction_id ? (
+                    <>
+                      <button
+                        style={styles.confirmDeleteBtn}
+                        onClick={() => handleDelete(t.transaction_id)}
+                        disabled={deleting[t.transaction_id]}
+                      >
+                        {deleting[t.transaction_id] ? "…" : "Delete"}
+                      </button>
+                      <button style={styles.cancelDeleteBtn} onClick={() => setConfirmDelete(null)}>Cancel</button>
+                    </>
+                  ) : (
+                    <button style={styles.deleteBtn} onClick={() => setConfirmDelete(t.transaction_id)} title="Delete transaction">×</button>
+                  )}
+                </span>
               </div>
             );
           })}
@@ -405,7 +437,7 @@ const styles = {
 
   tableWrap: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", overflow: "hidden" },
   tableHeader: {
-    display: "grid", gridTemplateColumns: "76px minmax(0,1fr) minmax(0,150px) 96px minmax(0,210px)",
+    display: "grid", gridTemplateColumns: "76px minmax(0,1fr) minmax(0,150px) 96px minmax(0,210px) 80px",
     padding: "10px 16px", background: "var(--surface2)",
     fontSize: 10, fontWeight: 600, letterSpacing: "0.1em",
     textTransform: "uppercase", color: "var(--muted)", fontFamily: "var(--font-mono)",
@@ -415,7 +447,7 @@ const styles = {
   sortNeutral: { opacity: 0.3, fontSize: 10 },
   sortActive:  { color: "var(--accent)", fontSize: 10 },
   row: {
-    display: "grid", gridTemplateColumns: "76px minmax(0,1fr) minmax(0,150px) 96px minmax(0,210px)",
+    display: "grid", gridTemplateColumns: "76px minmax(0,1fr) minmax(0,150px) 96px minmax(0,210px) 80px",
     padding: "9px 16px", borderBottom: "1px solid var(--border)",
     alignItems: "center",
   },
@@ -435,5 +467,21 @@ const styles = {
     background: "var(--bg)", border: "1px solid var(--border)",
     borderRadius: 6, color: "var(--text)", fontSize: 12,
     fontFamily: "var(--font-mono)", outline: "none", cursor: "pointer",
+  },
+  deleteCell: { display: "flex", alignItems: "center", gap: 4, justifyContent: "flex-end" },
+  deleteBtn: {
+    background: "none", border: "none", color: "var(--muted)", cursor: "pointer",
+    fontSize: 16, lineHeight: 1, padding: "2px 6px", borderRadius: 4, opacity: 0.4,
+    fontFamily: "var(--font-display)",
+  },
+  confirmDeleteBtn: {
+    background: "var(--red, #ef4444)", color: "#fff", border: "none",
+    borderRadius: 5, padding: "4px 8px", fontSize: 11, fontWeight: 700,
+    cursor: "pointer", fontFamily: "var(--font-display)",
+  },
+  cancelDeleteBtn: {
+    background: "none", color: "var(--muted)", border: "1px solid var(--border)",
+    borderRadius: 5, padding: "4px 7px", fontSize: 11, cursor: "pointer",
+    fontFamily: "var(--font-display)",
   },
 };
