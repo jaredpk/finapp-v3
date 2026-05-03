@@ -155,8 +155,15 @@ export async function initDb() {
       total_in_sheet INT DEFAULT 0,
       missing_count INT DEFAULT 0,
       inserted_count INT DEFAULT 0,
+      range_start DATE,
+      range_end DATE,
+      completed_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
+  `);
+
+  await pool.query(`
+    ALTER TABLE transactions ADD COLUMN IF NOT EXISTS audited_at TIMESTAMPTZ;
   `);
 
   // Add new transaction columns from Perplexity schema
@@ -1377,19 +1384,32 @@ export async function deleteAccountNickname(accountId) {
 // ── Audit ──────────────────────────────────────────────────────────────────────
 export async function getLastAuditLog() {
   const { rows } = await pool.query(
-    `SELECT id, audit_date, filename, total_in_sheet, missing_count, inserted_count
+    `SELECT id, audit_date, filename, total_in_sheet, missing_count, inserted_count,
+            range_start, range_end, completed_at
      FROM audit_log ORDER BY audit_date DESC LIMIT 1`
   );
   return rows[0] || null;
 }
 
-export async function saveAuditLog(filename, totalInSheet, missingCount) {
+export async function saveAuditLog(filename, totalInSheet, missingCount, rangeStart, rangeEnd) {
   const { rows } = await pool.query(
-    `INSERT INTO audit_log (filename, total_in_sheet, missing_count)
-     VALUES ($1, $2, $3) RETURNING id, audit_date`,
-    [filename, totalInSheet, missingCount]
+    `INSERT INTO audit_log (filename, total_in_sheet, missing_count, range_start, range_end)
+     VALUES ($1, $2, $3, $4, $5) RETURNING id, audit_date`,
+    [filename, totalInSheet, missingCount, rangeStart, rangeEnd]
   );
   return rows[0];
+}
+
+export async function completeAuditLog(id, rangeEnd) {
+  await pool.query(
+    `UPDATE audit_log SET completed_at = NOW() WHERE id = $1`,
+    [id]
+  );
+  await pool.query(
+    `UPDATE transactions SET audited_at = NOW()
+     WHERE date <= $1::date AND audited_at IS NULL`,
+    [rangeEnd]
+  );
 }
 
 export async function updateAuditInsertedCount(id, insertedCount) {

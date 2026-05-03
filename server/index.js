@@ -37,7 +37,7 @@ import {
   getCashflowPresets, upsertCashflowPreset, getCashflowStates, upsertCashflowState,
   getCashflowMappings, upsertCashflowMapping, parseMacuCsvText,
   getAccountNicknames, upsertAccountNickname, deleteAccountNickname,
-  getLastAuditLog, saveAuditLog, updateAuditInsertedCount,
+  getLastAuditLog, saveAuditLog, updateAuditInsertedCount, completeAuditLog,
   getTransactionDateAmountSet, parseAuditXlsx,
 } from "./db.js";
 import pool from "./db.js";
@@ -1324,11 +1324,21 @@ app.post("/api/audit/upload", requireAuth, async (req, res) => {
     if (!sheetTxns.length || !dateRange.start) {
       return res.json({ auditId: null, missing: [], totalInSheet: 0, missingCount: 0, dateRange, debug: { sheetStats, dbKeyCount: 0, sampleXlsxKeys: [], sampleDbKeys: [] } });
     }
-    const AUDIT_START = "2026-04-01";
-    const auditStart = dateRange.start < AUDIT_START ? AUDIT_START : dateRange.start;
+
+    // Start from the day after the last completed audit's range_end, or the floor date
+    const FLOOR_DATE = "2026-04-01";
+    const lastLog = await getLastAuditLog();
+    let auditStart = FLOOR_DATE;
+    if (lastLog?.range_end && lastLog?.completed_at) {
+      const dayAfter = new Date(lastLog.range_end + "T12:00:00Z");
+      dayAfter.setUTCDate(dayAfter.getUTCDate() + 1);
+      const candidate = dayAfter.toISOString().slice(0, 10);
+      if (candidate > FLOOR_DATE) auditStart = candidate;
+    }
+
     // Expand DB window ±1 day to catch posting date drift
-    const dbStart = new Date(auditStart); dbStart.setUTCDate(dbStart.getUTCDate() - 1);
-    const dbEnd   = new Date(dateRange.end); dbEnd.setUTCDate(dbEnd.getUTCDate() + 1);
+    const dbStart = new Date(auditStart + "T12:00:00Z"); dbStart.setUTCDate(dbStart.getUTCDate() - 1);
+    const dbEnd   = new Date(dateRange.end + "T12:00:00Z"); dbEnd.setUTCDate(dbEnd.getUTCDate() + 1);
     const dbKeys = await getTransactionDateAmountSet(dbStart.toISOString().slice(0, 10), dbEnd.toISOString().slice(0, 10));
 
     function dateShift(dateStr, days) {
@@ -1337,20 +1347,31 @@ app.post("/api/audit/upload", requireAuth, async (req, res) => {
       return d.toISOString().slice(0, 10);
     }
     const toKey = (date, t) => `${date}|${Math.abs(t.amount).toFixed(2)}`;
-    const auditTxns = sheetTxns.filter(t => t.date >= AUDIT_START);
-    // Consider a transaction matched if DB has it on the same date or ±1 day
+    const auditTxns = sheetTxns.filter(t => t.date >= auditStart);
     const missing = auditTxns.filter(t =>
       !dbKeys.has(toKey(t.date, t)) &&
       !dbKeys.has(toKey(dateShift(t.date, -1), t)) &&
       !dbKeys.has(toKey(dateShift(t.date, 1), t))
     );
+    const auditEnd = dateRange.end;
     const { id: auditId } = await saveAuditLog(
-      filename || "Personal Finances.xlsx", auditTxns.length, missing.length
+      filename || "Personal Finances.xlsx", auditTxns.length, missing.length, auditStart, auditEnd
     );
     const sampleXlsxKeys = auditTxns.slice(0, 3).map(t => toKey(t.date, t));
     const sampleDbKeys = [...dbKeys].slice(0, 3);
     const debug = { sheetStats, dbKeyCount: dbKeys.size, sampleXlsxKeys, sampleDbKeys, auditStart };
-    res.json({ auditId, missing, totalInSheet: auditTxns.length, missingCount: missing.length, dateRange: { start: auditStart, end: dateRange.end }, debug });
+    res.json({ auditId, missing, totalInSheet: auditTxns.length, missingCount: missing.length, dateRange: { start: auditStart, end: auditEnd }, debug });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/audit/complete", requireAuth, async (req, res) => {
+  try {
+    const { auditId, rangeEnd } = req.body;
+    if (!auditId || !rangeEnd) return res.status(400).json({ error: "auditId and rangeEnd required" });
+    await completeAuditLog(auditId, rangeEnd);
+    res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

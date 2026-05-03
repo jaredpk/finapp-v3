@@ -356,6 +356,15 @@ export async function uploadAuditSheet(base64, filename) {
   return r.json();
 }
 
+export async function completeAudit(auditId, rangeEnd) {
+  const r = await fetch(`${BASE}/audit/complete`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ auditId, rangeEnd }),
+  });
+  return r.json();
+}
+
 export async function insertAuditTransactions(auditId, transactions) {
   const r = await fetch(`${BASE}/audit/insert`, {
     method: "POST",

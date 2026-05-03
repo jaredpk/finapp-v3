@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { getApiKey, generateApiKey, importXlsx, importMacuCsv, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi, setPropertyBaselineApi, fetchManualAccounts, saveManualAccount, deleteManualAccountApi, downloadXlsx, saveAccountNickname, deleteAccountNicknameApi, getLastAudit, uploadAuditSheet, insertAuditTransactions } from "../api.js";
+import { getApiKey, generateApiKey, importXlsx, importMacuCsv, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi, setPropertyBaselineApi, fetchManualAccounts, saveManualAccount, deleteManualAccountApi, downloadXlsx, saveAccountNickname, deleteAccountNicknameApi, getLastAudit, uploadAuditSheet, insertAuditTransactions, completeAudit } from "../api.js";
 
 export default function Settings({ reloadData, user, accounts = [] }) {
   const [apiKey, setApiKey] = useState(null);
@@ -60,6 +60,7 @@ export default function Settings({ reloadData, user, accounts = [] }) {
   const [checkedAuditIds, setCheckedAuditIds] = useState(new Set());
   const [auditInserting, setAuditInserting]   = useState(false);
   const [auditInsertResult, setAuditInsertResult] = useState(null);
+  const [auditCompleting, setAuditCompleting] = useState(false);
   const [lastAudit, setLastAudit]         = useState(null);
 
   // Dedup state
@@ -398,6 +399,23 @@ export default function Settings({ reloadData, user, accounts = [] }) {
     }
   }
 
+  async function handleAuditComplete() {
+    if (!auditResult?.auditId) return;
+    setAuditCompleting(true);
+    try {
+      await completeAudit(auditResult.auditId, auditResult.dateRange.end);
+      const { log } = await getLastAudit();
+      setLastAudit(log || null);
+      setAuditResult(null);
+      setAuditFileName(null);
+      setAuditBase64(null);
+      setAuditInsertResult(null);
+      if (auditFileRef.current) auditFileRef.current.value = "";
+    } finally {
+      setAuditCompleting(false);
+    }
+  }
+
   async function handleExportXlsx() {
     setExporting(true);
     setExportError(null);
@@ -443,9 +461,15 @@ export default function Settings({ reloadData, user, accounts = [] }) {
         {lastAudit ? (
           <p style={styles.description}>
             Last audit: <strong>{new Date(lastAudit.audit_date).toLocaleDateString()}</strong>
+            {lastAudit.range_start && lastAudit.range_end && (
+              <span style={{ color: "var(--muted)" }}> ({lastAudit.range_start} – {lastAudit.range_end})</span>
+            )}
             {" "}· {lastAudit.total_in_sheet?.toLocaleString()} in sheet
             · {lastAudit.missing_count} missing
-            · {lastAudit.inserted_count} inserted
+            · {lastAudit.inserted_count || 0} inserted
+            {lastAudit.completed_at
+              ? <span style={{ color: "var(--green, #22c55e)" }}> · ✓ completed</span>
+              : <span style={{ color: "var(--red, #ef4444)" }}> · not completed</span>}
           </p>
         ) : (
           <p style={styles.description}>No audit has been run yet.</p>
@@ -540,6 +564,21 @@ export default function Settings({ reloadData, user, accounts = [] }) {
               <p style={auditInsertResult.startsWith("Error") ? styles.importError : styles.importSuccess}>
                 {auditInsertResult}
               </p>
+            )}
+            {!auditResult?.error && (
+              <div style={{ marginTop: 16, paddingTop: 14, borderTop: "1px solid var(--border)" }}>
+                <p style={{ fontSize: 12, color: "var(--muted)", marginBottom: 10 }}>
+                  When you're done reviewing, mark this audit complete. Future audits will start from{" "}
+                  <strong>{auditResult?.dateRange?.end}</strong> onward and all transactions through that date will be tagged as audited.
+                </p>
+                <button
+                  style={styles.generateBtn}
+                  onClick={handleAuditComplete}
+                  disabled={auditCompleting}
+                >
+                  {auditCompleting ? "Completing…" : "Mark Audit Complete"}
+                </button>
+              </div>
             )}
           </div>
         )}
