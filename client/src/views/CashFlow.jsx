@@ -127,8 +127,8 @@ const CC_CARDS = [
 ];
 
 const DEFAULT_CC_CONFIG = {
-  vcx:  { payment: 3000, recurring: 400, recurringNote: "Insurance on the 5th of each month", other: 500, defaultBalance: 5100 },
-  plat: { payment: 1000, recurring: 0,   recurringNote: "",                                    other: 500, defaultBalance: 1500 },
+  vcx:  { payment: 3000, recurring: 400, recurringNote: "Insurance on the 5th of each month", other: 500, defaultBalance: 2100 },
+  plat: { payment: 1000, recurring: 0,   recurringNote: "",                                    other: 500, defaultBalance: 500  },
 };
 
 // When a preset is saved for these names, the paired name gets the negated amount automatically.
@@ -602,8 +602,7 @@ function CreditCardBlock({ card, config, monthData, onUpdateConfig, onUpdateMont
   const recurring    = config.recurring;
   const recurringNote = config.recurringNote;
   const other        = config.other;
-  const payment      = config.payment;
-  const net = balance + pending + recurring + other - payment;
+  const net = balance + pending + recurring + other;
 
   const startEdit = (field, value) => { setEditing(field); setEditVal(String(value)); };
   const commitEdit = (field, isMonthly) => {
@@ -632,7 +631,6 @@ function CreditCardBlock({ card, config, monthData, onUpdateConfig, onUpdateMont
     { label: "Pending",                               field: "pending",   value: pending,   monthly: true  },
     { label: "Known Recurring Charges Still To Come", field: "recurring", value: recurring, monthly: false, hasNote: true },
     { label: "Known or Estimated Other Charges",      field: "other",     value: other,     monthly: false },
-    { label: "Payments Scheduled",                    field: "payment",   value: payment,   monthly: false },
   ];
 
   return (
@@ -1312,7 +1310,7 @@ export default function CashFlow() {
                       {fmt(CC_CARDS.reduce((sum, card) => {
                         const md = ccMonthData[monthKey]?.[card.id];
                         const cfg = ccConfig[card.id];
-                        return sum + (md?.balance ?? 0) + (md?.pending ?? 0) + cfg.recurring + cfg.other - cfg.payment;
+                        return sum + (md?.balance ?? cfg.defaultBalance ?? 0) + (md?.pending ?? 0) + cfg.recurring + cfg.other;
                       }, 0))}
                     </span>
                   </div>
