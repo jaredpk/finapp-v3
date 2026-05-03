@@ -1388,12 +1388,13 @@ export async function updateAuditInsertedCount(id, insertedCount) {
   await pool.query(`UPDATE audit_log SET inserted_count = $2 WHERE id = $1`, [id, insertedCount]);
 }
 
-export async function getTransactionIdSet(startDate, endDate) {
+export async function getTransactionDateAmountSet(startDate, endDate) {
   const { rows } = await pool.query(
-    `SELECT id FROM transactions WHERE date >= $1::date AND date <= $2::date`,
+    `SELECT date::text, ABS(amount)::numeric(12,2)::text AS abs_amount
+     FROM transactions WHERE date >= $1::date AND date <= $2::date`,
     [startDate, endDate]
   );
-  return new Set(rows.map(r => r.id));
+  return new Set(rows.map(r => `${r.date}|${r.abs_amount}`));
 }
 
 export function parseAuditXlsx(base64) {

@@ -38,7 +38,7 @@ import {
   getCashflowMappings, upsertCashflowMapping, parseMacuCsvText,
   getAccountNicknames, upsertAccountNickname, deleteAccountNickname,
   getLastAuditLog, saveAuditLog, updateAuditInsertedCount,
-  getTransactionIdSet, parseAuditXlsx,
+  getTransactionDateAmountSet, parseAuditXlsx,
 } from "./db.js";
 import pool from "./db.js";
 
@@ -1312,16 +1312,17 @@ app.post("/api/audit/upload", requireAuth, async (req, res) => {
     if (!xlsx) return res.status(400).json({ error: "xlsx required" });
     const { transactions: sheetTxns, dateRange, sheetStats } = parseAuditXlsx(xlsx);
     if (!sheetTxns.length || !dateRange.start) {
-      return res.json({ auditId: null, missing: [], totalInSheet: 0, missingCount: 0, dateRange, debug: { sheetStats, dbIdCount: 0, sampleXlsxIds: [], sampleDbIds: [] } });
+      return res.json({ auditId: null, missing: [], totalInSheet: 0, missingCount: 0, dateRange, debug: { sheetStats, dbKeyCount: 0, sampleXlsxKeys: [], sampleDbKeys: [] } });
     }
-    const dbIds = await getTransactionIdSet(dateRange.start, dateRange.end);
-    const missing = sheetTxns.filter(t => !dbIds.has(t.transaction_id));
+    const dbKeys = await getTransactionDateAmountSet(dateRange.start, dateRange.end);
+    const toKey = t => `${t.date}|${Math.abs(t.amount).toFixed(2)}`;
+    const missing = sheetTxns.filter(t => !dbKeys.has(toKey(t)));
     const { id: auditId } = await saveAuditLog(
       filename || "Personal Finances.xlsx", sheetTxns.length, missing.length
     );
-    const sampleXlsxIds = sheetTxns.slice(0, 3).map(t => t.transaction_id);
-    const sampleDbIds = [...dbIds].slice(0, 3);
-    const debug = { sheetStats, dbIdCount: dbIds.size, sampleXlsxIds, sampleDbIds };
+    const sampleXlsxKeys = sheetTxns.slice(0, 3).map(toKey);
+    const sampleDbKeys = [...dbKeys].slice(0, 3);
+    const debug = { sheetStats, dbKeyCount: dbKeys.size, sampleXlsxKeys, sampleDbKeys };
     res.json({ auditId, missing, totalInSheet: sheetTxns.length, missingCount: missing.length, dateRange, debug });
   } catch (e) {
     res.status(500).json({ error: e.message });
