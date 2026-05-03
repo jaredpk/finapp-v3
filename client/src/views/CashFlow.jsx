@@ -120,6 +120,17 @@ const DEFAULT_FIXED = [
   { name: "Car Payment",                        amount: -500,    freq: "Monthly",    note: "" },
 ];
 
+// ── Credit Card Data ──────────────────────────────────────────────────────────
+const CC_CARDS = [
+  { id: "vcx",  label: "Venture X", dueDate: "12th–11th Each Month" },
+  { id: "plat", label: "Platinum",  dueDate: "16th–17th Each Month" },
+];
+
+const DEFAULT_CC_CONFIG = {
+  vcx:  { payment: 3000, recurring: 400, recurringNote: "Insurance on the 5th of each month", other: 500 },
+  plat: { payment: 1000, recurring: 0,   recurringNote: "",                                    other: 500 },
+};
+
 // When a preset is saved for these names, the paired name gets the negated amount automatically.
 const TRANSFER_MIRRORS = {
   "Jared Transfer to Shared":  "Jared Transfer In",
@@ -579,6 +590,104 @@ function FixedAmountsPanel({ presets, year, payBaseDate, threePaycheckMonths, on
   );
 }
 
+// ── Credit Card Block ─────────────────────────────────────────────────────────
+function CreditCardBlock({ card, config, monthData, onUpdateConfig, onUpdateMonthData }) {
+  const [editing, setEditing] = useState(null);
+  const [editVal, setEditVal] = useState("");
+  const [editingNote, setEditingNote] = useState(false);
+  const [noteVal, setNoteVal] = useState("");
+
+  const balance      = monthData?.balance  ?? 0;
+  const pending      = monthData?.pending  ?? 0;
+  const recurring    = config.recurring;
+  const recurringNote = config.recurringNote;
+  const other        = config.other;
+  const payment      = config.payment;
+  const net = balance + pending + recurring + other - payment;
+
+  const startEdit = (field, value) => { setEditing(field); setEditVal(String(value)); };
+  const commitEdit = (field, isMonthly) => {
+    const raw = parseFloat(editVal);
+    if (!isNaN(raw)) isMonthly ? onUpdateMonthData(field, raw) : onUpdateConfig(field, raw);
+    setEditing(null);
+  };
+
+  const editableNum = (field, value, isMonthly = false) =>
+    editing === field ? (
+      <input
+        autoFocus type="number" min="0" step="0.01" value={editVal}
+        onChange={e => setEditVal(e.target.value)}
+        onBlur={() => commitEdit(field, isMonthly)}
+        onKeyDown={e => { if (e.key === "Enter") commitEdit(field, isMonthly); if (e.key === "Escape") setEditing(null); }}
+        style={styles.ccInput}
+      />
+    ) : (
+      <span style={styles.ccEditable} onClick={() => startEdit(field, value)} title="Click to edit">
+        {fmt(value)}
+      </span>
+    );
+
+  const rows = [
+    { label: "Current Balance",                       field: "balance",   value: balance,   monthly: true  },
+    { label: "Pending",                               field: "pending",   value: pending,   monthly: true  },
+    { label: "Known Recurring Charges Still To Come", field: "recurring", value: recurring, monthly: false, hasNote: true },
+    { label: "Known or Estimated Other Charges",      field: "other",     value: other,     monthly: false },
+    { label: "Payments Scheduled",                    field: "payment",   value: payment,   monthly: false, isPayment: true },
+  ];
+
+  return (
+    <div style={styles.ccBlock}>
+      <div style={styles.ccCardHeader}>
+        <span style={styles.ccCardName}>{card.label}</span>
+        <span style={styles.ccCardDue}>({card.dueDate})</span>
+      </div>
+      <div style={styles.ccTableWrap}>
+        <div style={styles.ccColHeader}>
+          <span style={{ flex: 1 }} />
+          <span style={styles.ccColLabel}>Current Bal</span>
+          <span style={styles.ccColLabelWide}>Scheduled</span>
+        </div>
+        {rows.map(row => (
+          <div key={row.field} style={styles.ccTableRow}>
+            <span style={styles.ccRowLabel}>{row.label}</span>
+            <span style={{ width: 110, textAlign: "right" }}>
+              {!row.isPayment ? editableNum(row.field, row.value, row.monthly) : null}
+            </span>
+            <span style={{ width: 160, display: "flex", alignItems: "center", justifyContent: row.isPayment ? "flex-end" : "flex-start", paddingLeft: row.isPayment ? 0 : 8, gap: 4 }}>
+              {row.isPayment ? editableNum(row.field, row.value, false) : null}
+              {row.hasNote ? (
+                editingNote ? (
+                  <input
+                    autoFocus value={noteVal}
+                    onChange={e => setNoteVal(e.target.value)}
+                    onBlur={() => { onUpdateConfig("recurringNote", noteVal); setEditingNote(false); }}
+                    onKeyDown={e => { if (e.key === "Enter" || e.key === "Escape") { onUpdateConfig("recurringNote", noteVal); setEditingNote(false); } }}
+                    style={{ ...styles.ccInput, width: 140, textAlign: "left", fontSize: 10 }}
+                  />
+                ) : (
+                  <span
+                    style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-mono)", cursor: "pointer", opacity: recurringNote ? 1 : 0.5 }}
+                    onClick={() => { setEditingNote(true); setNoteVal(recurringNote); }}
+                  >
+                    {recurringNote || "+ note"}
+                  </span>
+                )
+              ) : null}
+            </span>
+          </div>
+        ))}
+        <div style={{ ...styles.ccTableRow, borderTop: "1px solid var(--border)", marginTop: 4, paddingTop: 8 }}>
+          <span style={{ ...styles.ccRowLabel, fontWeight: 700, color: "var(--text)" }}>Net</span>
+          <span style={{ width: 110, textAlign: "right", fontFamily: "var(--font-mono)", fontSize: 14, fontWeight: 700, color: net > 0 ? "var(--red)" : "var(--green)" }}>
+            {fmt(net)}
+          </span>
+          <span style={{ width: 160 }} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Modals ────────────────────────────────────────────────────────────────────
 function AddModal({ accountName, onSave, onClose }) {
   const [form, setForm] = useState({ day: "", name: "", freq: "Monthly", amount: "" });
@@ -738,6 +847,8 @@ export default function CashFlow() {
   const [txnOrders, setTxnOrders] = useState({});
   const [allMonthNotes, setAllMonthNotes] = useState({});
   const [modal, setModal] = useState(null);
+  const [ccConfig, setCcConfig] = useState(DEFAULT_CC_CONFIG);
+  const [ccMonthData, setCcMonthData] = useState({});
   const autoConfirmedRef = useRef(new Set());
 
   const presetsMap = useMemo(() => {
@@ -824,6 +935,33 @@ export default function CashFlow() {
             if (p.name.startsWith("__note_")) newNotes[p.name.replace("__note_", "")] = p.note ?? "";
           });
           if (Object.keys(newNotes).length > 0) setAllMonthNotes(newNotes);
+
+          // CC config + per-month data
+          const newCcConfig = {
+            vcx:  { ...DEFAULT_CC_CONFIG.vcx },
+            plat: { ...DEFAULT_CC_CONFIG.plat },
+          };
+          CC_CARDS.forEach(card => {
+            const pm = dbPresets.find(p => p.name === `__cc_${card.id}_payment`);
+            const rc = dbPresets.find(p => p.name === `__cc_${card.id}_recurring`);
+            const ot = dbPresets.find(p => p.name === `__cc_${card.id}_other`);
+            if (pm) newCcConfig[card.id].payment = pm.amount;
+            if (rc) { newCcConfig[card.id].recurring = rc.amount; if (rc.note != null) newCcConfig[card.id].recurringNote = rc.note; }
+            if (ot) newCcConfig[card.id].other = ot.amount;
+          });
+          setCcConfig(newCcConfig);
+
+          const newCcMonthData = {};
+          dbPresets.forEach(p => {
+            const m = p.name.match(/^__cc_(vcx|plat)_(balance|pending)_(.+)$/);
+            if (m) {
+              const [, cardId, field, monthKey] = m;
+              if (!newCcMonthData[monthKey]) newCcMonthData[monthKey] = {};
+              if (!newCcMonthData[monthKey][cardId]) newCcMonthData[monthKey][cardId] = {};
+              newCcMonthData[monthKey][cardId][field] = p.amount;
+            }
+          });
+          if (Object.keys(newCcMonthData).length > 0) setCcMonthData(newCcMonthData);
         }
       } catch {}
 
@@ -1044,6 +1182,31 @@ export default function CashFlow() {
     saveCashflowPreset(`__note_${monthKey}`, 0, null, text).catch(() => {});
   }, []);
 
+  const saveCcConfig = useCallback((cardId, field, value) => {
+    setCcConfig(prev => ({
+      ...prev,
+      [cardId]: { ...prev[cardId], [field]: value },
+    }));
+    if (field === "recurringNote") {
+      saveCashflowPreset(`__cc_${cardId}_recurring`, ccConfig[cardId]?.recurring ?? DEFAULT_CC_CONFIG[cardId].recurring, null, value).catch(() => {});
+    } else {
+      saveCashflowPreset(`__cc_${cardId}_${field}`, value, null, null).catch(() => {});
+    }
+    if (field === "payment") {
+      const vcxPay  = cardId === "vcx"  ? value : (ccConfig.vcx?.payment  ?? DEFAULT_CC_CONFIG.vcx.payment);
+      const platPay = cardId === "plat" ? value : (ccConfig.plat?.payment ?? DEFAULT_CC_CONFIG.plat.payment);
+      savePreset("Transfer for Credit Card", -(vcxPay + platPay), "Monthly", null);
+    }
+  }, [ccConfig, savePreset]);
+
+  const saveCcMonthData = useCallback((monthKey, cardId, field, value) => {
+    setCcMonthData(prev => ({
+      ...prev,
+      [monthKey]: { ...(prev[monthKey] ?? {}), [cardId]: { ...(prev[monthKey]?.[cardId] ?? {}), [field]: value } },
+    }));
+    saveCashflowPreset(`__cc_${cardId}_${field}_${monthKey}`, value, null, null).catch(() => {});
+  }, []);
+
   const addRow = (accountId) => setModal({ type: "add", accountId });
 
   const saveAdd = (data) => {
@@ -1093,9 +1256,10 @@ export default function CashFlow() {
 
       <div style={styles.tabBar}>
         {[
-          { id: "amex", label: "Amex" },
-          { id: "macu", label: "Personal MACU" },
+          { id: "amex",   label: "Amex" },
+          { id: "macu",   label: "Personal MACU" },
           { id: "shared", label: "Shared MACU" },
+          { id: "credit", label: "Credit Cards" },
         ].map(tab => (
           <button
             key={tab.id}
@@ -1126,30 +1290,57 @@ export default function CashFlow() {
               )}
             </div>
 
-            <div className={i === 0 ? "fade-up" : undefined}>
-              <SummaryBar {...summary} />
-            </div>
+            {activeTab !== "credit" && (
+              <div className={i === 0 ? "fade-up" : undefined}>
+                <SummaryBar {...summary} />
+              </div>
+            )}
 
             <div className={i === 0 ? "fade-up-2" : undefined} style={styles.accountsGrid}>
-              {accounts.filter(a => a.id === activeTab).map(acct => (
-                <AccountTable
-                  key={acct.id}
-                  account={acct}
-                  startingBalance={startBals[acct.id] ?? acct.defaultStart}
-                  allowEditStart={isFirstMonth}
-                  presetsMap={presetsMap}
-                  monthStates={monthStates}
-                  isThreePaycheckMonth={isThree}
-                  onTogglePending={(aId, tId) => togglePending(monthKey, aId, tId)}
-                  onEditNote={(aId, tId, note) => editNote(monthKey, aId, tId, note)}
-                  onEditAmount={editAmount}
-                  onEditStart={() => editStartingBalance(acct.id)}
-                  onAddRow={addRow}
-                  onDeleteRow={deleteRow}
-                  txnOrder={txnOrders[acct.id]}
-                  onReorder={reorderAccount}
-                />
-              ))}
+              {activeTab === "credit" ? (
+                <>
+                  {CC_CARDS.map(card => (
+                    <CreditCardBlock
+                      key={card.id}
+                      card={card}
+                      config={ccConfig[card.id]}
+                      monthData={ccMonthData[monthKey]?.[card.id]}
+                      onUpdateConfig={(field, value) => saveCcConfig(card.id, field, value)}
+                      onUpdateMonthData={(field, value) => saveCcMonthData(monthKey, card.id, field, value)}
+                    />
+                  ))}
+                  <div style={styles.ccTotalBlock}>
+                    <span style={styles.ccTotalLabel}>Total Balance</span>
+                    <span style={{ fontFamily: "var(--font-mono)", fontSize: 20, fontWeight: 700, color: "var(--red)" }}>
+                      {fmt(CC_CARDS.reduce((sum, card) => {
+                        const md = ccMonthData[monthKey]?.[card.id];
+                        const cfg = ccConfig[card.id];
+                        return sum + (md?.balance ?? 0) + (md?.pending ?? 0) + cfg.recurring + cfg.other - cfg.payment;
+                      }, 0))}
+                    </span>
+                  </div>
+                </>
+              ) : (
+                accounts.filter(a => a.id === activeTab).map(acct => (
+                  <AccountTable
+                    key={acct.id}
+                    account={acct}
+                    startingBalance={startBals[acct.id] ?? acct.defaultStart}
+                    allowEditStart={isFirstMonth}
+                    presetsMap={presetsMap}
+                    monthStates={monthStates}
+                    isThreePaycheckMonth={isThree}
+                    onTogglePending={(aId, tId) => togglePending(monthKey, aId, tId)}
+                    onEditNote={(aId, tId, note) => editNote(monthKey, aId, tId, note)}
+                    onEditAmount={editAmount}
+                    onEditStart={() => editStartingBalance(acct.id)}
+                    onAddRow={addRow}
+                    onDeleteRow={deleteRow}
+                    txnOrder={txnOrders[acct.id]}
+                    onReorder={reorderAccount}
+                  />
+                ))
+              )}
             </div>
 
             <MonthNotes
@@ -1278,4 +1469,20 @@ const styles = {
   notesSection: { marginTop: 12, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", padding: "14px 18px" },
   notesLabel: { fontSize: 10, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--muted)", fontFamily: "var(--font-mono)", marginBottom: 8 },
   notesTextarea: { width: "100%", minHeight: 64, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: "var(--radius)", color: "var(--text)", fontSize: 12, fontFamily: "var(--font-mono)", padding: "8px 10px", resize: "vertical", outline: "none", lineHeight: 1.5, boxSizing: "border-box" },
+
+  ccBlock: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", overflow: "hidden" },
+  ccCardHeader: { display: "flex", alignItems: "baseline", gap: 10, padding: "14px 20px 10px", borderBottom: "1px solid var(--border)", background: "var(--surface2)" },
+  ccCardName: { fontSize: 15, fontWeight: 700, color: "var(--text)" },
+  ccCardDue: { fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)" },
+  ccTableWrap: { padding: "0 20px 12px" },
+  ccColHeader: { display: "flex", alignItems: "center", padding: "8px 0 4px", borderBottom: "1px solid var(--border)", marginBottom: 4 },
+  ccColLabel: { width: 110, textAlign: "right", fontSize: 9, fontWeight: 600, letterSpacing: "0.08em", color: "var(--muted)", fontFamily: "var(--font-mono)", textTransform: "uppercase" },
+  ccColLabelWide: { width: 160, textAlign: "right", fontSize: 9, fontWeight: 600, letterSpacing: "0.08em", color: "var(--muted)", fontFamily: "var(--font-mono)", textTransform: "uppercase" },
+  ccTableRow: { display: "flex", alignItems: "center", padding: "6px 0", borderBottom: "1px solid var(--border)" },
+  ccRowLabel: { flex: 1, fontSize: 12, color: "var(--text)" },
+  ccEditable: { fontSize: 13, fontFamily: "var(--font-mono)", color: "var(--text)", cursor: "pointer", borderBottom: "1px dashed var(--border2)" },
+  ccInput: { width: 90, padding: "2px 6px", background: "var(--surface)", border: "1px solid var(--accent)", borderRadius: 4, color: "var(--text)", fontSize: 12, fontFamily: "var(--font-mono)", outline: "none", textAlign: "right" },
+
+  ccTotalBlock: { display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", padding: "16px 24px" },
+  ccTotalLabel: { fontSize: 13, fontWeight: 700, color: "var(--text)", letterSpacing: "-0.01em" },
 };
