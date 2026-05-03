@@ -163,6 +163,12 @@ export async function initDb() {
   `);
 
   await pool.query(`
+    ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS range_start DATE;
+    ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS range_end DATE;
+    ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+  `);
+
+  await pool.query(`
     ALTER TABLE transactions ADD COLUMN IF NOT EXISTS audited_at TIMESTAMPTZ;
   `);
 
