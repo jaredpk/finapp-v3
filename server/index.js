@@ -65,7 +65,7 @@ app.use(cors({
   exposedHeaders: ["mcp-session-id"],
   credentials: true,
 }));
-app.use(express.json());
+app.use(express.json({ limit: "50mb" }));
 
 if (isProd) {
   app.use(express.static(path.join(__dirname, "../client/dist")));
