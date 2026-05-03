@@ -10,7 +10,7 @@ const NAV = [
   { id: "settings",     label: "Settings",      icon: "⚙" },
 ];
 
-export default function Sidebar({ active, setActive, onConnect, connecting, user, onSignOut }) {
+export default function Sidebar({ active, setActive, onConnect, connecting, user, onSignOut, auditOverdue }) {
   const displayName = user?.user_metadata?.full_name || user?.email || "Account";
   const avatarUrl = user?.user_metadata?.avatar_url;
 
@@ -33,6 +33,9 @@ export default function Sidebar({ active, setActive, onConnect, connecting, user
           >
             <span style={styles.navIcon}>{item.icon}</span>
             <span>{item.label}</span>
+            {item.id === "settings" && auditOverdue && active !== "settings" && (
+              <span style={styles.auditDot} title="Audit needed" />
+            )}
             {active === item.id && <span style={styles.activeDot} />}
           </button>
         ))}
@@ -90,6 +93,7 @@ const styles = {
   navActive: { background: "var(--surface2)", color: "var(--text)" },
   navIcon: { fontSize: 16, width: 20, textAlign: "center" },
   activeDot: { position: "absolute", right: 10, width: 6, height: 6, borderRadius: "50%", background: "var(--accent)" },
+  auditDot: { position: "absolute", right: 10, width: 7, height: 7, borderRadius: "50%", background: "var(--red, #ef4444)", border: "1.5px solid var(--surface)" },
   spacer: { flex: 1 },
   userRow: {
     display: "flex",

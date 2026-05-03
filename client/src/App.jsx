@@ -11,6 +11,7 @@ import { usePlaidConnect } from "./hooks/usePlaid.js";
 import {
   fetchAccounts, fetchTransactions, setTokenGetter,
   fetchCategories, fetchAssignments, fetchMerchantOverrides,
+  getLastAudit,
 } from "./api.js";
 
 const ALLOWED_EMAIL = "jaredpk@gmail.com";
@@ -99,10 +100,19 @@ function AuthenticatedApp({ supabase, session }) {
   const [assignments, setAssignments] = useState({});
   const [merchantOverrides, setMerchantOverrides] = useState({});
   const [loading, setLoading] = useState(false);
+  const [auditOverdue, setAuditOverdue] = useState(false);
 
   useEffect(() => {
     setTokenGetter(async () => session.access_token);
   }, [session]);
+
+  useEffect(() => {
+    getLastAudit().then(({ log }) => {
+      if (!log) { setAuditOverdue(true); return; }
+      const days = (Date.now() - new Date(log.audit_date).getTime()) / 86400000;
+      setAuditOverdue(days > 14);
+    }).catch(() => setAuditOverdue(false));
+  }, []);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -171,6 +181,7 @@ function AuthenticatedApp({ supabase, session }) {
         connecting={connecting}
         user={session.user}
         onSignOut={() => supabase.auth.signOut()}
+        auditOverdue={auditOverdue}
       />
       <main style={styles.main}>
         {loading && accounts.length === 0 && transactions.length === 0 ? (

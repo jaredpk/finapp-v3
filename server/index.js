@@ -37,6 +37,8 @@ import {
   getCashflowPresets, upsertCashflowPreset, getCashflowStates, upsertCashflowState,
   getCashflowMappings, upsertCashflowMapping, parseMacuCsvText,
   getAccountNicknames, upsertAccountNickname, deleteAccountNickname,
+  getLastAuditLog, saveAuditLog, updateAuditInsertedCount,
+  getTransactionIdSet, parseAuditXlsx,
 } from "./db.js";
 import pool from "./db.js";
 
@@ -1290,6 +1292,47 @@ app.post("/api/cashflow/mappings", requireAuth, async (req, res) => {
     const { merchantPattern, accountId, txnName } = req.body;
     await upsertCashflowMapping(merchantPattern, accountId, txnName);
     res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Audit ──────────────────────────────────────────────────────────────────────
+app.get("/api/audit/last", requireAuth, async (req, res) => {
+  try {
+    res.json({ log: await getLastAuditLog() });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/audit/upload", requireAuth, async (req, res) => {
+  try {
+    const { xlsx, filename } = req.body;
+    if (!xlsx) return res.status(400).json({ error: "xlsx required" });
+    const { transactions: sheetTxns, dateRange } = parseAuditXlsx(xlsx);
+    if (!sheetTxns.length || !dateRange.start) {
+      return res.json({ auditId: null, missing: [], totalInSheet: 0, missingCount: 0, dateRange });
+    }
+    const dbIds = await getTransactionIdSet(dateRange.start, dateRange.end);
+    const missing = sheetTxns.filter(t => !dbIds.has(t.transaction_id));
+    const { id: auditId } = await saveAuditLog(
+      filename || "Personal Finances.xlsx", sheetTxns.length, missing.length
+    );
+    res.json({ auditId, missing, totalInSheet: sheetTxns.length, missingCount: missing.length, dateRange });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/audit/insert", requireAuth, async (req, res) => {
+  try {
+    const { auditId, transactions } = req.body;
+    if (!Array.isArray(transactions) || transactions.length === 0)
+      return res.status(400).json({ error: "transactions array required" });
+    await upsertTransactions(transactions);
+    if (auditId) await updateAuditInsertedCount(auditId, transactions.length);
+    res.json({ inserted: transactions.length });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

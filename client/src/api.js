@@ -341,6 +341,30 @@ export async function saveCashflowMapping(merchantPattern, accountId, txnName) {
   return r.json();
 }
 
+// ── Audit ──────────────────────────────────────────────────────────────────────
+export async function getLastAudit() {
+  const r = await fetch(`${BASE}/audit/last`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function uploadAuditSheet(base64, filename) {
+  const r = await fetch(`${BASE}/audit/upload`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ xlsx: base64, filename }),
+  });
+  return r.json();
+}
+
+export async function insertAuditTransactions(auditId, transactions) {
+  const r = await fetch(`${BASE}/audit/insert`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ auditId, transactions }),
+  });
+  return r.json();
+}
+
 export async function fetchTransactionsForMonth(monthKey) {
   const [year, month] = monthKey.split("-");
   const startDate = `${year}-${month}-01`;

@@ -147,6 +147,18 @@ export async function initDb() {
     ALTER TABLE investment_holdings ADD COLUMN IF NOT EXISTS account TEXT;
   `);
 
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id SERIAL PRIMARY KEY,
+      audit_date TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      filename TEXT,
+      total_in_sheet INT DEFAULT 0,
+      missing_count INT DEFAULT 0,
+      inserted_count INT DEFAULT 0,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+
   // Add new transaction columns from Perplexity schema
   await pool.query(`
     ALTER TABLE transactions
@@ -1352,6 +1364,95 @@ export async function upsertAccountNickname(accountId, nickname) {
 
 export async function deleteAccountNickname(accountId) {
   await pool.query(`DELETE FROM account_nicknames WHERE account_id = $1`, [accountId]);
+}
+
+// ── Audit ──────────────────────────────────────────────────────────────────────
+export async function getLastAuditLog() {
+  const { rows } = await pool.query(
+    `SELECT id, audit_date, filename, total_in_sheet, missing_count, inserted_count
+     FROM audit_log ORDER BY audit_date DESC LIMIT 1`
+  );
+  return rows[0] || null;
+}
+
+export async function saveAuditLog(filename, totalInSheet, missingCount) {
+  const { rows } = await pool.query(
+    `INSERT INTO audit_log (filename, total_in_sheet, missing_count)
+     VALUES ($1, $2, $3) RETURNING id, audit_date`,
+    [filename, totalInSheet, missingCount]
+  );
+  return rows[0];
+}
+
+export async function updateAuditInsertedCount(id, insertedCount) {
+  await pool.query(`UPDATE audit_log SET inserted_count = $2 WHERE id = $1`, [id, insertedCount]);
+}
+
+export async function getTransactionIdSet(startDate, endDate) {
+  const { rows } = await pool.query(
+    `SELECT id FROM transactions WHERE date >= $1::date AND date <= $2::date`,
+    [startDate, endDate]
+  );
+  return new Set(rows.map(r => r.id));
+}
+
+export function parseAuditXlsx(base64) {
+  const { read, utils } = xlsxLib;
+  const wb = read(Buffer.from(base64, 'base64'), { type: 'buffer', cellDates: true });
+
+  // Skip empty/stale sheets; process all remaining *Transactions sheets
+  const SKIP = new Set(['MACU Shared Transactions', 'American Express Transactions']);
+  const txnSheets = wb.SheetNames.filter(n => n.endsWith('Transactions') && !SKIP.has(n));
+
+  const transactions = [];
+  let minDate = null, maxDate = null;
+
+  for (const sheetName of txnSheets) {
+    const ws = wb.Sheets[sheetName];
+    const rows = utils.sheet_to_json(ws, { header: 1, raw: false, defval: null });
+    if (rows.length < 3) continue; // label row + header row + at least 1 data row
+
+    const headers = rows[1]; // row[0] = institution label, row[1] = column headers
+    const col = (name) => headers.indexOf(name);
+    const txnIdIdx = col('transaction_id');
+    const dateIdx   = col('date');
+    const amountIdx = col('amount');
+    const nameIdx   = col('name');
+    const merchantIdx = col('merchant_name');
+    const accountIdx  = col('account_id');
+    const pendingIdx  = col('pending');
+    if (txnIdIdx === -1 || dateIdx === -1) continue;
+
+    const source = sheetName.replace(' Transactions', '');
+
+    for (const row of rows.slice(2)) {
+      const txnId   = row[txnIdIdx];
+      const rawDate = row[dateIdx];
+      if (!txnId || !rawDate) continue;
+
+      const pendingVal = row[pendingIdx];
+      if (pendingVal === 'TRUE' || pendingVal === 'true' || pendingVal === true) continue;
+
+      const amount = parseFloat(row[amountIdx]);
+      if (isNaN(amount)) continue;
+
+      const date = rawDate.toString().slice(0, 10);
+      if (!minDate || date < minDate) minDate = date;
+      if (!maxDate || date > maxDate) maxDate = date;
+
+      transactions.push({
+        transaction_id: txnId,
+        date,
+        amount,
+        name:          row[nameIdx]     || null,
+        merchant_name: row[merchantIdx] || null,
+        account_id:    row[accountIdx]  || null,
+        source,
+      });
+    }
+  }
+
+  return { transactions, dateRange: { start: minDate, end: maxDate } };
 }
 
 export default pool;

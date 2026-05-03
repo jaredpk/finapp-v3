@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { getApiKey, generateApiKey, importXlsx, importMacuCsv, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi, setPropertyBaselineApi, fetchManualAccounts, saveManualAccount, deleteManualAccountApi, downloadXlsx, saveAccountNickname, deleteAccountNicknameApi } from "../api.js";
+import { getApiKey, generateApiKey, importXlsx, importMacuCsv, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi, setPropertyBaselineApi, fetchManualAccounts, saveManualAccount, deleteManualAccountApi, downloadXlsx, saveAccountNickname, deleteAccountNicknameApi, getLastAudit, uploadAuditSheet, insertAuditTransactions } from "../api.js";
 
 export default function Settings({ reloadData, user, accounts = [] }) {
   const [apiKey, setApiKey] = useState(null);
@@ -51,6 +51,17 @@ export default function Settings({ reloadData, user, accounts = [] }) {
   const [nicknames, setNicknames] = useState({});
   const [savingNick, setSavingNick] = useState({});
 
+  // Audit state
+  const auditFileRef = useRef(null);
+  const [auditFileName, setAuditFileName] = useState(null);
+  const [auditBase64, setAuditBase64]     = useState(null);
+  const [auditUploading, setAuditUploading] = useState(false);
+  const [auditResult, setAuditResult]     = useState(null);
+  const [checkedAuditIds, setCheckedAuditIds] = useState(new Set());
+  const [auditInserting, setAuditInserting]   = useState(false);
+  const [auditInsertResult, setAuditInsertResult] = useState(null);
+  const [lastAudit, setLastAudit]         = useState(null);
+
   // Dedup state
   const [deduping, setDeduping]         = useState(false);
   const [dupePreview, setDupePreview]   = useState(null);
@@ -64,6 +75,7 @@ export default function Settings({ reloadData, user, accounts = [] }) {
     getApiKey().then((data) => { setApiKey(data.key || null); setLoading(false); });
     fetchProperties().then((data) => { setProperties(data.properties || []); setPropsLoading(false); });
     fetchManualAccounts().then((data) => { setManualAccounts(data.accounts || []); setManualLoading(false); });
+    getLastAudit().then(({ log }) => setLastAudit(log || null)).catch(() => {});
   }, []);
 
   // Seed nickname inputs from current account names whenever accounts load
@@ -311,6 +323,81 @@ export default function Settings({ reloadData, user, accounts = [] }) {
     }
   }
 
+  // ── Audit ────────────────────────────────────────────────────────────────────
+  function handleAuditFileChange(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setAuditFileName(file.name);
+    setAuditResult(null);
+    setAuditInsertResult(null);
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const bytes = new Uint8Array(ev.target.result);
+      let binary = "";
+      for (const b of bytes) binary += String.fromCharCode(b);
+      setAuditBase64(btoa(binary));
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  async function handleRunAudit() {
+    if (!auditBase64) return;
+    setAuditUploading(true);
+    setAuditInsertResult(null);
+    try {
+      const res = await uploadAuditSheet(auditBase64, auditFileName);
+      if (res.error) {
+        setAuditResult({ error: `Error: ${res.error}` });
+      } else {
+        setAuditResult(res);
+        setCheckedAuditIds(new Set((res.missing || []).map(t => t.transaction_id)));
+      }
+    } catch (err) {
+      setAuditResult({ error: `Error: ${err.message}` });
+    } finally {
+      setAuditUploading(false);
+    }
+  }
+
+  function toggleAuditTxn(id) {
+    setCheckedAuditIds(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
+  function toggleAllAudit(e) {
+    if (e.target.checked) {
+      setCheckedAuditIds(new Set((auditResult?.missing || []).map(t => t.transaction_id)));
+    } else {
+      setCheckedAuditIds(new Set());
+    }
+  }
+
+  async function handleAuditInsert() {
+    if (!auditResult || checkedAuditIds.size === 0) return;
+    setAuditInserting(true);
+    try {
+      const toInsert = auditResult.missing.filter(t => checkedAuditIds.has(t.transaction_id));
+      const res = await insertAuditTransactions(auditResult.auditId, toInsert);
+      if (res.error) {
+        setAuditInsertResult(`Error: ${res.error}`);
+      } else {
+        setAuditInsertResult(`Inserted ${res.inserted} transaction${res.inserted !== 1 ? "s" : ""} successfully.`);
+        const remaining = auditResult.missing.filter(t => !checkedAuditIds.has(t.transaction_id));
+        setAuditResult(prev => ({ ...prev, missing: remaining, missingCount: remaining.length }));
+        setCheckedAuditIds(new Set());
+        setLastAudit(prev => prev ? { ...prev, inserted_count: (prev.inserted_count || 0) + res.inserted } : prev);
+        if (reloadData) reloadData();
+      }
+    } catch (err) {
+      setAuditInsertResult(`Error: ${err.message}`);
+    } finally {
+      setAuditInserting(false);
+    }
+  }
+
   async function handleExportXlsx() {
     setExporting(true);
     setExportError(null);
@@ -322,6 +409,8 @@ export default function Settings({ reloadData, user, accounts = [] }) {
       setExporting(false);
     }
   }
+
+  const auditOverdue = !lastAudit || ((Date.now() - new Date(lastAudit.audit_date).getTime()) / 86400000 > 14);
 
   const sseUrl = apiKey ? `${window.location.origin}/sse?key=${apiKey}` : null;
   const mcpConfig = apiKey ? JSON.stringify({
@@ -343,6 +432,109 @@ export default function Settings({ reloadData, user, accounts = [] }) {
           <span style={styles.label}>Email</span>
           <span style={styles.value}>{user?.email || "—"}</span>
         </div>
+      </section>
+
+      {/* Audit */}
+      <section style={styles.card}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+          <h2 style={{ ...styles.cardTitle, marginBottom: 0 }}>Audit Transactions</h2>
+          {auditOverdue && <span style={styles.auditBadge}>{lastAudit ? "Audit needed" : "Never audited"}</span>}
+        </div>
+        {lastAudit ? (
+          <p style={styles.description}>
+            Last audit: <strong>{new Date(lastAudit.audit_date).toLocaleDateString()}</strong>
+            {" "}· {lastAudit.total_in_sheet?.toLocaleString()} in sheet
+            · {lastAudit.missing_count} missing
+            · {lastAudit.inserted_count} inserted
+          </p>
+        ) : (
+          <p style={styles.description}>No audit has been run yet.</p>
+        )}
+        <p style={styles.description}>
+          Upload your <strong>Personal Finances.xlsx</strong> from Quadratic to compare its Plaid transactions
+          against what's in the app. Missing transactions are shown for review — select any to insert them.
+        </p>
+        <input ref={auditFileRef} type="file" accept=".xlsx" style={{ display: "none" }} onChange={handleAuditFileChange} />
+        <button style={styles.generateBtn} onClick={() => { auditFileRef.current?.click(); }}>Select Audit Sheet</button>
+        {auditFileName && !auditResult && (
+          <div style={styles.importPreview}>
+            <p style={styles.previewText}>Ready: <strong>{auditFileName}</strong></p>
+            <button style={styles.generateBtn} onClick={handleRunAudit} disabled={auditUploading}>
+              {auditUploading ? "Analyzing…" : "Run Audit"}
+            </button>
+          </div>
+        )}
+        {auditResult && (
+          <div style={styles.dupeBox}>
+            {auditResult.error ? (
+              <p style={styles.importError}>{auditResult.error}</p>
+            ) : auditResult.missingCount === 0 ? (
+              <p style={styles.importSuccess}>
+                All {auditResult.totalInSheet?.toLocaleString()} transactions accounted for — no gaps found.
+              </p>
+            ) : (
+              <>
+                <p style={{ fontSize: 13, color: "var(--text)", marginBottom: 10 }}>
+                  <strong>{auditResult.missingCount}</strong> missing out of{" "}
+                  <strong>{auditResult.totalInSheet?.toLocaleString()}</strong> in sheet
+                  {auditResult.dateRange?.start && (
+                    <span style={{ color: "var(--muted)" }}>
+                      {" "}({auditResult.dateRange.start} – {auditResult.dateRange.end})
+                    </span>
+                  )}.
+                </p>
+                <div style={styles.dupeTable}>
+                  <div style={{ ...styles.dupeHeader, gridTemplateColumns: "28px 95px 90px 1fr 80px" }}>
+                    <span>
+                      <input
+                        type="checkbox"
+                        checked={checkedAuditIds.size === auditResult.missing.length && auditResult.missing.length > 0}
+                        onChange={toggleAllAudit}
+                      />
+                    </span>
+                    <span>Date</span>
+                    <span>Source</span>
+                    <span>Merchant</span>
+                    <span style={{ textAlign: "right" }}>Amount</span>
+                  </div>
+                  {auditResult.missing.map((t) => (
+                    <div
+                      key={t.transaction_id}
+                      style={{ ...styles.dupeRow, gridTemplateColumns: "28px 95px 90px 1fr 80px", opacity: checkedAuditIds.has(t.transaction_id) ? 1 : 0.45 }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checkedAuditIds.has(t.transaction_id)}
+                        onChange={() => toggleAuditTxn(t.transaction_id)}
+                        style={{ cursor: "pointer" }}
+                      />
+                      <span style={styles.dupeCell}>{t.date}</span>
+                      <span style={{ ...styles.dupeCell, fontSize: 10, color: "var(--muted)" }}>{t.source}</span>
+                      <span style={styles.dupeCell}>{t.merchant_name || t.name || "—"}</span>
+                      <span style={{ ...styles.dupeCell, textAlign: "right", color: t.amount > 0 ? "var(--red, #ef4444)" : "var(--green, #22c55e)" }}>
+                        {t.amount > 0 ? `$${t.amount.toFixed(2)}` : `-$${Math.abs(t.amount).toFixed(2)}`}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <button
+                  style={{ ...styles.generateBtn, marginTop: 14, opacity: checkedAuditIds.size === 0 ? 0.45 : 1 }}
+                  onClick={handleAuditInsert}
+                  disabled={auditInserting || checkedAuditIds.size === 0}
+                >
+                  {auditInserting
+                    ? "Inserting…"
+                    : `Insert ${checkedAuditIds.size} Selected Transaction${checkedAuditIds.size !== 1 ? "s" : ""}`}
+                </button>
+              </>
+            )}
+            {auditInsertResult && (
+              <p style={auditInsertResult.startsWith("Error") ? styles.importError : styles.importSuccess}>
+                {auditInsertResult}
+              </p>
+            )}
+          </div>
+        )}
       </section>
 
       {/* Manual Accounts */}
@@ -794,4 +986,5 @@ const styles = {
   propForm: { marginTop: 8 },
   propInput: { width: "100%", padding: "10px 12px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text)", fontSize: 13, fontFamily: "var(--font-display)", boxSizing: "border-box" },
   deleteBtn: { background: "none", color: "var(--red, #ef4444)", border: "1px solid var(--border)", borderRadius: 6, padding: "5px 10px", fontSize: 12, cursor: "pointer", flexShrink: 0 },
+  auditBadge: { fontSize: 10, fontWeight: 700, fontFamily: "var(--font-mono)", color: "#fff", background: "var(--red, #ef4444)", borderRadius: "var(--radius)", padding: "3px 8px", textTransform: "uppercase", letterSpacing: "0.06em", flexShrink: 0 },
 };
