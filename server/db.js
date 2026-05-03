@@ -1400,48 +1400,72 @@ export function parseAuditXlsx(base64) {
   const { read, utils } = xlsxLib;
   const wb = read(Buffer.from(base64, 'base64'), { type: 'buffer', cellDates: true });
 
-  // Skip empty/stale sheets; process all remaining *Transactions sheets
   const SKIP = new Set(['MACU Shared Transactions', 'American Express Transactions']);
   const txnSheets = wb.SheetNames.filter(n => n.endsWith('Transactions') && !SKIP.has(n));
 
   const transactions = [];
+  const sheetStats = [];
   let minDate = null, maxDate = null;
 
   for (const sheetName of txnSheets) {
     const ws = wb.Sheets[sheetName];
-    const rows = utils.sheet_to_json(ws, { header: 1, raw: false, defval: null });
-    if (rows.length < 3) continue; // label row + header row + at least 1 data row
+    // Use raw:true so booleans stay boolean and we control date formatting
+    const rows = utils.sheet_to_json(ws, { header: 1, raw: true, defval: null });
+    const stat = { sheet: sheetName, totalRows: rows.length, headerRow: null, parsed: 0, skippedPending: 0, skippedNoId: 0, skippedNoDate: 0, sampleIds: [] };
 
-    const headers = rows[1]; // row[0] = institution label, row[1] = column headers
+    // Find header row — look for the row containing 'transaction_id' (not always row 1)
+    let headerIdx = -1;
+    for (let i = 0; i < Math.min(rows.length, 5); i++) {
+      if (Array.isArray(rows[i]) && rows[i].includes('transaction_id')) { headerIdx = i; break; }
+    }
+    if (headerIdx === -1) { stat.headerRow = 'not found'; sheetStats.push(stat); continue; }
+    stat.headerRow = headerIdx;
+
+    const headers = rows[headerIdx];
     const col = (name) => headers.indexOf(name);
-    const txnIdIdx = col('transaction_id');
+    const txnIdIdx  = col('transaction_id');
     const dateIdx   = col('date');
     const amountIdx = col('amount');
     const nameIdx   = col('name');
     const merchantIdx = col('merchant_name');
     const accountIdx  = col('account_id');
     const pendingIdx  = col('pending');
-    if (txnIdIdx === -1 || dateIdx === -1) continue;
 
     const source = sheetName.replace(' Transactions', '');
 
-    for (const row of rows.slice(2)) {
-      const txnId   = row[txnIdIdx];
-      const rawDate = row[dateIdx];
-      if (!txnId || !rawDate) continue;
+    for (const row of rows.slice(headerIdx + 1)) {
+      const txnId = row[txnIdIdx];
+      if (!txnId) { stat.skippedNoId++; continue; }
 
       const pendingVal = row[pendingIdx];
-      if (pendingVal === 'TRUE' || pendingVal === 'true' || pendingVal === true) continue;
+      if (pendingVal === true || pendingVal === 'TRUE' || pendingVal === 'true') {
+        stat.skippedPending++; continue;
+      }
+
+      const rawDate = row[dateIdx];
+      if (!rawDate) { stat.skippedNoDate++; continue; }
+
+      // Normalize date to YYYY-MM-DD regardless of how xlsx stored it
+      let date;
+      if (rawDate instanceof Date) {
+        date = rawDate.toISOString().slice(0, 10);
+      } else {
+        const s = rawDate.toString().trim();
+        // Already ISO: 2026-01-25 or 2026-01-25T...
+        const iso = s.match(/^(\d{4}-\d{2}-\d{2})/);
+        if (iso) { date = iso[1]; }
+        else { stat.skippedNoDate++; continue; }
+      }
 
       const amount = parseFloat(row[amountIdx]);
       if (isNaN(amount)) continue;
 
-      const date = rawDate.toString().slice(0, 10);
       if (!minDate || date < minDate) minDate = date;
       if (!maxDate || date > maxDate) maxDate = date;
 
+      const id = typeof txnId === 'string' ? txnId.trim() : String(txnId);
       transactions.push({
-        transaction_id: txnId,
+        transaction_id: id,
         date,
         amount,
         name:          row[nameIdx]     || null,
@@ -1449,10 +1473,14 @@ export function parseAuditXlsx(base64) {
         account_id:    row[accountIdx]  || null,
         source,
       });
+      stat.parsed++;
+      if (stat.sampleIds.length < 3) stat.sampleIds.push(id);
     }
+
+    sheetStats.push(stat);
   }
 
-  return { transactions, dateRange: { start: minDate, end: maxDate } };
+  return { transactions, dateRange: { start: minDate, end: maxDate }, sheetStats };
 }
 
 export default pool;

@@ -1310,16 +1310,19 @@ app.post("/api/audit/upload", requireAuth, async (req, res) => {
   try {
     const { xlsx, filename } = req.body;
     if (!xlsx) return res.status(400).json({ error: "xlsx required" });
-    const { transactions: sheetTxns, dateRange } = parseAuditXlsx(xlsx);
+    const { transactions: sheetTxns, dateRange, sheetStats } = parseAuditXlsx(xlsx);
     if (!sheetTxns.length || !dateRange.start) {
-      return res.json({ auditId: null, missing: [], totalInSheet: 0, missingCount: 0, dateRange });
+      return res.json({ auditId: null, missing: [], totalInSheet: 0, missingCount: 0, dateRange, debug: { sheetStats, dbIdCount: 0, sampleXlsxIds: [], sampleDbIds: [] } });
     }
     const dbIds = await getTransactionIdSet(dateRange.start, dateRange.end);
     const missing = sheetTxns.filter(t => !dbIds.has(t.transaction_id));
     const { id: auditId } = await saveAuditLog(
       filename || "Personal Finances.xlsx", sheetTxns.length, missing.length
     );
-    res.json({ auditId, missing, totalInSheet: sheetTxns.length, missingCount: missing.length, dateRange });
+    const sampleXlsxIds = sheetTxns.slice(0, 3).map(t => t.transaction_id);
+    const sampleDbIds = [...dbIds].slice(0, 3);
+    const debug = { sheetStats, dbIdCount: dbIds.size, sampleXlsxIds, sampleDbIds };
+    res.json({ auditId, missing, totalInSheet: sheetTxns.length, missingCount: missing.length, dateRange, debug });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

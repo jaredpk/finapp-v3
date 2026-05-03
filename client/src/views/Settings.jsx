@@ -469,9 +469,19 @@ export default function Settings({ reloadData, user, accounts = [] }) {
             {auditResult.error ? (
               <p style={styles.importError}>{auditResult.error}</p>
             ) : auditResult.missingCount === 0 ? (
-              <p style={styles.importSuccess}>
-                All {auditResult.totalInSheet?.toLocaleString()} transactions accounted for — no gaps found.
-              </p>
+              <>
+                <p style={styles.importSuccess}>
+                  All {auditResult.totalInSheet?.toLocaleString()} transactions accounted for — no gaps found.
+                </p>
+                {auditResult.debug && (
+                  <details style={{ marginTop: 12 }}>
+                    <summary style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", cursor: "pointer" }}>Debug info</summary>
+                    <pre style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--muted)", marginTop: 8, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+                      {JSON.stringify(auditResult.debug, null, 2)}
+                    </pre>
+                  </details>
+                )}
+              </>
             ) : (
               <>
                 <p style={{ fontSize: 13, color: "var(--text)", marginBottom: 10 }}>
