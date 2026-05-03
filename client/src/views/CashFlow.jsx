@@ -127,8 +127,8 @@ const CC_CARDS = [
 ];
 
 const DEFAULT_CC_CONFIG = {
-  vcx:  { payment: 3000, recurring: 400, recurringNote: "Insurance on the 5th of each month", other: 500 },
-  plat: { payment: 1000, recurring: 0,   recurringNote: "",                                    other: 500 },
+  vcx:  { payment: 3000, recurring: 400, recurringNote: "Insurance on the 5th of each month", other: 500, defaultBalance: 5100 },
+  plat: { payment: 1000, recurring: 0,   recurringNote: "",                                    other: 500, defaultBalance: 1500 },
 };
 
 // When a preset is saved for these names, the paired name gets the negated amount automatically.
@@ -597,7 +597,7 @@ function CreditCardBlock({ card, config, monthData, onUpdateConfig, onUpdateMont
   const [editingNote, setEditingNote] = useState(false);
   const [noteVal, setNoteVal] = useState("");
 
-  const balance      = monthData?.balance  ?? 0;
+  const balance      = monthData?.balance  ?? config.defaultBalance ?? 0;
   const pending      = monthData?.pending  ?? 0;
   const recurring    = config.recurring;
   const recurringNote = config.recurringNote;
@@ -632,7 +632,7 @@ function CreditCardBlock({ card, config, monthData, onUpdateConfig, onUpdateMont
     { label: "Pending",                               field: "pending",   value: pending,   monthly: true  },
     { label: "Known Recurring Charges Still To Come", field: "recurring", value: recurring, monthly: false, hasNote: true },
     { label: "Known or Estimated Other Charges",      field: "other",     value: other,     monthly: false },
-    { label: "Payments Scheduled",                    field: "payment",   value: payment,   monthly: false, isPayment: true },
+    { label: "Payments Scheduled",                    field: "payment",   value: payment,   monthly: false },
   ];
 
   return (
@@ -644,17 +644,12 @@ function CreditCardBlock({ card, config, monthData, onUpdateConfig, onUpdateMont
       <div style={styles.ccTableWrap}>
         <div style={styles.ccColHeader}>
           <span style={{ flex: 1 }} />
-          <span style={styles.ccColLabel}>Current Bal</span>
-          <span style={styles.ccColLabelWide}>Scheduled</span>
+          <span style={styles.ccColLabel}>Amount</span>
         </div>
         {rows.map(row => (
           <div key={row.field} style={styles.ccTableRow}>
-            <span style={styles.ccRowLabel}>{row.label}</span>
-            <span style={{ width: 110, textAlign: "right" }}>
-              {!row.isPayment ? editableNum(row.field, row.value, row.monthly) : null}
-            </span>
-            <span style={{ width: 160, display: "flex", alignItems: "center", justifyContent: row.isPayment ? "flex-end" : "flex-start", paddingLeft: row.isPayment ? 0 : 8, gap: 4 }}>
-              {row.isPayment ? editableNum(row.field, row.value, false) : null}
+            <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 2 }}>
+              <span style={styles.ccRowLabel}>{row.label}</span>
               {row.hasNote ? (
                 editingNote ? (
                   <input
@@ -662,7 +657,7 @@ function CreditCardBlock({ card, config, monthData, onUpdateConfig, onUpdateMont
                     onChange={e => setNoteVal(e.target.value)}
                     onBlur={() => { onUpdateConfig("recurringNote", noteVal); setEditingNote(false); }}
                     onKeyDown={e => { if (e.key === "Enter" || e.key === "Escape") { onUpdateConfig("recurringNote", noteVal); setEditingNote(false); } }}
-                    style={{ ...styles.ccInput, width: 140, textAlign: "left", fontSize: 10 }}
+                    style={{ ...styles.ccInput, width: 200, textAlign: "left", fontSize: 10 }}
                   />
                 ) : (
                   <span
@@ -673,6 +668,9 @@ function CreditCardBlock({ card, config, monthData, onUpdateConfig, onUpdateMont
                   </span>
                 )
               ) : null}
+            </div>
+            <span style={{ width: 110, textAlign: "right" }}>
+              {editableNum(row.field, row.value, row.monthly ?? false)}
             </span>
           </div>
         ))}
@@ -681,7 +679,6 @@ function CreditCardBlock({ card, config, monthData, onUpdateConfig, onUpdateMont
           <span style={{ width: 110, textAlign: "right", fontFamily: "var(--font-mono)", fontSize: 14, fontWeight: 700, color: net > 0 ? "var(--red)" : "var(--green)" }}>
             {fmt(net)}
           </span>
-          <span style={{ width: 160 }} />
         </div>
       </div>
     </div>
