@@ -1316,14 +1316,28 @@ app.post("/api/audit/upload", requireAuth, async (req, res) => {
     }
     const AUDIT_START = "2026-04-01";
     const auditStart = dateRange.start < AUDIT_START ? AUDIT_START : dateRange.start;
-    const dbKeys = await getTransactionDateAmountSet(auditStart, dateRange.end);
-    const toKey = t => `${t.date}|${Math.abs(t.amount).toFixed(2)}`;
+    // Expand DB window ±1 day to catch posting date drift
+    const dbStart = new Date(auditStart); dbStart.setUTCDate(dbStart.getUTCDate() - 1);
+    const dbEnd   = new Date(dateRange.end); dbEnd.setUTCDate(dbEnd.getUTCDate() + 1);
+    const dbKeys = await getTransactionDateAmountSet(dbStart.toISOString().slice(0, 10), dbEnd.toISOString().slice(0, 10));
+
+    function dateShift(dateStr, days) {
+      const d = new Date(dateStr + "T12:00:00Z");
+      d.setUTCDate(d.getUTCDate() + days);
+      return d.toISOString().slice(0, 10);
+    }
+    const toKey = (date, t) => `${date}|${Math.abs(t.amount).toFixed(2)}`;
     const auditTxns = sheetTxns.filter(t => t.date >= AUDIT_START);
-    const missing = auditTxns.filter(t => !dbKeys.has(toKey(t)));
+    // Consider a transaction matched if DB has it on the same date or ±1 day
+    const missing = auditTxns.filter(t =>
+      !dbKeys.has(toKey(t.date, t)) &&
+      !dbKeys.has(toKey(dateShift(t.date, -1), t)) &&
+      !dbKeys.has(toKey(dateShift(t.date, 1), t))
+    );
     const { id: auditId } = await saveAuditLog(
       filename || "Personal Finances.xlsx", auditTxns.length, missing.length
     );
-    const sampleXlsxKeys = auditTxns.slice(0, 3).map(toKey);
+    const sampleXlsxKeys = auditTxns.slice(0, 3).map(t => toKey(t.date, t));
     const sampleDbKeys = [...dbKeys].slice(0, 3);
     const debug = { sheetStats, dbKeyCount: dbKeys.size, sampleXlsxKeys, sampleDbKeys, auditStart };
     res.json({ auditId, missing, totalInSheet: auditTxns.length, missingCount: missing.length, dateRange: { start: auditStart, end: dateRange.end }, debug });
