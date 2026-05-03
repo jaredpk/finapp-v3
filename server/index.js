@@ -1314,16 +1314,19 @@ app.post("/api/audit/upload", requireAuth, async (req, res) => {
     if (!sheetTxns.length || !dateRange.start) {
       return res.json({ auditId: null, missing: [], totalInSheet: 0, missingCount: 0, dateRange, debug: { sheetStats, dbKeyCount: 0, sampleXlsxKeys: [], sampleDbKeys: [] } });
     }
-    const dbKeys = await getTransactionDateAmountSet(dateRange.start, dateRange.end);
+    const AUDIT_START = "2026-04-01";
+    const auditStart = dateRange.start < AUDIT_START ? AUDIT_START : dateRange.start;
+    const dbKeys = await getTransactionDateAmountSet(auditStart, dateRange.end);
     const toKey = t => `${t.date}|${Math.abs(t.amount).toFixed(2)}`;
-    const missing = sheetTxns.filter(t => !dbKeys.has(toKey(t)));
+    const auditTxns = sheetTxns.filter(t => t.date >= AUDIT_START);
+    const missing = auditTxns.filter(t => !dbKeys.has(toKey(t)));
     const { id: auditId } = await saveAuditLog(
-      filename || "Personal Finances.xlsx", sheetTxns.length, missing.length
+      filename || "Personal Finances.xlsx", auditTxns.length, missing.length
     );
-    const sampleXlsxKeys = sheetTxns.slice(0, 3).map(toKey);
+    const sampleXlsxKeys = auditTxns.slice(0, 3).map(toKey);
     const sampleDbKeys = [...dbKeys].slice(0, 3);
-    const debug = { sheetStats, dbKeyCount: dbKeys.size, sampleXlsxKeys, sampleDbKeys };
-    res.json({ auditId, missing, totalInSheet: sheetTxns.length, missingCount: missing.length, dateRange, debug });
+    const debug = { sheetStats, dbKeyCount: dbKeys.size, sampleXlsxKeys, sampleDbKeys, auditStart };
+    res.json({ auditId, missing, totalInSheet: auditTxns.length, missingCount: missing.length, dateRange: { start: auditStart, end: dateRange.end }, debug });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
