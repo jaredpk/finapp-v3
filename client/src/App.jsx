@@ -11,6 +11,7 @@ import { usePlaidConnect } from "./hooks/usePlaid.js";
 import {
   fetchAccounts, fetchTransactions, setTokenGetter,
   fetchCategories, fetchAssignments, fetchMerchantOverrides,
+  fetchSplits, fetchHiddenAccounts,
   getLastAudit,
 } from "./api.js";
 
@@ -99,6 +100,8 @@ function AuthenticatedApp({ supabase, session }) {
   const [categories, setCategories] = useState([]);
   const [assignments, setAssignments] = useState({});
   const [merchantOverrides, setMerchantOverrides] = useState({});
+  const [splits, setSplits] = useState({});
+  const [hiddenAccounts, setHiddenAccounts] = useState(new Set());
   const [loading, setLoading] = useState(false);
   const [auditOverdue, setAuditOverdue] = useState(false);
 
@@ -117,12 +120,14 @@ function AuthenticatedApp({ supabase, session }) {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [acctRes, txnRes, catRes, assnRes, overrideRes] = await Promise.all([
+      const [acctRes, txnRes, catRes, assnRes, overrideRes, splitRes, hiddenAcctRes] = await Promise.all([
         fetchAccounts(),
         fetchTransactions(),
         fetchCategories(),
         fetchAssignments(),
         fetchMerchantOverrides(),
+        fetchSplits(),
+        fetchHiddenAccounts(),
       ]);
       setAccounts(acctRes.accounts || []);
       setTransactions(txnRes.transactions || []);
@@ -135,6 +140,15 @@ function AuthenticatedApp({ supabase, session }) {
       const overrideMap = {};
       (overrideRes.overrides || []).forEach((o) => { overrideMap[o.transaction_id] = o.merchant_name; });
       setMerchantOverrides(overrideMap);
+
+      const splitsMap = {};
+      (splitRes.splits || []).forEach((s) => {
+        if (!splitsMap[s.transaction_id]) splitsMap[s.transaction_id] = [];
+        splitsMap[s.transaction_id].push(s);
+      });
+      setSplits(splitsMap);
+
+      setHiddenAccounts(new Set(hiddenAcctRes.accounts || []));
     } catch (e) {
       console.error("Failed to load data", e);
     } finally {
@@ -154,6 +168,10 @@ function AuthenticatedApp({ supabase, session }) {
     categories,
     assignments,
     merchantOverrides,
+    splits,
+    setSplits,
+    hiddenAccounts,
+    setHiddenAccounts,
     setCategories,
     setAssignments,
     setMerchantOverrides,

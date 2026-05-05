@@ -382,6 +382,52 @@ export async function deleteTransaction(id) {
   return r.json();
 }
 
+export async function unhideTransactionApi(id) {
+  const r = await fetch(`${BASE}/transactions/${encodeURIComponent(id)}/unhide`, {
+    method: "POST",
+    headers: await authHeaders(),
+  });
+  return r.json();
+}
+
+// ── Splits ────────────────────────────────────────────────────────────────────
+export async function fetchSplits() {
+  const r = await fetch(`${BASE}/splits`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function replaceSplitsApi(transactionId, splits) {
+  const r = await fetch(`${BASE}/splits/${encodeURIComponent(transactionId)}`, {
+    method: "PUT",
+    headers: await authHeaders(),
+    body: JSON.stringify({ splits }),
+  });
+  return r.json();
+}
+
+// ── Hidden accounts ───────────────────────────────────────────────────────────
+export async function fetchHiddenAccounts() {
+  const r = await fetch(`${BASE}/hidden-accounts`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function addHiddenAccountApi(account_id) {
+  const r = await fetch(`${BASE}/hidden-accounts`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ account_id }),
+  });
+  return r.json();
+}
+
+export async function removeHiddenAccountApi(account_id) {
+  const r = await fetch(`${BASE}/hidden-accounts/${encodeURIComponent(account_id)}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+  });
+  return r.json();
+}
+
 export async function fetchTransactionsForMonth(monthKey) {
   const [year, month] = monthKey.split("-");
   const startDate = `${year}-${month}-01`;

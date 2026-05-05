@@ -25,7 +25,8 @@ import {
   seedCategories,
   getCategories, createCategory, updateCategory, deleteCategory,
   getAssignments, upsertAssignment,
-  getSplits, createSplit, deleteSplit, deleteSplitsForTransaction, deleteTransaction,
+  getSplits, createSplit, deleteSplit, deleteSplitsForTransaction, deleteTransaction, unhideTransaction, replaceSplits,
+  getHiddenAccounts, addHiddenAccount, removeHiddenAccount,
   getMerchantOverrides, upsertMerchantOverride,
   parseCsvText, upsertCsvTransaction,
   parseXlsxBase64,
@@ -549,7 +550,16 @@ app.delete("/api/transactions/:id", requireAuth, async (req, res) => {
   try {
     const rowCount = await deleteTransaction(req.params.id);
     if (rowCount === 0) return res.status(404).json({ error: "Transaction not found" });
-    res.json({ deleted: true });
+    res.json({ hidden: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/transactions/:id/unhide", requireAuth, async (req, res) => {
+  try {
+    await unhideTransaction(req.params.id);
+    res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -640,6 +650,31 @@ app.post("/api/splits", requireAuth, async (req, res) => {
 app.delete("/api/splits/:id", requireAuth, async (req, res) => {
   const ok = await deleteSplit(req.params.id);
   res.json({ ok });
+});
+
+app.put("/api/splits/:transactionId", requireAuth, async (req, res) => {
+  const { splits } = req.body;
+  if (!Array.isArray(splits)) return res.status(400).json({ error: "splits array required" });
+  const result = await replaceSplits(req.params.transactionId, splits);
+  res.json({ splits: result });
+});
+
+// ── Hidden accounts ───────────────────────────────────────────────────────────
+app.get("/api/hidden-accounts", requireAuth, async (req, res) => {
+  const accounts = await getHiddenAccounts();
+  res.json({ accounts });
+});
+
+app.post("/api/hidden-accounts", requireAuth, async (req, res) => {
+  const { account_id } = req.body;
+  if (!account_id) return res.status(400).json({ error: "account_id required" });
+  await addHiddenAccount(account_id);
+  res.json({ ok: true });
+});
+
+app.delete("/api/hidden-accounts/:accountId", requireAuth, async (req, res) => {
+  await removeHiddenAccount(decodeURIComponent(req.params.accountId));
+  res.json({ ok: true });
 });
 
 // ── CSV Import ────────────────────────────────────────────────────────────────
@@ -1105,7 +1140,9 @@ function buildMcpServer() {
     category: z.string().optional(),
   }, async ({ limit = 50, start_date, end_date, category }) => {
     const txns = await getTransactions({ limit, startDate: start_date, endDate: end_date, category });
-    return { content: [{ type: "text", text: JSON.stringify(txns, null, 2) }] };
+    const hiddenAcctIds = new Set(await getHiddenAccounts());
+    const visible = txns.filter(t => !t.hidden && !hiddenAcctIds.has(t.account_id));
+    return { content: [{ type: "text", text: JSON.stringify(visible, null, 2) }] };
   });
 
   server.tool("get_spending_by_category", "Spending summary grouped by category", {

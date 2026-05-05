@@ -172,6 +172,17 @@ export async function initDb() {
     ALTER TABLE transactions ADD COLUMN IF NOT EXISTS audited_at TIMESTAMPTZ;
   `);
 
+  await pool.query(`
+    ALTER TABLE transactions ADD COLUMN IF NOT EXISTS hidden BOOLEAN DEFAULT FALSE;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS hidden_accounts (
+      account_id TEXT PRIMARY KEY,
+      hidden_at TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+
   // Add new transaction columns from Perplexity schema
   await pool.query(`
     ALTER TABLE transactions
@@ -505,6 +516,7 @@ export async function getTransactions({ limit = 100, startDate, endDate, categor
        original_description,
        suggested_category,
        (status = 'pending') AS pending,
+       hidden,
        created_at
      FROM transactions ${where} ORDER BY date DESC LIMIT $${i}`,
     params
@@ -513,7 +525,7 @@ export async function getTransactions({ limit = 100, startDate, endDate, categor
 }
 
 export async function getSpendingByCategory({ startDate, endDate } = {}) {
-  const conditions = ["status != 'pending'", "amount > 0"];
+  const conditions = ["status != 'pending'", "amount > 0", "(hidden IS NOT TRUE)", "(account NOT IN (SELECT account_id FROM hidden_accounts))"];
   const params = [];
   let i = 1;
   if (startDate) { conditions.push(`date >= $${i++}`); params.push(startDate); }
@@ -568,7 +580,7 @@ const PLAID_CATEGORY_MAP = {
 };
 
 const KEYWORD_RULES = [
-  { keywords: ["TRANSFER IN", "TRANSFER OUT"],                   category: "Transfer" },
+  { keywords: ["TRANSFER IN", "TRANSFER OUT", "TRANSFER FROM", "TRANSFER TO", "ONLINE TRANSFER", "ACH TRANSFER", "WIRE TRANSFER", "XFER FROM", "XFER TO", "XFER"], category: "Transfer" },
   { keywords: ["AUTOPAY", "AUTO PAY"],                           category: "Credit Card Payment" },
   { keywords: ["PAYROLL", "DIRECT DEP", "DIRECT DEPOSIT", "SALARY", "PAYCHECK"], category: "Personal Income" },
   { keywords: ["MORTGAGE"],                                      category: "Home - Mortgage" },
@@ -1215,11 +1227,54 @@ export async function deleteSplitsForTransaction(transactionId) {
 }
 
 export async function deleteTransaction(id) {
-  await pool.query("DELETE FROM splits WHERE transaction_id = $1", [id]);
-  await pool.query("DELETE FROM category_assignments WHERE transaction_id = $1", [id]);
-  await pool.query("DELETE FROM merchant_overrides WHERE transaction_id = $1", [id]);
-  const { rowCount } = await pool.query("DELETE FROM transactions WHERE id = $1", [id]);
+  const { rowCount } = await pool.query(
+    "UPDATE transactions SET hidden = TRUE WHERE id = $1", [id]
+  );
   return rowCount;
+}
+
+export async function unhideTransaction(id) {
+  const { rowCount } = await pool.query(
+    "UPDATE transactions SET hidden = FALSE WHERE id = $1", [id]
+  );
+  return rowCount;
+}
+
+// ── Hidden accounts ────────────────────────────────────────────────────────────
+export async function getHiddenAccounts() {
+  const { rows } = await pool.query("SELECT account_id FROM hidden_accounts ORDER BY hidden_at DESC");
+  return rows.map(r => r.account_id);
+}
+
+export async function addHiddenAccount(accountId) {
+  await pool.query(
+    "INSERT INTO hidden_accounts (account_id) VALUES ($1) ON CONFLICT DO NOTHING",
+    [accountId]
+  );
+}
+
+export async function removeHiddenAccount(accountId) {
+  await pool.query("DELETE FROM hidden_accounts WHERE account_id = $1", [accountId]);
+}
+
+// ── Replace splits atomically ──────────────────────────────────────────────────
+export async function replaceSplits(transactionId, splits) {
+  await pool.query("DELETE FROM splits WHERE transaction_id = $1", [transactionId]);
+  if (!splits.length) return [];
+  for (const { category_id, amount, note } of splits) {
+    await pool.query(
+      "INSERT INTO splits (transaction_id, category_id, amount, note) VALUES ($1, $2, $3, $4)",
+      [transactionId, category_id || null, amount, note || null]
+    );
+  }
+  const { rows } = await pool.query(
+    `SELECT s.id, s.transaction_id, s.category_id, s.amount::float, s.note,
+            c.name AS category_name, c.color AS category_color
+     FROM splits s LEFT JOIN categories c ON s.category_id = c.id
+     WHERE s.transaction_id = $1 ORDER BY s.created_at`,
+    [transactionId]
+  );
+  return rows;
 }
 
 // ── Merchant Overrides ────────────────────────────────────────────────────────
