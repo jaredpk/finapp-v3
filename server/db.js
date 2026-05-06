@@ -539,6 +539,39 @@ export async function getSpendingByCategory({ startDate, endDate } = {}) {
   return rows;
 }
 
+// Full-fidelity upsert for Quadratic imports — uses real Plaid transaction_ids and all extended columns.
+export async function upsertPlaidTransactions(transactions) {
+  for (const t of transactions) {
+    if (!t.id || t.amount == null) continue;
+    await pool.query(
+      `INSERT INTO transactions
+         (id, date, merchant, amount, account, plaid_category, status, currency,
+          pending_transaction_id, authorized_date, name, primary_category,
+          category_confidence, city, state, website, logo_url, original_description)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+       ON CONFLICT (id) DO UPDATE SET
+         amount                = EXCLUDED.amount,
+         status                = EXCLUDED.status,
+         pending_transaction_id = EXCLUDED.pending_transaction_id,
+         merchant              = EXCLUDED.merchant,
+         plaid_category        = EXCLUDED.plaid_category,
+         primary_category      = EXCLUDED.primary_category,
+         category_confidence   = EXCLUDED.category_confidence,
+         city                  = EXCLUDED.city,
+         state                 = EXCLUDED.state,
+         website               = EXCLUDED.website,
+         logo_url              = EXCLUDED.logo_url,
+         original_description  = EXCLUDED.original_description`,
+      [
+        t.id, t.date, t.merchant, t.amount, t.account, t.plaid_category,
+        t.status, t.currency, t.pending_transaction_id, t.authorized_date,
+        t.name, t.primary_category, t.category_confidence,
+        t.city, t.state, t.website, t.logo_url, t.original_description,
+      ]
+    );
+  }
+}
+
 export async function deleteRemovedTransactions(ids) {
   if (!ids?.length) return 0;
   const { rowCount } = await pool.query(
@@ -859,11 +892,90 @@ export function parseMacuCsvText(csvText, accountName = "MACU Shared Checking") 
   return rows;
 }
 
+// Parses a Quadratic multi-sheet xlsx export.
+// Sheets ending in " Transactions" → transactions (real Plaid IDs).
+// Sheets ending in " Balances" → latest balance per account.
+export function parseQuadraticXlsx(wb) {
+  const { utils } = xlsxLib;
+  const today = new Date().toISOString().slice(0, 10);
+
+  const normalizeDate = (v) => {
+    if (!v) return null;
+    if (v instanceof Date) return v.toISOString().slice(0, 10);
+    const s = v.toString().trim();
+    return s.includes('T') ? s.slice(0, 10) : s || null;
+  };
+
+  const transactions = [];
+  for (const sheetName of wb.SheetNames.filter(n => n.endsWith(' Transactions'))) {
+    const rows = utils.sheet_to_json(wb.Sheets[sheetName], { raw: false, cellDates: true, range: 1, defval: null });
+    for (const r of rows) {
+      if (!r['transaction_id']) continue;
+      transactions.push({
+        id:                     r['transaction_id'],
+        date:                   normalizeDate(r['date']),
+        merchant:               r['merchant_name'] || r['name'] || null,
+        amount:                 r['amount'] != null ? parseFloat(r['amount']) : null,
+        account:                r['account_id'] || 'unknown',
+        plaid_category:         r['personal_finance_category_primary'] || null,
+        status:                 String(r['pending']).toLowerCase() === 'true' ? 'pending' : 'reviewed',
+        currency:               r['iso_currency_code'] || 'USD',
+        pending_transaction_id: r['pending_transaction_id'] || null,
+        authorized_date:        normalizeDate(r['authorized_date']),
+        name:                   r['name'] || null,
+        primary_category:       r['personal_finance_category_primary'] || null,
+        category_confidence:    r['personal_finance_category_confidence_level'] || null,
+        city:                   r['location_city'] || null,
+        state:                  r['location_region'] || null,
+        website:                r['website'] || null,
+        logo_url:               r['logo_url'] || null,
+        original_description:   r['original_description'] || null,
+      });
+    }
+  }
+
+  // Take the latest balance row per account_id across all balance sheets
+  const latestByAccount = new Map();
+  for (const sheetName of wb.SheetNames.filter(n => n.endsWith(' Balances'))) {
+    const institution = sheetName.replace(/ Balances$/, '');
+    const rows = utils.sheet_to_json(wb.Sheets[sheetName], { raw: false, cellDates: true, range: 1, defval: null });
+    for (const r of rows) {
+      if (!r['account_id']) continue;
+      const dateStr = normalizeDate(r['date']);
+      const existing = latestByAccount.get(r['account_id']);
+      if (!existing || dateStr > existing.date) {
+        latestByAccount.set(r['account_id'], { r, date: dateStr, institution });
+      }
+    }
+  }
+
+  const balances = Array.from(latestByAccount.values()).map(({ r, institution }) => {
+    const balance = parseFloat(r['balances_current']);
+    if (isNaN(balance)) return null;
+    const available = r['balances_available'] != null ? parseFloat(r['balances_available']) : null;
+    return {
+      account:     r['name'] || r['mask'] || 'Unknown',
+      institution,
+      type:        r['type'] || null,
+      balance,
+      available:   isNaN(available) ? null : available,
+    };
+  }).filter(Boolean);
+
+  return { transactions, balances, holdings: [], snapshotDate: today, isPlaidNative: true };
+}
+
 // Parses a dual-tab xlsx export (base64-encoded) and returns { transactions, balances, snapshotDate }.
+// Auto-detects Quadratic format (sheets ending in " Transactions"/" Balances") vs legacy format.
 // "Account Balances" sheet → balances; "Transactions" sheet → transactions with stable hash IDs.
 export function parseXlsxBase64(base64, snapshotDate) {
   const { read, utils } = xlsxLib;
   const wb = read(Buffer.from(base64, 'base64'), { type: 'buffer', cellDates: true });
+
+  // Detect Quadratic format
+  if (wb.SheetNames.some(n => / Transactions$| Balances$/.test(n))) {
+    return parseQuadraticXlsx(wb);
+  }
 
   const balancesWs = wb.Sheets['Account Balances'];
   const balances = balancesWs

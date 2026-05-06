@@ -29,7 +29,7 @@ import {
   getHiddenAccounts, addHiddenAccount, removeHiddenAccount,
   getMerchantOverrides, upsertMerchantOverride,
   parseCsvText, upsertCsvTransaction,
-  parseXlsxBase64,
+  parseXlsxBase64, upsertPlaidTransactions,
   upsertImportedTransaction, deleteImportedTransactions,
   upsertAccountBalances, getLatestBalances,
   upsertInvestmentHoldings, getLatestHoldings,
@@ -730,14 +730,19 @@ app.post("/api/import-xlsx", requireApiKeyOrAuth, async (req, res) => {
   try {
     const { xlsx, snapshot_date } = req.body;
     if (!xlsx || typeof xlsx !== "string") return res.status(400).json({ error: "xlsx base64 string required" });
-    const { transactions, balances, holdings, snapshotDate } = parseXlsxBase64(xlsx, snapshot_date);
+    const { transactions, balances, holdings, snapshotDate, isPlaidNative } = parseXlsxBase64(xlsx, snapshot_date);
     let imported = 0;
-    for (const row of transactions) {
-      if (await upsertCsvTransaction(row)) imported++;
+    if (isPlaidNative) {
+      await upsertPlaidTransactions(transactions);
+      imported = transactions.length;
+    } else {
+      for (const row of transactions) {
+        if (await upsertCsvTransaction(row)) imported++;
+      }
     }
     if (balances.length) await upsertAccountBalances(snapshotDate, balances);
     if (holdings.length) await upsertInvestmentHoldings(snapshotDate, holdings);
-    res.json({ imported, skipped: transactions.length - imported, balances: balances.length, holdings: holdings.length, snapshot_date: snapshotDate });
+    res.json({ imported, skipped: isPlaidNative ? 0 : transactions.length - imported, balances: balances.length, holdings: holdings.length, snapshot_date: snapshotDate });
   } catch (err) {
     console.error("XLSX import error:", err);
     res.status(500).json({ error: err.message });
@@ -1209,18 +1214,23 @@ function buildMcpServer() {
     return { content: [{ type: "text", text: msg }] };
   });
 
-  server.tool("import_xlsx", "Import transactions and account balances from a dual-tab Excel export. Pass the file content as a base64 string. Safe to re-run — transactions already in Plaid are skipped, and the balance snapshot for the given date is replaced.", {
-    xlsx: z.string().describe("Base64-encoded .xlsx file with an 'Account Balances' sheet and a 'Transactions' sheet"),
-    snapshot_date: z.string().optional().describe("YYYY-MM-DD date to tag the balance snapshot (defaults to today)"),
+  server.tool("import_xlsx", "Import transactions and account balances from an Excel export. Accepts both the legacy dual-tab format and Quadratic's multi-sheet Plaid export. Pass the file content as a base64 string. Safe to re-run.", {
+    xlsx: z.string().describe("Base64-encoded .xlsx file — either Quadratic's multi-sheet Plaid export or the legacy format with 'Account Balances' and 'Transactions' sheets"),
+    snapshot_date: z.string().optional().describe("YYYY-MM-DD date to tag the balance snapshot (defaults to today; ignored for Quadratic imports)"),
   }, async ({ xlsx, snapshot_date }) => {
-    const { transactions, balances, holdings, snapshotDate } = parseXlsxBase64(xlsx, snapshot_date);
+    const { transactions, balances, holdings, snapshotDate, isPlaidNative } = parseXlsxBase64(xlsx, snapshot_date);
     let imported = 0;
-    for (const row of transactions) {
-      if (await upsertCsvTransaction(row)) imported++;
+    if (isPlaidNative) {
+      await upsertPlaidTransactions(transactions);
+      imported = transactions.length;
+    } else {
+      for (const row of transactions) {
+        if (await upsertCsvTransaction(row)) imported++;
+      }
     }
     if (balances.length) await upsertAccountBalances(snapshotDate, balances);
     if (holdings.length) await upsertInvestmentHoldings(snapshotDate, holdings);
-    const skipped = transactions.length - imported;
+    const skipped = isPlaidNative ? 0 : transactions.length - imported;
     const parts = [`Imported ${imported} transaction${imported !== 1 ? 's' : ''}`];
     if (skipped) parts.push(`skipped ${skipped} already covered by Plaid`);
     if (balances.length) parts.push(`saved ${balances.length} account balances as of ${snapshotDate}`);
