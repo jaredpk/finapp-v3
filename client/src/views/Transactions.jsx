@@ -221,16 +221,29 @@ export default function Transactions({
     setSplitDraft([]);
   }
 
+  // Recalculate line 0 to be total - sum(lines 1+) so splits stay balanced.
+  function recalcLine0(draft) {
+    const t = transactions.find(tx => tx.transaction_id === splitExpanded);
+    if (!t || draft.length < 2) return draft;
+    const total = Math.abs(parseFloat(t.amount) || 0);
+    const otherSum = draft.slice(1).reduce((sum, s) => sum + (parseFloat(s.amount) || 0), 0);
+    const remainder = Math.max(0, parseFloat((total - otherSum).toFixed(2)));
+    return draft.map((row, i) => i === 0 ? { ...row, amount: remainder.toFixed(2) } : row);
+  }
+
   function updateSplitLine(idx, field, value) {
-    setSplitDraft(prev => prev.map((row, i) => i === idx ? { ...row, [field]: value } : row));
+    setSplitDraft(prev => {
+      const draft = prev.map((row, i) => i === idx ? { ...row, [field]: value } : row);
+      return (field === "amount" && idx > 0) ? recalcLine0(draft) : draft;
+    });
   }
 
   function addSplitLine() {
-    setSplitDraft(prev => [...prev, { category_id: "", amount: "", note: "" }]);
+    setSplitDraft(prev => recalcLine0([...prev, { category_id: "", amount: "", note: "" }]));
   }
 
   function removeSplitLine(idx) {
-    setSplitDraft(prev => prev.filter((_, i) => i !== idx));
+    setSplitDraft(prev => recalcLine0(prev.filter((_, i) => i !== idx)));
   }
 
   async function saveSplits(t) {
@@ -252,6 +265,7 @@ export default function Transactions({
       closeSplitEditor();
     } catch (err) {
       console.error("Save splits failed:", err);
+      alert(`Could not save splits: ${err.message}`);
     } finally {
       setSplitSaving(false);
     }

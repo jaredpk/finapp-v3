@@ -402,6 +402,7 @@ export async function replaceSplitsApi(transactionId, splits) {
     headers: await authHeaders(),
     body: JSON.stringify({ splits }),
   });
+  if (!r.ok) throw new Error(`Save splits failed: ${r.status}`);
   return r.json();
 }
 
