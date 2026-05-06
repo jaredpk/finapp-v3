@@ -5,6 +5,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { createHash, randomBytes } from "crypto";
 import { createClient } from "@supabase/supabase-js";
+import ws from "ws";
 import { Configuration, PlaidApi, PlaidEnvironments, Products, CountryCode } from "plaid";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -53,7 +54,8 @@ const ALLOWED_EMAIL = "jaredpk@gmail.com";
 // ── Supabase admin client (for JWT verification) ──────────────────────────────
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_KEY
+  process.env.SUPABASE_SERVICE_KEY,
+  { realtime: { transport: ws } }
 );
 
 const app = express();
