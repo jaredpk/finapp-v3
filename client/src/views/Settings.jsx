@@ -807,7 +807,7 @@ export default function Settings({ reloadData, user, accounts = [] }) {
       <section style={styles.card}>
         <h2 style={styles.cardTitle}>Import from Excel</h2>
         <p style={styles.description}>
-          Upload your <strong>.xlsx</strong> export with three tabs: <em>Account Balances</em>, <em>Investment Holdings</em>, and <em>Transactions</em>. Re-uploading is safe — transactions already in Plaid are skipped, and balance snapshots are replaced by date.
+          Upload a <strong>.xlsx</strong> export — either a <em>Quadratic</em> multi-sheet Plaid export or the legacy format with <em>Account Balances</em>, <em>Investment Holdings</em>, and <em>Transactions</em> tabs. Re-uploading is safe — existing transactions are updated in place and balance snapshots are replaced by date.
         </p>
         <input ref={xlsxFileRef} type="file" accept=".xlsx" style={{ display: "none" }} onChange={handleXlsxFileChange} />
         <button style={styles.generateBtn} onClick={() => xlsxFileRef.current?.click()}>Select Excel File</button>
