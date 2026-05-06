@@ -453,9 +453,14 @@ app.get("/api/accounts", requireAuth, async (req, res) => {
   // Group by account name first (distinguishes multiple accounts at same institution),
   // falling back to institution name.  Skip rows with neither.
   // Strip non-alphanumeric chars (e.g. "E*TRADE" → "etrade") so name variants match.
+  // Use prefix matching so "E-Trade" (→"etrade") covers "E*TRADE Financial" (→"etradefinancial").
   const normInst = (s) => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
   const isSummaryTicker = (t) => /total|count|change|\btoday\b|portfolio|holding/i.test(t || "");
   const coveredInstitutions = new Set(balRows.map((r) => normInst(r.institution)));
+  const isCoveredInst = (inst) => {
+    const n = normInst(inst);
+    return Array.from(coveredInstitutions).some((c) => n.startsWith(c) || c.startsWith(n));
+  };
   const holdingsByAcct = {};
   for (const h of holdingRows) {
     if (isSummaryTicker(h.ticker)) continue;
@@ -471,7 +476,7 @@ app.get("/api/accounts", requireAuth, async (req, res) => {
     holdingsByAcct[key].value += parseFloat(h.value) || 0;
   }
   const holdingAccounts = Object.values(holdingsByAcct)
-    .filter((g) => !coveredInstitutions.has(normInst(g.institution)))
+    .filter((g) => !isCoveredInst(g.institution))
     .map((g) => ({
       account_id: `holdings_${g.displayName}`,
       name: g.displayName,
