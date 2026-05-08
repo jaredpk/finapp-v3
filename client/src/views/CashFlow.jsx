@@ -37,7 +37,7 @@ const DEFAULT_ACCOUNTS = [
     name: "Amex Checking",
     defaultStart: 1712,
     transactions: [
-      { id: 1,  day: 1,  name: "Personal Jared",                  freq: "Monthly",    amount: -2637,   isTransfer: true                        },
+      { id: 1,  day: 1,  name: "Personal Jared",                  freq: "Monthly",    amount: -500,    isTransfer: true                        },
       { id: 2,  day: 5,  name: "Paycheck",                        freq: "Bi-Monthly", amount: 4009                                             },
       { id: 3,  day: 7,  name: "Jared Transfer to Shared",        freq: "Monthly",    amount: -1900,   isTransfer: true                        },
       { id: 4,  day: 10, name: "UESP",                            freq: "Monthly",    amount: -100                                             },
@@ -54,7 +54,6 @@ const DEFAULT_ACCOUNTS = [
       { id: 15, day: 30, name: "Paycheck (Month End)",            freq: "Monthly",    amount: 4009,                     defaultPending: true  },
       { id: 16, day: 1,  name: "Supplementary Transfer In",       freq: "As Needed",  amount: 0                                               },
       { id: 17, day: 1,  name: "Extra Transfer Out",              freq: "As Needed",  amount: 0                                               },
-      { id: 18, day: 1,  name: "Personal Expenses Transfer",      freq: "Monthly",    amount: -500,    isTransfer: true                        },
     ],
   },
   {
@@ -74,7 +73,7 @@ const DEFAULT_ACCOUNTS = [
     transactions: [
       { id: 1,  day: 1,  name: "Other Misc. Shared",       freq: "Bi-Monthly", amount: -500                       },
       { id: 2,  day: 1,  name: "House Payment",            freq: "Bi-Monthly", amount: -2017                      },
-      { id: 3,  day: 2,  name: "Personal Jared",           freq: "Monthly",    amount: 2637,   isTransfer: true   },
+      { id: 3,  day: 2,  name: "Personal Jared",           freq: "Monthly",    amount: 500,    isTransfer: true   },
       { id: 4,  day: 7,  name: "Jared Transfer In",        freq: "Monthly",    amount: 1900,   isTransfer: true   },
       { id: 5,  day: 12, name: "Alta Transfer",            freq: "Bi-Weekly",  amount: 1500                       },
       { id: 6,  day: 15, name: "Car Payment",              freq: "Monthly",    amount: -500                       },
@@ -85,7 +84,6 @@ const DEFAULT_ACCOUNTS = [
       { id: 11, day: 30, name: "Jared Transfer In",        freq: "Monthly",    amount: 1900,   isTransfer: true,  defaultPending: true },
       { id: 12, day: 30, name: "Alta Transfer",            freq: "Bi-Weekly",  amount: 1500,                      defaultPending: true },
       { id: 13, day: 1,  name: "Extra Transfer In",        freq: "As Needed",  amount: 0,      isTransfer: true   },
-      { id: 14, day: 1,  name: "Personal Expenses In",     freq: "Monthly",    amount: 500,    isTransfer: true   },
     ],
   },
 ];
@@ -108,7 +106,6 @@ const DEFAULT_FIXED = [
   { name: "Transfer for PTO Reserve",           amount: -320,    freq: "Monthly",    note: "" },
   { name: "Alta Transfer",                      amount: 1500,    freq: "Bi-Monthly", note: "" },
   { name: "Jared Transfer to Shared",           amount: -1900,   freq: "Monthly",    note: "" },
-  { name: "Personal Expenses Transfer",         amount: -500,    freq: "Monthly",    note: "" },
   { name: "Jared Transfer to Personal Macu",    amount: -629.84, freq: "Monthly",    note: "Ashton/Brooklyn" },
   { name: "House Payment",                      amount: -2017,   freq: "Monthly",    note: "" },
   { name: "Transfer to Joint Savings",          amount: -385,    freq: "Monthly",    note: "" },
@@ -137,8 +134,6 @@ const TRANSFER_MIRRORS = {
   "Jared Transfer In":         "Jared Transfer to Shared",
   "Extra Transfer Out":        "Extra Transfer In",
   "Extra Transfer In":         "Extra Transfer Out",
-  "Personal Expenses Transfer": "Personal Expenses In",
-  "Personal Expenses In":      "Personal Expenses Transfer",
 };
 
 // ── 3-paycheck month detection ────────────────────────────────────────────────
@@ -228,31 +223,27 @@ function matchImportedBalance(row, acctId) {
 }
 
 // ── Summary helper ────────────────────────────────────────────────────────────
-function computeSummary(accounts, presetsMap, isThreePaycheck) {
-  const allTxns = accounts.flatMap(a =>
-    a.transactions.filter(t => !t.defaultPending || isThreePaycheck)
-  );
-  const eff = t => presetsMap[t.name] ?? t.amount;
-  // Take-home = all non-transfer income (paychecks + Alta transfers)
-  const takeHome = allTxns
-    .filter(t => !t.isTransfer && eff(t) > 0)
-    .reduce((s, t) => s + eff(t), 0);
-  // Expenses = all non-transfer outflows
-  const expenses = allTxns
-    .filter(t => !t.isTransfer && eff(t) < 0)
-    .reduce((s, t) => s + eff(t), 0);
+function computeSummary(accounts, effectiveAmtFn, isThreePaycheck) {
+  let takeHome = 0, expenses = 0;
+  accounts.forEach(a => {
+    a.transactions.filter(t => !t.defaultPending || isThreePaycheck).forEach(t => {
+      const amt = effectiveAmtFn(t, a.id);
+      if (!t.isTransfer && amt > 0) takeHome += amt;
+      if (!t.isTransfer && amt < 0) expenses += amt;
+    });
+  });
   return { takeHome, expenses, freeCashflow: takeHome + expenses };
 }
 
 // ── Projected ending balance helper ──────────────────────────────────────────
-function computeProjectedEndBals(accounts, startBals, presetsMap, isThreePaycheck) {
+function computeProjectedEndBals(accounts, startBals, effectiveAmtFn, isThreePaycheck) {
   const result = {};
   accounts.forEach(acct => {
     const start = startBals[acct.id] ?? acct.defaultStart;
     const sorted = [...acct.transactions].sort((a, b) => a.day - b.day);
     const filtered = sorted.filter(t => !t.defaultPending || isThreePaycheck);
     let running = start;
-    filtered.forEach(t => { running += presetsMap[t.name] ?? t.amount; });
+    filtered.forEach(t => { running += effectiveAmtFn(t, acct.id); });
     result[acct.id] = running;
   });
   return result;
@@ -338,7 +329,10 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
     onReorder(account.id, newOrder);
     setDragOverId(null);
   };
-  const effectiveAmt = (t) => presetsMap[t.name] ?? t.amount;
+  const effectiveAmt = (t) => {
+    const key = `${account.id}_${t.id}`;
+    return monthStates[key]?.amount ?? presetsMap[t.name] ?? t.amount;
+  };
 
   let running = startingBalance;    // all items: full month projection
   let confirmed = startingBalance;  // N items only: projection from real bank balance
@@ -450,9 +444,10 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
             <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", paddingRight: 8, gap: 2 }}>
               <span style={{ fontSize: 12, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {t.name}
-                {presetsMap[t.name] !== undefined && (
-                  <span style={{ fontSize: 9, color: "var(--accent)", fontFamily: "var(--font-mono)", marginLeft: 5, opacity: 0.6 }}>preset</span>
-                )}
+                {monthStates[`${account.id}_${t.id}`]?.amount != null
+                  ? <span style={{ fontSize: 9, color: "var(--green)", fontFamily: "var(--font-mono)", marginLeft: 5, opacity: 0.7 }}>custom</span>
+                  : presetsMap[t.name] !== undefined && <span style={{ fontSize: 9, color: "var(--accent)", fontFamily: "var(--font-mono)", marginLeft: 5, opacity: 0.6 }}>preset</span>
+                }
               </span>
               {noteEditId === t.id ? (
                 <input
@@ -719,7 +714,7 @@ function AddModal({ accountName, onSave, onClose }) {
   );
 }
 
-function EditPresetModal({ presetName, currentAmount, onSave, onClose }) {
+function EditPresetModal({ presetName, currentAmount, onSave, onClose, subtitle }) {
   const [val, setVal] = useState(currentAmount != null ? String(currentAmount) : "");
 
   return (
@@ -727,7 +722,7 @@ function EditPresetModal({ presetName, currentAmount, onSave, onClose }) {
       <div style={styles.modal} onClick={e => e.stopPropagation()}>
         <p style={styles.modalTitle}>Edit: {presetName}</p>
         <p style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", marginBottom: 4 }}>
-          Positive = inflow · Negative = outflow · All rows with this name update.
+          {subtitle ?? "Positive = inflow · Negative = outflow · All rows with this name update."}
         </p>
         <label style={styles.fieldLabel}>Amount</label>
         <input
@@ -870,20 +865,24 @@ export default function CashFlow() {
     const result = [startingBals];
     let prev = startingBals;
     for (let i = 0; i < 2; i++) {
-      const { monthIdx, year } = months[i];
-      const endBals = computeProjectedEndBals(accounts, prev, presetsMap, isThreePaycheck(monthIdx, year));
+      const { monthIdx, year, monthKey } = months[i];
+      const monthStates = allMonthStates[monthKey] ?? {};
+      const effFn = (t, acctId) => monthStates[`${acctId}_${t.id}`]?.amount ?? presetsMap[t.name] ?? t.amount;
+      const endBals = computeProjectedEndBals(accounts, prev, effFn, isThreePaycheck(monthIdx, year));
       result.push(endBals);
       prev = endBals;
     }
     return result;
-  }, [months, startingBals, accounts, presetsMap, isThreePaycheck]);
+  }, [months, startingBals, accounts, presetsMap, isThreePaycheck, allMonthStates]);
 
   // Summary per month
   const summaries = useMemo(() => {
-    return months.map(({ monthIdx, year }, i) => {
-      return computeSummary(accounts, presetsMap, isThreePaycheck(monthIdx, year));
+    return months.map(({ monthIdx, year, monthKey }) => {
+      const monthStates = allMonthStates[monthKey] ?? {};
+      const effFn = (t, acctId) => monthStates[`${acctId}_${t.id}`]?.amount ?? presetsMap[t.name] ?? t.amount;
+      return computeSummary(accounts, effFn, isThreePaycheck(monthIdx, year));
     });
-  }, [months, accounts, presetsMap, isThreePaycheck]);
+  }, [months, accounts, presetsMap, isThreePaycheck, allMonthStates]);
 
   // Load all startup data sequentially so DB-saved balances are never overwritten by Plaid.
   // The race condition with separate effects: Plaid fires immediately with an empty userSetStartIds
@@ -1015,7 +1014,7 @@ export default function CashFlow() {
         if (!Array.isArray(rows)) return;
         const map = {};
         rows.forEach(r => {
-          map[`${r.account_id}_${r.txn_id}`] = { isPending: r.is_pending, plaidTxnId: r.plaid_txn_id, actualDay: r.actual_day ?? null, note: r.note ?? null };
+          map[`${r.account_id}_${r.txn_id}`] = { isPending: r.is_pending, plaidTxnId: r.plaid_txn_id, actualDay: r.actual_day ?? null, note: r.note ?? null, amount: r.actual_amount ?? null };
         });
         setAllMonthStates(prev => ({ ...prev, [monthKey]: map }));
       }).catch(() => {});
@@ -1110,16 +1109,14 @@ export default function CashFlow() {
     saveCashflowState(accountId, txnId, monthKey, existing.isPending ?? false, null, existing.plaidTxnId ?? null, existing.actualDay ?? null, trimmed).catch(() => {});
   }, [allMonthStates]);
 
-  const editAmount = useCallback((accountId, txnId, txnName) => {
-    const amt = presetsMap[txnName];
-    if (amt !== undefined) {
-      setModal({ type: "editPreset", name: txnName, amount: amt });
-    } else {
-      const acct = accounts.find(a => a.id === accountId);
-      const txn = acct?.transactions.find(t => t.id === txnId);
-      if (txn) setModal({ type: "editPreset", name: txn.name, amount: txn.amount });
-    }
-  }, [presetsMap, accounts]);
+  const editAmount = useCallback((monthKey, accountId, txnId, txnName) => {
+    const key = `${accountId}_${txnId}`;
+    const monthState = allMonthStates[monthKey]?.[key];
+    const acct = accounts.find(a => a.id === accountId);
+    const txn = acct?.transactions.find(t => t.id === txnId);
+    const amt = monthState?.amount ?? presetsMap[txnName] ?? txn?.amount;
+    setModal({ type: "editMonthAmount", monthKey, accountId, txnId, txnName, amount: amt });
+  }, [allMonthStates, presetsMap, accounts]);
 
   const savePreset = useCallback((name, amount, freq, note) => {
     const existing = presets.find(p => p.name === name);
@@ -1149,6 +1146,17 @@ export default function CashFlow() {
 
     setModal(null);
   }, [presets]);
+
+  const saveMonthAmount = useCallback((monthKey, accountId, txnId, amount) => {
+    const key = `${accountId}_${txnId}`;
+    const existing = allMonthStates[monthKey]?.[key] ?? {};
+    setAllMonthStates(prev => ({
+      ...prev,
+      [monthKey]: { ...(prev[monthKey] ?? {}), [key]: { ...existing, amount } },
+    }));
+    saveCashflowState(accountId, txnId, monthKey, existing.isPending ?? false, amount, existing.plaidTxnId ?? null, existing.actualDay ?? null, existing.note ?? null).catch(() => {});
+    setModal(null);
+  }, [allMonthStates]);
 
   const editStartingBalance = useCallback((accountId) => {
     setModal({ type: "editStart", accountId, amount: startingBals[accountId] });
@@ -1327,7 +1335,7 @@ export default function CashFlow() {
                     isThreePaycheckMonth={isThree}
                     onTogglePending={(aId, tId) => togglePending(monthKey, aId, tId)}
                     onEditNote={(aId, tId, note) => editNote(monthKey, aId, tId, note)}
-                    onEditAmount={editAmount}
+                    onEditAmount={(aId, tId, tName) => editAmount(monthKey, aId, tId, tName)}
                     onEditStart={() => editStartingBalance(acct.id)}
                     onAddRow={addRow}
                     onDeleteRow={deleteRow}
@@ -1369,6 +1377,15 @@ export default function CashFlow() {
           presetName={modal.name}
           currentAmount={modal.amount}
           onSave={(newAmt) => savePreset(modal.name, newAmt)}
+          onClose={() => setModal(null)}
+        />
+      )}
+      {modal?.type === "editMonthAmount" && (
+        <EditPresetModal
+          presetName={modal.txnName}
+          currentAmount={modal.amount}
+          subtitle="This month only · Positive = inflow · Negative = outflow"
+          onSave={(newAmt) => saveMonthAmount(modal.monthKey, modal.accountId, modal.txnId, newAmt)}
           onClose={() => setModal(null)}
         />
       )}
