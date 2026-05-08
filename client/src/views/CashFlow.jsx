@@ -281,7 +281,7 @@ function SummaryBar({ takeHome, expenses, freeCashflow }) {
   );
 }
 
-function AccountTable({ account, startingBalance, allowEditStart, presetsMap, monthStates, isThreePaycheckMonth, onTogglePending, onEditNote, onEditAmount, onEditStart, onAddRow, onDeleteRow, txnOrder, onReorder }) {
+function AccountTable({ account, startingBalance, allowEditStart, presetsMap, monthStates, monthAmounts, isThreePaycheckMonth, onTogglePending, onEditNote, onEditAmount, onEditStart, onAddRow, onDeleteRow, txnOrder, onReorder }) {
   const [dragOverId, setDragOverId] = useState(null);
   const [noteEditId, setNoteEditId] = useState(null);
   const [noteEditVal, setNoteEditVal] = useState("");
@@ -331,7 +331,7 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
   };
   const effectiveAmt = (t) => {
     const key = `${account.id}_${t.id}`;
-    return monthStates[key]?.amount ?? presetsMap[t.name] ?? t.amount;
+    return monthAmounts?.[key] ?? presetsMap[t.name] ?? t.amount;
   };
 
   let running = startingBalance;    // all items: full month projection
@@ -444,7 +444,7 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
             <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", paddingRight: 8, gap: 2 }}>
               <span style={{ fontSize: 12, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {t.name}
-                {monthStates[`${account.id}_${t.id}`]?.amount != null
+                {monthAmounts?.[`${account.id}_${t.id}`] != null
                   ? <span style={{ fontSize: 9, color: "var(--green)", fontFamily: "var(--font-mono)", marginLeft: 5, opacity: 0.7 }}>custom</span>
                   : presetsMap[t.name] !== undefined && <span style={{ fontSize: 9, color: "var(--accent)", fontFamily: "var(--font-mono)", marginLeft: 5, opacity: 0.6 }}>preset</span>
                 }
@@ -830,8 +830,11 @@ export default function CashFlow() {
   const [userSetStartIds, setUserSetStartIds] = useState(new Set());
   const [accounts, setAccounts] = useState(DEFAULT_ACCOUNTS);
   const [mappings, setMappings] = useState([]);
-  // allMonthStates: { [monthKey]: { [acctId_txnId]: { isPending, plaidTxnId } } }
+  // allMonthStates: { [monthKey]: { [acctId_txnId]: { isPending, plaidTxnId, actualDay, note } } }
   const [allMonthStates, setAllMonthStates] = useState({});
+  // allMonthAmounts: per-month user overrides — kept separate from actual_amount (which is reconciliation only)
+  // { [monthKey]: { [acctId_txnId]: number } }
+  const [allMonthAmounts, setAllMonthAmounts] = useState({});
   // allRecentTxns: { [monthKey]: txns[] }
   const [allRecentTxns, setAllRecentTxns] = useState({});
   const [txnOrders, setTxnOrders] = useState({});
@@ -866,23 +869,23 @@ export default function CashFlow() {
     let prev = startingBals;
     for (let i = 0; i < 2; i++) {
       const { monthIdx, year, monthKey } = months[i];
-      const monthStates = allMonthStates[monthKey] ?? {};
-      const effFn = (t, acctId) => monthStates[`${acctId}_${t.id}`]?.amount ?? presetsMap[t.name] ?? t.amount;
+      const mAmts = allMonthAmounts[monthKey] ?? {};
+      const effFn = (t, acctId) => mAmts[`${acctId}_${t.id}`] ?? presetsMap[t.name] ?? t.amount;
       const endBals = computeProjectedEndBals(accounts, prev, effFn, isThreePaycheck(monthIdx, year));
       result.push(endBals);
       prev = endBals;
     }
     return result;
-  }, [months, startingBals, accounts, presetsMap, isThreePaycheck, allMonthStates]);
+  }, [months, startingBals, accounts, presetsMap, isThreePaycheck, allMonthAmounts]);
 
   // Summary per month
   const summaries = useMemo(() => {
     return months.map(({ monthIdx, year, monthKey }) => {
-      const monthStates = allMonthStates[monthKey] ?? {};
-      const effFn = (t, acctId) => monthStates[`${acctId}_${t.id}`]?.amount ?? presetsMap[t.name] ?? t.amount;
+      const mAmts = allMonthAmounts[monthKey] ?? {};
+      const effFn = (t, acctId) => mAmts[`${acctId}_${t.id}`] ?? presetsMap[t.name] ?? t.amount;
       return computeSummary(accounts, effFn, isThreePaycheck(monthIdx, year));
     });
-  }, [months, accounts, presetsMap, isThreePaycheck, allMonthStates]);
+  }, [months, accounts, presetsMap, isThreePaycheck, allMonthAmounts]);
 
   // Load all startup data sequentially so DB-saved balances are never overwritten by Plaid.
   // The race condition with separate effects: Plaid fires immediately with an empty userSetStartIds
@@ -956,6 +959,18 @@ export default function CashFlow() {
             }
           });
           if (Object.keys(newCcMonthData).length > 0) setCcMonthData(newCcMonthData);
+
+          // Per-month amount overrides stored as __mamt_YYYY-MM_acctId_txnId
+          const newMonthAmts = {};
+          dbPresets.forEach(p => {
+            const m = p.name.match(/^__mamt_(\d{4}-\d{2})_([a-z]+)_(\d+)$/);
+            if (m) {
+              const [, mk, acctId, txnId] = m;
+              if (!newMonthAmts[mk]) newMonthAmts[mk] = {};
+              newMonthAmts[mk][`${acctId}_${txnId}`] = p.amount;
+            }
+          });
+          if (Object.keys(newMonthAmts).length > 0) setAllMonthAmounts(newMonthAmts);
         }
       } catch {}
 
@@ -1014,7 +1029,7 @@ export default function CashFlow() {
         if (!Array.isArray(rows)) return;
         const map = {};
         rows.forEach(r => {
-          map[`${r.account_id}_${r.txn_id}`] = { isPending: r.is_pending, plaidTxnId: r.plaid_txn_id, actualDay: r.actual_day ?? null, note: r.note ?? null, amount: r.actual_amount ?? null };
+          map[`${r.account_id}_${r.txn_id}`] = { isPending: r.is_pending, plaidTxnId: r.plaid_txn_id, actualDay: r.actual_day ?? null, note: r.note ?? null };
         });
         setAllMonthStates(prev => ({ ...prev, [monthKey]: map }));
       }).catch(() => {});
@@ -1111,12 +1126,11 @@ export default function CashFlow() {
 
   const editAmount = useCallback((monthKey, accountId, txnId, txnName) => {
     const key = `${accountId}_${txnId}`;
-    const monthState = allMonthStates[monthKey]?.[key];
     const acct = accounts.find(a => a.id === accountId);
     const txn = acct?.transactions.find(t => t.id === txnId);
-    const amt = monthState?.amount ?? presetsMap[txnName] ?? txn?.amount;
+    const amt = allMonthAmounts[monthKey]?.[key] ?? presetsMap[txnName] ?? txn?.amount;
     setModal({ type: "editMonthAmount", monthKey, accountId, txnId, txnName, amount: amt });
-  }, [allMonthStates, presetsMap, accounts]);
+  }, [allMonthAmounts, presetsMap, accounts]);
 
   const savePreset = useCallback((name, amount, freq, note) => {
     const existing = presets.find(p => p.name === name);
@@ -1149,14 +1163,13 @@ export default function CashFlow() {
 
   const saveMonthAmount = useCallback((monthKey, accountId, txnId, amount) => {
     const key = `${accountId}_${txnId}`;
-    const existing = allMonthStates[monthKey]?.[key] ?? {};
-    setAllMonthStates(prev => ({
+    setAllMonthAmounts(prev => ({
       ...prev,
-      [monthKey]: { ...(prev[monthKey] ?? {}), [key]: { ...existing, amount } },
+      [monthKey]: { ...(prev[monthKey] ?? {}), [key]: amount },
     }));
-    saveCashflowState(accountId, txnId, monthKey, existing.isPending ?? false, amount, existing.plaidTxnId ?? null, existing.actualDay ?? null, existing.note ?? null).catch(() => {});
+    saveCashflowPreset(`__mamt_${monthKey}_${accountId}_${txnId}`, amount, null, null).catch(() => {});
     setModal(null);
-  }, [allMonthStates]);
+  }, []);
 
   const editStartingBalance = useCallback((accountId) => {
     setModal({ type: "editStart", accountId, amount: startingBals[accountId] });
@@ -1332,6 +1345,7 @@ export default function CashFlow() {
                     allowEditStart={isFirstMonth}
                     presetsMap={presetsMap}
                     monthStates={monthStates}
+                    monthAmounts={allMonthAmounts[monthKey] ?? {}}
                     isThreePaycheckMonth={isThree}
                     onTogglePending={(aId, tId) => togglePending(monthKey, aId, tId)}
                     onEditNote={(aId, tId, note) => editNote(monthKey, aId, tId, note)}
