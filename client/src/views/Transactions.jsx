@@ -60,6 +60,7 @@ export default function Transactions({
   const [splitExpanded, setSplitExpanded] = useState(null);
   const [splitDraft, setSplitDraft]       = useState([]);
   const [splitSaving, setSplitSaving]     = useState(false);
+  const [detailExpanded, setDetailExpanded] = useState(null);
 
   const acctMap = useMemo(() => {
     const m = {};
@@ -199,6 +200,7 @@ export default function Transactions({
 
   // ── Split editor ─────────────────────────────────────────────────────────────
   function openSplitEditor(t) {
+    setDetailExpanded(null);
     const existing = splits?.[t.transaction_id] || [];
     if (existing.length > 0) {
       setSplitDraft(existing.map(s => ({
@@ -219,6 +221,12 @@ export default function Transactions({
   function closeSplitEditor() {
     setSplitExpanded(null);
     setSplitDraft([]);
+  }
+
+  function toggleDetail(txnId) {
+    setSplitExpanded(null);
+    setSplitDraft([]);
+    setDetailExpanded(prev => prev === txnId ? null : txnId);
   }
 
   // Recalculate line 0 to be total - sum(lines 1+) so splits stay balanced.
@@ -391,7 +399,8 @@ export default function Transactions({
             const unassigned = !assigned && !hasSplits;
             const isSaving   = saving[t.transaction_id];
             const isHidden   = t.hidden;
-            const isSplitOpen = splitExpanded === t.transaction_id;
+            const isSplitOpen  = splitExpanded === t.transaction_id;
+            const isDetailOpen = detailExpanded === t.transaction_id;
 
             return (
               <React.Fragment key={t.transaction_id}>
@@ -475,6 +484,13 @@ export default function Transactions({
                     ) : (
                       <>
                         <button
+                          style={{ ...styles.splitBtn, color: isDetailOpen ? "var(--accent)" : undefined }}
+                          onClick={() => toggleDetail(t.transaction_id)}
+                          title="Transaction details"
+                        >
+                          ⋯
+                        </button>
+                        <button
                           style={{ ...styles.splitBtn, color: isSplitOpen ? "var(--accent)" : undefined }}
                           onClick={() => isSplitOpen ? closeSplitEditor() : openSplitEditor(t)}
                           title={hasSplits ? "Edit splits" : "Split transaction"}
@@ -512,6 +528,9 @@ export default function Transactions({
                     onCancel={closeSplitEditor}
                   />
                 )}
+
+                {/* Detail panel */}
+                {isDetailOpen && <DetailPanel t={t} onClose={() => setDetailExpanded(null)} />}
               </React.Fragment>
             );
           })}
@@ -588,6 +607,41 @@ function SplitEditor({ t, splitDraft, categories, hasSplits, splitSaving, onUpda
             {splitSaving ? "Saving…" : "Save splits"}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function DetailPanel({ t, onClose }) {
+  const fields = [
+    ["Raw description",  t.original_description || t.name || "—"],
+    ["Plaid name",       t.name && t.name !== t.merchant_name ? t.name : null],
+    ["Authorized date",  t.authorized_date && t.authorized_date !== t.date ? t.authorized_date : null],
+    ["Payment channel",  t.payment_channel || null],
+    ["City / State",     [t.city, t.state].filter(Boolean).join(", ") || null],
+    ["Website",          t.website || null],
+    ["Plaid category",   t.primary_category || null],
+    ["Confidence",       t.category_confidence || null],
+    ["Transaction ID",   t.transaction_id],
+  ].filter(([, v]) => v != null);
+
+  return (
+    <div style={styles.detailPanel}>
+      <div style={styles.detailHeader}>
+        <span style={styles.detailTitle}>Details</span>
+        <button style={styles.detailClose} onClick={onClose}>×</button>
+      </div>
+      <div style={styles.detailGrid}>
+        {fields.map(([label, value]) => (
+          <React.Fragment key={label}>
+            <span style={styles.detailLabel}>{label}</span>
+            <span style={styles.detailValue}>
+              {label === "Website"
+                ? <a href={`https://${value}`} target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>{value}</a>
+                : value}
+            </span>
+          </React.Fragment>
+        ))}
       </div>
     </div>
   );
@@ -750,4 +804,24 @@ const styles = {
     borderRadius: 6, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer",
     fontFamily: "var(--font-mono)", opacity: 1,
   },
+
+  // Detail panel
+  detailPanel: {
+    padding: "14px 20px",
+    background: "var(--surface2)",
+    borderBottom: "1px solid var(--border)",
+    borderTop: "1px solid var(--border)",
+  },
+  detailHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 },
+  detailTitle: { fontSize: 11, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontFamily: "var(--font-mono)" },
+  detailClose: {
+    background: "none", border: "none", color: "var(--muted)", cursor: "pointer",
+    fontSize: 16, lineHeight: 1, padding: "2px 4px", borderRadius: 4, opacity: 0.5,
+  },
+  detailGrid: {
+    display: "grid", gridTemplateColumns: "140px 1fr",
+    gap: "5px 16px", alignItems: "start",
+  },
+  detailLabel: { fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", fontWeight: 600, paddingTop: 1 },
+  detailValue: { fontSize: 12, color: "var(--text)", fontFamily: "var(--font-mono)", wordBreak: "break-all" },
 };
