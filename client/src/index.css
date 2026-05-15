@@ -1,24 +1,24 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --bg:        #f8f9fa;
-  --surface:   #ffffff;
-  --surface2:  #f4f5f6;
-  --border:    #e0e0e0;
-  --border2:   #d0d0d0;
-  --text:      #1a1a1a;
-  --muted:     #999999;
-  --accent:    #6366f1;
-  --accent2:   #4f46e5;
-  --green:     #0f6e56;
-  --red:       #b91c1c;
-  --blue:      #3b82f6;
+  --bg:        #071833;
+  --surface:   #0d2144;
+  --surface2:  #112a55;
+  --border:    rgba(255,255,255,0.08);
+  --border2:   rgba(255,255,255,0.14);
+  --text:      #f7f8fb;
+  --muted:     #6c7383;
+  --accent:    #7b2cbf;
+  --accent2:   #6922a8;
+  --green:     #00a19a;
+  --red:       #dc2626;
+  --blue:      #3c6ff0;
 
-  --font-display: 'Syne', sans-serif;
+  --font-display: 'Inter', sans-serif;
   --font-mono:    'DM Mono', monospace;
 
-  --radius:  8px;
-  --radius2: 14px;
+  --radius:  7px;
+  --radius2: 12px;
 }
 
 html, body, #root {
@@ -27,6 +27,20 @@ html, body, #root {
   color: var(--text);
   font-family: var(--font-display);
   -webkit-font-smoothing: antialiased;
+}
+
+/* Elevrics-style radial purple glow behind the app */
+body::before {
+  content: '';
+  position: fixed;
+  top: -80px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 800px;
+  height: 400px;
+  background: radial-gradient(ellipse, rgba(123,44,191,0.12) 0%, transparent 70%);
+  pointer-events: none;
+  z-index: 0;
 }
 
 ::-webkit-scrollbar { width: 4px; height: 4px; }

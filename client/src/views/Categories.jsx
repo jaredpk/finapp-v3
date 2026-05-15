@@ -13,7 +13,7 @@ const PRESET_CATEGORIES = [
   { name: "Child Support",           color: "#ec4899" },
   { name: "Condo Rent",              color: "#14b8a6" },
   { name: "Credit Card Payment",     color: "#64748b" },
-  { name: "Education",               color: "#6366f1" },
+  { name: "Education",               color: "#7b2cbf" },
   { name: "Fees & Charges",          color: "#ef4444" },
   { name: "Gifts",                   color: "#ec4899" },
   { name: "Groceries",               color: "#22c55e" },
@@ -24,13 +24,13 @@ const PRESET_CATEGORIES = [
   { name: "Insurance",               color: "#f97316" },
   { name: "Insurance - Home",        color: "#f97316" },
   { name: "Insurance - Life",        color: "#f97316" },
-  { name: "Jared Savings",           color: "#6366f1" },
+  { name: "Jared Savings",           color: "#7b2cbf" },
   { name: "Shopping",               color: "#3b82f6" },
-  { name: "Subscriptions",          color: "#6366f1" },
+  { name: "Subscriptions",          color: "#7b2cbf" },
   { name: "Kids",                    color: "#ec4899" },
   { name: "Kids - Healthcare",       color: "#22c55e" },
-  { name: "Personal - Alta",         color: "#6366f1" },
-  { name: "Personal - Jared",        color: "#6366f1" },
+  { name: "Personal - Alta",         color: "#7b2cbf" },
+  { name: "Personal - Jared",        color: "#7b2cbf" },
   { name: "Personal Income",         color: "#22c55e" },
   { name: "Pets",                    color: "#f59e0b" },
   { name: "Rec and Vacation",        color: "#f59e0b" },
@@ -42,14 +42,14 @@ const PRESET_CATEGORIES = [
 ];
 
 const PRESET_COLORS = [
-  "#6366f1", "#22c55e", "#ef4444", "#f59e0b",
-  "#3b82f6", "#ec4899", "#14b8a6", "#f97316",
+  "#7b2cbf", "#00a19a", "#dc2626", "#f59e0b",
+  "#3c6ff0", "#ec4899", "#14b8a6", "#f97316",
   "#a855f7", "#64748b",
 ];
 
 export default function Categories({ categories, setCategories }) {
   const [newName, setNewName] = useState("");
-  const [newColor, setNewColor] = useState("#6366f1");
+  const [newColor, setNewColor] = useState("#7b2cbf");
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState(null); // { id, name, color }
   const [saving, setSaving] = useState(false);
