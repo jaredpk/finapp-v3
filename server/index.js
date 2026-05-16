@@ -89,9 +89,12 @@ const plaidClient = new PlaidApi(plaidConfig);
 // ── Sync transactions for a user ──────────────────────────────────────────────
 async function syncTransactions() {
   const items = await getUserItems();
-  for (const { accessToken, itemId } of items) {
+  const today = new Date().toISOString().slice(0, 10);
+  const allBalances = [];
+  for (const { accessToken, itemId, institutionName } of items) {
     let cursor = await getCursor(itemId);
     let hasMore = true;
+    let lastAccounts = [];
     while (hasMore) {
       const r = await plaidClient.transactionsSync({ access_token: accessToken, cursor });
 
@@ -109,11 +112,22 @@ async function syncTransactions() {
       await upsertTransactions(r.data.added || []);
       await upsertTransactions(r.data.modified || []);
 
+      if (r.data.accounts?.length) lastAccounts = r.data.accounts;
       cursor = r.data.next_cursor;
       hasMore = r.data.has_more;
     }
     await saveCursor(itemId, cursor);
+    for (const a of lastAccounts) {
+      allBalances.push({
+        account: a.name,
+        institution: institutionName,
+        type: a.subtype || a.type,
+        balance: a.balances.current,
+        available: a.balances.available ?? null,
+      });
+    }
   }
+  if (allBalances.length) await upsertAccountBalances(today, allBalances);
 }
 
 // ── FHFA property value drift ─────────────────────────────────────────────────
@@ -262,6 +276,7 @@ app.get("/link", async (req, res) => {
       products: [Products.Transactions, Products.Auth],
       country_codes: [CountryCode.Us],
       language: "en",
+      webhook: `${APP_URL}/api/webhooks/plaid`,
     });
     linkToken = r.data.link_token;
   } catch (err) {
@@ -342,6 +357,7 @@ app.post("/api/create_link_token", requireAuth, async (req, res) => {
       products: [Products.Transactions, Products.Auth],
       country_codes: [CountryCode.Us],
       language: "en",
+      webhook: `${APP_URL}/api/webhooks/plaid`,
     });
     res.json({ link_token: response.data.link_token });
   } catch (err) {
@@ -413,7 +429,7 @@ app.get("/api/accounts", requireAuth, async (req, res) => {
     try {
       const allAccounts = await Promise.all(
         items.map(async ({ accessToken, itemId, institutionName }) => {
-          const r = await plaidClient.accountsBalanceGet({ access_token: accessToken });
+          const r = await plaidClient.accountsGet({ access_token: accessToken });
           return r.data.accounts.map((a) => ({ ...a, institutionName, itemId }));
         })
       );
@@ -579,6 +595,15 @@ app.post("/api/sync", requireAuth, async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: "Sync failed" });
+  }
+});
+
+// ── Plaid webhooks ────────────────────────────────────────────────────────────
+app.post("/api/webhooks/plaid", async (req, res) => {
+  res.sendStatus(200);
+  const { webhook_type, webhook_code } = req.body || {};
+  if (webhook_type === "TRANSACTIONS" && webhook_code === "SYNC_UPDATES_AVAILABLE") {
+    syncTransactions().catch((e) => console.error("Webhook sync failed:", e.message));
   }
 });
 
@@ -1462,5 +1487,33 @@ initDb().then(async () => {
     if (updated > 0) console.log(`Startup: applied FHFA drift to ${updated} property value(s)`);
     results.filter((r) => !r.ok).forEach((r) => console.error(`Startup FHFA drift failed [${r.address}]: ${r.error}`));
   }).catch((e) => console.error("Startup FHFA drift failed (non-fatal):", e.message));
-  app.listen(PORT, () => console.log(`FinApp server running on :${PORT}`));
+  // Register webhook URL for all existing Items (non-blocking)
+  getUserItems().then(async (items) => {
+    const webhookUrl = `${APP_URL}/api/webhooks/plaid`;
+    for (const { accessToken } of items) {
+      try {
+        await plaidClient.itemWebhookUpdate({ access_token: accessToken, webhook: webhookUrl });
+      } catch (e) {
+        console.error("Webhook registration failed (non-fatal):", e.message);
+      }
+    }
+    if (items.length) console.log(`Registered webhook for ${items.length} item(s)`);
+  }).catch((e) => console.error("Startup webhook registration failed:", e.message));
+
+  app.listen(PORT, () => {
+    console.log(`FinApp server running on :${PORT}`);
+
+    // Daily 8 AM ET safety-net sync (only fires when machine is running)
+    (function scheduleDailySync() {
+      const now = new Date();
+      const next = new Date();
+      next.setUTCHours(13, 0, 0, 0); // ~8 AM EST
+      if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
+      setTimeout(async () => {
+        console.log("Running daily scheduled sync");
+        try { await syncTransactions(); } catch (e) { console.error("Scheduled sync failed:", e.message); }
+        scheduleDailySync();
+      }, next - now);
+    })();
+  });
 });
