@@ -43,6 +43,10 @@ export default function Sidebar({ active, setActive, onConnect, connecting, user
 
       <div style={styles.spacer} />
 
+      <button onClick={onConnect} disabled={connecting} style={styles.connectBtn}>
+        {connecting ? "Connecting…" : "+ Connect Bank"}
+      </button>
+
       <div style={styles.userRow}>
         <div style={styles.userInfo}>
           {avatarUrl && (
@@ -95,6 +99,20 @@ const styles = {
   activeDot: { position: "absolute", right: 10, width: 6, height: 6, borderRadius: "50%", background: "var(--accent)" },
   auditDot: { position: "absolute", right: 10, width: 7, height: 7, borderRadius: "50%", background: "var(--red, #ef4444)", border: "1.5px solid var(--surface)" },
   spacer: { flex: 1 },
+  connectBtn: {
+    width: "100%",
+    padding: "9px 12px",
+    marginBottom: 12,
+    background: "var(--accent)",
+    color: "#fff",
+    border: "none",
+    borderRadius: "var(--radius)",
+    fontSize: 13,
+    fontWeight: 600,
+    fontFamily: "var(--font-display)",
+    cursor: "pointer",
+    opacity: 1,
+  },
   userRow: {
     display: "flex",
     alignItems: "center",
