@@ -19,11 +19,11 @@ export function usePlaidConnect(onSuccess) {
 
   const { open, ready } = usePlaidLink({
     token: linkToken,
-    onSuccess: async (public_token, metadata) => {
-      await exchangePublicToken(public_token);
+    onSuccess: async (public_token) => {
+      const data = await exchangePublicToken(public_token);
       setLinkToken(null);
       setConnecting(false);
-      onSuccess?.();
+      onSuccess?.(data?.newAccounts || []);
     },
     onExit: () => {
       setLinkToken(null);

@@ -88,6 +88,9 @@ export default function Accounts({ accounts, hiddenAccounts, setHiddenAccounts }
                       <span style={{ ...styles.badge, background: TYPE_COLORS[a.type] || "var(--blue)" + "22", color: TYPE_COLORS[a.type] || "var(--blue)" }}>
                         {a.type}
                       </span>
+                      {a.source && a.source !== "plaid" && (
+                        <span style={styles.sourceBadge}>{a.source}</span>
+                      )}
                       <button
                         onClick={() => toggleHide(a)}
                         disabled={toggling[a.account_id]}
@@ -154,6 +157,11 @@ const styles = {
   bankName: { fontSize: 15, fontWeight: 600, color: "var(--text)", marginBottom: 3 },
   subtype: { fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-mono)" },
   badge: { fontSize: 10, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", padding: "3px 8px", borderRadius: 99, background: "rgba(240,180,41,0.12)", color: "var(--accent)" },
+  sourceBadge: {
+    fontSize: 9, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase",
+    padding: "3px 6px", borderRadius: 99, background: "var(--surface2)", color: "var(--muted)",
+    fontFamily: "var(--font-mono)",
+  },
   hideBtn: {
     background: "none", border: "none", cursor: "pointer", fontSize: 14, padding: "0 2px",
     opacity: 0.5, lineHeight: 1, flexShrink: 0,

@@ -388,7 +388,9 @@ app.post("/api/exchange_public_token", async (req, res) => {
     } catch (_) {}
     await upsertUserItem(access_token, item_id, institutionName);
     await syncTransactions();
-    res.json({ success: true });
+    const acctResp = await plaidClient.accountsGet({ access_token });
+    const newAccounts = acctResp.data.accounts.map((a) => ({ ...a, institutionName, itemId: item_id, source: "plaid" }));
+    res.json({ success: true, newAccounts });
   } catch (err) {
     console.error(err.response?.data || err.message);
     res.status(500).json({ error: "Failed to exchange token" });
@@ -420,123 +422,71 @@ function normalizePlaidType(rawType) {
 }
 
 app.get("/api/accounts", requireAuth, async (req, res) => {
-  const items = await getUserItems();
-  const nicknames = await getAccountNicknames();
+  const [items, nicknames, balRows, holdingRows, propRows, manualRows] = await Promise.all([
+    getUserItems(), getAccountNicknames(), getLatestBalances(), getLatestHoldings(),
+    getProperties(), getManualAccounts(),
+  ]);
   const applyNicknames = (accts) =>
     accts.map((a) => nicknames[a.account_id] ? { ...a, name: nicknames[a.account_id], official_name: a.official_name || a.name } : a);
 
+  // Plaid live accounts
+  let plaidAccounts = [];
   if (items.length > 0) {
     try {
-      const allAccounts = await Promise.all(
+      const all = await Promise.all(
         items.map(async ({ accessToken, itemId, institutionName }) => {
           const r = await plaidClient.accountsGet({ access_token: accessToken });
-          return r.data.accounts.map((a) => ({ ...a, institutionName, itemId }));
+          return r.data.accounts.map((a) => ({ ...a, institutionName, itemId, source: "plaid" }));
         })
       );
-      return res.json({ accounts: applyNicknames(allAccounts.flat()) });
+      plaidAccounts = all.flat();
     } catch (err) {
-      console.error("Plaid accounts error, falling back to balance snapshot:", err.message);
+      console.error("Plaid accountsGet error:", err.message);
     }
   }
 
-  // Fall back to latest imported balance snapshot
-  const [balRows, holdingRows] = await Promise.all([getLatestBalances(), getLatestHoldings()]);
-  if (!balRows.length && !holdingRows.length) return res.json({ accounts: [] });
-
+  // Imported balance snapshot accounts
   const balKeySeen = {};
-  const accounts = balRows.map((r) => {
+  const importedAccounts = balRows.map((r) => {
     const type = normalizePlaidType(r.type);
     const isLiability = type === "credit" || type === "loan";
-    // Imported balances store liabilities as negative; normalize to Plaid convention
-    // (positive = amount owed) so the Dashboard net worth formula works consistently.
     const current = isLiability ? Math.abs(parseFloat(r.balance)) : parseFloat(r.balance);
     const available = r.available != null ? Math.abs(parseFloat(r.available)) : null;
     const baseKey = `balance_${r.institution || ""}_${r.account}_${r.type || ""}`;
     const count = (balKeySeen[baseKey] = (balKeySeen[baseKey] || 0) + 1);
     const account_id = count === 1 ? baseKey : `${baseKey}_${count}`;
-    return {
-      account_id,
-      name: r.account,
-      official_name: r.account,
-      type,
-      subtype: r.type || type,
-      balances: { current, available },
-      institutionName: r.institution,
-      mask: null,
-    };
+    return { account_id, name: r.account, official_name: r.account, type, subtype: r.type || type, balances: { current, available }, institutionName: r.institution, mask: null, source: "imported" };
   });
 
-  // Roll up investment holdings into synthetic investment accounts for any
-  // institution not already covered by account_balances (e.g. eTrade).
-  // Group by account name first (distinguishes multiple accounts at same institution),
-  // falling back to institution name.  Skip rows with neither.
-  // Strip non-alphanumeric chars (e.g. "E*TRADE" → "etrade") so name variants match.
-  // Use prefix matching so "E-Trade" (→"etrade") covers "E*TRADE Financial" (→"etradefinancial").
+  // Investment holdings (skip institutions already in balance rows)
   const normInst = (s) => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
   const isSummaryTicker = (t) => /total|count|change|\btoday\b|portfolio|holding/i.test(t || "");
-  const coveredInstitutions = new Set(balRows.map((r) => normInst(r.institution)));
-  const isCoveredInst = (inst) => {
-    const n = normInst(inst);
-    return Array.from(coveredInstitutions).some((c) => n.startsWith(c) || c.startsWith(n));
-  };
+  const balInstitutions = new Set(balRows.map((r) => normInst(r.institution)));
+  const isCoveredInst = (inst) => { const n = normInst(inst); return Array.from(balInstitutions).some((c) => n.startsWith(c) || c.startsWith(n)); };
   const holdingsByAcct = {};
   for (const h of holdingRows) {
     if (isSummaryTicker(h.ticker)) continue;
     const key = h.account || h.institution;
     if (!key) continue;
-    if (!holdingsByAcct[key]) {
-      holdingsByAcct[key] = {
-        displayName: h.account || h.institution,
-        institution: h.institution || h.account,
-        value: 0,
-      };
-    }
+    if (!holdingsByAcct[key]) holdingsByAcct[key] = { displayName: h.account || h.institution, institution: h.institution || h.account, value: 0 };
     holdingsByAcct[key].value += parseFloat(h.value) || 0;
   }
   const holdingAccounts = Object.values(holdingsByAcct)
     .filter((g) => !isCoveredInst(g.institution))
-    .map((g) => ({
-      account_id: `holdings_${g.displayName}`,
-      name: g.displayName,
-      official_name: g.displayName,
-      type: "investment",
-      subtype: "brokerage",
-      balances: { current: g.value, available: null },
-      institutionName: g.institution,
-      mask: null,
-    }));
+    .map((g) => ({ account_id: `holdings_${g.displayName}`, name: g.displayName, official_name: g.displayName, type: "investment", subtype: "brokerage", balances: { current: g.value, available: null }, institutionName: g.institution, mask: null, source: "imported" }));
 
-  // Add properties with known values as real-estate assets
-  const propRows = await getProperties();
+  // Properties
   const propertyAccounts = propRows
     .filter((p) => p.last_value != null)
-    .map((p) => ({
-      account_id: `property_${p.id}`,
-      name: p.nickname || p.address,
-      official_name: p.address,
-      type: "other",
-      subtype: "real estate",
-      balances: { current: parseFloat(p.last_value), available: null },
-      institutionName: "FHFA Estimate",
-      mask: null,
-    }));
+    .map((p) => ({ account_id: `property_${p.id}`, name: p.nickname || p.address, official_name: p.address, type: "other", subtype: "real estate", balances: { current: parseFloat(p.last_value), available: null }, institutionName: "FHFA Estimate", mask: null, source: "property" }));
 
-  // Add manually-entered accounts (e.g. Paychex Flex retirement)
-  const manualRows = await getManualAccounts();
-  const manualAccounts = manualRows.map((m) => ({
-    account_id: `manual_${m.id}`,
-    name: m.name,
-    official_name: m.name,
-    type: "investment",
-    subtype: m.subtype || "retirement",
-    balances: { current: parseFloat(m.balance), available: null },
-    institutionName: m.institution || "Manual",
-    mask: null,
-  }));
+  // Manual accounts
+  const manualAccounts = manualRows.map((m) => ({ account_id: `manual_${m.id}`, name: m.name, official_name: m.name, type: "investment", subtype: m.subtype || "retirement", balances: { current: parseFloat(m.balance), available: null }, institutionName: m.institution || "Manual", mask: null, source: "manual" }));
 
+  const snapshotDate = balRows[0]?.snapshot_date || holdingRows[0]?.snapshot_date;
   res.json({
-    accounts: applyNicknames([...accounts, ...holdingAccounts, ...propertyAccounts, ...manualAccounts]),
-    snapshotDate: balRows[0]?.snapshot_date || holdingRows[0]?.snapshot_date,
+    accounts: applyNicknames([...plaidAccounts, ...importedAccounts, ...holdingAccounts, ...propertyAccounts, ...manualAccounts]),
+    ...(snapshotDate ? { snapshotDate } : {}),
   });
 });
 
@@ -1164,7 +1114,7 @@ function buildMcpServer() {
     const items = await getUserItems();
     if (!items.length) return { content: [{ type: "text", text: "No banks linked yet." }] };
     const accounts = (await Promise.all(items.map(async ({ accessToken, institutionName }) => {
-      const r = await plaidClient.accountsBalanceGet({ access_token: accessToken });
+      const r = await plaidClient.accountsGet({ access_token: accessToken });
       return r.data.accounts.map(a => ({ institution: institutionName, name: a.name, type: a.subtype, balance: a.balances.current, available: a.balances.available }));
     }))).flat();
     return { content: [{ type: "text", text: JSON.stringify(accounts, null, 2) }] };

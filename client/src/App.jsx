@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import Sidebar from "./components/Sidebar.jsx";
+import AccountReviewModal from "./components/AccountReviewModal.jsx";
 import Dashboard from "./views/Dashboard.jsx";
 import Accounts from "./views/Accounts.jsx";
 import Transactions from "./views/Transactions.jsx";
@@ -11,7 +12,7 @@ import { usePlaidConnect } from "./hooks/usePlaid.js";
 import {
   fetchAccounts, fetchTransactions, setTokenGetter,
   fetchCategories, fetchAssignments, fetchMerchantOverrides,
-  fetchSplits, fetchHiddenAccounts,
+  fetchSplits, fetchHiddenAccounts, addHiddenAccountApi,
   getLastAudit,
 } from "./api.js";
 
@@ -156,7 +157,23 @@ function AuthenticatedApp({ supabase, session }) {
     }
   }, []);
 
-  const { openPlaid, connecting } = usePlaidConnect(loadData);
+  const [reviewAccounts, setReviewAccounts] = useState(null);
+
+  function handleNewAccounts(newAccounts) {
+    if (newAccounts.length > 0) {
+      setReviewAccounts(newAccounts);
+    } else {
+      loadData();
+    }
+  }
+
+  async function handleReviewConfirm(replacements) {
+    await Promise.all(Object.values(replacements).map((id) => addHiddenAccountApi(id)));
+    setReviewAccounts(null);
+    loadData();
+  }
+
+  const { openPlaid, connecting } = usePlaidConnect(handleNewAccounts);
 
   useEffect(() => {
     loadData();
@@ -192,6 +209,14 @@ function AuthenticatedApp({ supabase, session }) {
 
   return (
     <div style={styles.app}>
+      {reviewAccounts && (
+        <AccountReviewModal
+          newAccounts={reviewAccounts}
+          existingAccounts={accounts.filter((a) => a.source !== "plaid")}
+          onConfirm={handleReviewConfirm}
+          onClose={() => { setReviewAccounts(null); loadData(); }}
+        />
+      )}
       <Sidebar
         active={view}
         setActive={setView}
