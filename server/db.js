@@ -142,6 +142,24 @@ export async function initDb() {
     ALTER TABLE properties ADD COLUMN IF NOT EXISTS fhfa_msa INTEGER;
   `);
 
+  // Vehicles (KBB-seeded, depreciation-drifted)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS vehicles (
+      id SERIAL PRIMARY KEY,
+      year INT,
+      make TEXT NOT NULL,
+      model TEXT NOT NULL,
+      trim TEXT,
+      nickname TEXT,
+      baseline_value NUMERIC(14,2),
+      baseline_date DATE,
+      last_value NUMERIC(14,2),
+      last_synced_at TIMESTAMPTZ,
+      depreciation_rate NUMERIC(5,4) DEFAULT 0.15,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+
   // Add account column to investment_holdings to distinguish multiple accounts per institution
   await pool.query(`
     ALTER TABLE investment_holdings ADD COLUMN IF NOT EXISTS account TEXT;
@@ -1210,9 +1228,9 @@ export async function deduplicateTransactions(selectedGroups) {
   for (const dupe of dupes) {
     for (const removeId of dupe.remove) {
       await pool.query(`
-        INSERT INTO assignments (transaction_id, category_id)
-        SELECT $2, category_id FROM assignments WHERE transaction_id = $1
-        ON CONFLICT (transaction_id) DO NOTHING
+        INSERT INTO assignments (transaction_id, category_id, updated_at)
+        SELECT $2, category_id, NOW() FROM assignments WHERE transaction_id = $1
+        ON CONFLICT (transaction_id) DO UPDATE SET category_id = EXCLUDED.category_id, updated_at = NOW()
       `, [removeId, dupe.keep]);
       await pool.query(`
         INSERT INTO merchant_overrides (transaction_id, merchant_name)
@@ -1683,6 +1701,76 @@ export function parseAuditXlsx(base64) {
   }
 
   return { transactions, dateRange: { start: minDate, end: maxDate }, sheetStats };
+}
+
+// ── Vehicles ──────────────────────────────────────────────────────────────────
+export async function getVehicles() {
+  const { rows } = await pool.query(
+    `SELECT id, year, make, model, trim, nickname,
+            baseline_value::float, baseline_date, last_value::float,
+            last_synced_at, depreciation_rate::float, created_at
+     FROM vehicles ORDER BY created_at`
+  );
+  return rows;
+}
+
+export async function upsertVehicle(id, year, make, model, trim, nickname) {
+  if (id) {
+    const { rows } = await pool.query(
+      `UPDATE vehicles SET year=$1, make=$2, model=$3, trim=$4, nickname=$5
+       WHERE id=$6 RETURNING *`,
+      [year || null, make, model, trim || null, nickname || null, id]
+    );
+    return rows[0] || null;
+  }
+  const { rows } = await pool.query(
+    `INSERT INTO vehicles (year, make, model, trim, nickname)
+     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+    [year || null, make, model, trim || null, nickname || null]
+  );
+  return rows[0];
+}
+
+export async function deleteVehicle(id) {
+  const { rowCount } = await pool.query(`DELETE FROM vehicles WHERE id=$1`, [id]);
+  return rowCount > 0;
+}
+
+export async function setVehicleBaseline(id, value, rate) {
+  const today = new Date().toISOString().slice(0, 10);
+  await pool.query(
+    `UPDATE vehicles
+     SET baseline_value=$1, baseline_date=$2, depreciation_rate=$3,
+         last_value=$1, last_synced_at=NOW()
+     WHERE id=$4`,
+    [value, today, rate, id]
+  );
+}
+
+export async function updateVehicleValue(id, value) {
+  await pool.query(
+    `UPDATE vehicles SET last_value=$1, last_synced_at=NOW() WHERE id=$2`,
+    [value, id]
+  );
+}
+
+export async function applyVehicleDepreciation() {
+  const vehicles = await getVehicles();
+  const toUpdate = vehicles.filter(
+    (v) => v.baseline_value != null && v.baseline_date != null
+  );
+  let updated = 0;
+  const results = [];
+  const msPerYear = 365.25 * 24 * 3600 * 1000;
+  for (const v of toUpdate) {
+    const yearsElapsed = (Date.now() - new Date(v.baseline_date + 'T12:00:00Z').getTime()) / msPerYear;
+    const rate = v.depreciation_rate ?? 0.15;
+    const newValue = Math.max(0, Math.round(v.baseline_value * Math.pow(1 - rate, yearsElapsed)));
+    await updateVehicleValue(v.id, newValue);
+    updated++;
+    results.push({ id: v.id, name: `${v.year || ''} ${v.make} ${v.model}`.trim(), value: newValue });
+  }
+  return { updated, results };
 }
 
 export default pool;

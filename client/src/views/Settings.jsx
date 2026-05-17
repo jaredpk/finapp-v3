@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { getApiKey, generateApiKey, importXlsx, importMacuCsv, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi, setPropertyBaselineApi, fetchManualAccounts, saveManualAccount, deleteManualAccountApi, downloadXlsx, saveAccountNickname, deleteAccountNicknameApi, getLastAudit, uploadAuditSheet, insertAuditTransactions, completeAudit } from "../api.js";
+import { getApiKey, generateApiKey, importXlsx, importMacuCsv, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi, setPropertyBaselineApi, fetchManualAccounts, saveManualAccount, deleteManualAccountApi, downloadXlsx, saveAccountNickname, deleteAccountNicknameApi, getLastAudit, uploadAuditSheet, insertAuditTransactions, completeAudit, clearImportedTransactions, fetchVehicles, saveVehicle, deleteVehicleApi, setVehicleBaselineApi, syncVehiclesApi } from "../api.js";
 
 export default function Settings({ reloadData, user, accounts = [] }) {
   const [apiKey, setApiKey] = useState(null);
@@ -43,6 +43,19 @@ export default function Settings({ reloadData, user, accounts = [] }) {
   const [acctResult, setAcctResult]           = useState(null);
   const [editingAcct, setEditingAcct]         = useState(null); // { id, balance }
 
+  // Vehicles state
+  const [vehicles, setVehicles]           = useState([]);
+  const [vehiclesLoading, setVehiclesLoading] = useState(true);
+  const [newVehYear, setNewVehYear]       = useState("");
+  const [newVehMake, setNewVehMake]       = useState("");
+  const [newVehModel, setNewVehModel]     = useState("");
+  const [newVehTrim, setNewVehTrim]       = useState("");
+  const [newVehNick, setNewVehNick]       = useState("");
+  const [addingVeh, setAddingVeh]         = useState(false);
+  const [vehResult, setVehResult]         = useState(null);
+  const [syncingVeh, setSyncingVeh]       = useState(false);
+  const [editingVehicle, setEditingVehicle] = useState(null); // { id, value, rate }
+
   // Export state
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState(null);
@@ -63,6 +76,11 @@ export default function Settings({ reloadData, user, accounts = [] }) {
   const [auditCompleting, setAuditCompleting] = useState(false);
   const [lastAudit, setLastAudit]         = useState(null);
 
+  // Clear imported transactions state
+  const [clearing, setClearing]         = useState(false);
+  const [clearResult, setClearResult]   = useState(null);
+  const [clearConfirm, setClearConfirm] = useState(false);
+
   // Dedup state
   const [deduping, setDeduping]         = useState(false);
   const [dupePreview, setDupePreview]   = useState(null);
@@ -76,6 +94,7 @@ export default function Settings({ reloadData, user, accounts = [] }) {
     getApiKey().then((data) => { setApiKey(data.key || null); setLoading(false); });
     fetchProperties().then((data) => { setProperties(data.properties || []); setPropsLoading(false); });
     fetchManualAccounts().then((data) => { setManualAccounts(data.accounts || []); setManualLoading(false); });
+    fetchVehicles().then((data) => { setVehicles(data.vehicles || []); setVehiclesLoading(false); });
     getLastAudit().then(({ log }) => setLastAudit(log || null)).catch(() => {});
   }, []);
 
@@ -266,6 +285,69 @@ export default function Settings({ reloadData, user, accounts = [] }) {
       if (reloadData) reloadData();
     } finally {
       setSavingBaseline(false);
+    }
+  }
+
+  // ── Vehicles ──────────────────────────────────────────────────────────────────
+  async function handleAddVehicle() {
+    if (!newVehMake.trim() || !newVehModel.trim()) return;
+    setAddingVeh(true);
+    setVehResult(null);
+    try {
+      const res = await saveVehicle(null, newVehYear ? parseInt(newVehYear) : null, newVehMake.trim(), newVehModel.trim(), newVehTrim.trim(), newVehNick.trim());
+      if (res.error) { setVehResult(`Error: ${res.error}`); return; }
+      setVehicles((prev) => [...prev, res.vehicle]);
+      setNewVehYear(""); setNewVehMake(""); setNewVehModel(""); setNewVehTrim(""); setNewVehNick("");
+      if (reloadData) reloadData();
+    } finally { setAddingVeh(false); }
+  }
+
+  async function handleDeleteVehicle(id) {
+    await deleteVehicleApi(id);
+    setVehicles((prev) => prev.filter((v) => v.id !== id));
+    if (reloadData) reloadData();
+  }
+
+  async function handleSetVehicleBaseline(id) {
+    if (!editingVehicle || editingVehicle.id !== id) return;
+    const { value, rate } = editingVehicle;
+    if (!value) return;
+    setSyncingVeh(true);
+    setVehResult(null);
+    try {
+      const res = await setVehicleBaselineApi(id, parseFloat(value), rate ? parseFloat(rate) : 0.15);
+      if (res.error) { setVehResult(`Error: ${res.error}`); return; }
+      setVehicles((prev) => prev.map((v) => (v.id === id ? res.vehicle : v)));
+      setEditingVehicle(null);
+      if (reloadData) reloadData();
+    } finally { setSyncingVeh(false); }
+  }
+
+  async function handleSyncVehicles() {
+    setSyncingVeh(true);
+    setVehResult(null);
+    try {
+      const res = await syncVehiclesApi();
+      const updated = await fetchVehicles();
+      setVehicles(updated.vehicles || []);
+      setVehResult(`Refreshed ${res.synced} vehicle value${res.synced !== 1 ? "s" : ""}.`);
+      if (reloadData) reloadData();
+    } finally { setSyncingVeh(false); }
+  }
+
+  // ── Clear imported transactions ───────────────────────────────────────────────
+  async function handleClearImported() {
+    setClearing(true);
+    setClearResult(null);
+    setClearConfirm(false);
+    try {
+      const res = await clearImportedTransactions();
+      setClearResult(`Deleted ${res.deleted} imported transaction${res.deleted !== 1 ? "s" : ""}. Plaid data and house values untouched.`);
+      if (reloadData) reloadData();
+    } catch (err) {
+      setClearResult(`Error: ${err.message}`);
+    } finally {
+      setClearing(false);
     }
   }
 
@@ -749,6 +831,115 @@ export default function Settings({ reloadData, user, accounts = [] }) {
         )}
       </section>
 
+      {/* Vehicles */}
+      <section style={styles.card}>
+        <h2 style={styles.cardTitle}>Vehicles</h2>
+        <p style={styles.description}>
+          Enter a KBB Private Party estimate to seed the value. Between updates, the value drifts automatically using a standard depreciation rate (default 15%/yr).
+        </p>
+        {vehiclesLoading ? (
+          <p style={styles.muted}>Loading…</p>
+        ) : (
+          <>
+            {vehicles.length > 0 && (
+              <div style={{ marginBottom: 16 }}>
+                {vehicles.map((v) => {
+                  const label = [v.year, v.make, v.model, v.trim].filter(Boolean).join(" ");
+                  return (
+                    <div key={v.id} style={{ ...styles.propRow, flexDirection: "column", alignItems: "flex-start" }}>
+                      <div style={{ display: "flex", width: "100%", alignItems: "flex-start", gap: 12 }}>
+                        <div style={{ flex: 1 }}>
+                          <p style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", margin: 0 }}>
+                            {v.nickname || label}
+                          </p>
+                          {v.nickname && <p style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", margin: "2px 0 0" }}>{label}</p>}
+                          <p style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", margin: "2px 0 0" }}>
+                            {v.last_value != null
+                              ? `$${parseFloat(v.last_value).toLocaleString("en-US", { maximumFractionDigits: 0 })} · updated ${v.last_synced_at ? new Date(v.last_synced_at).toLocaleDateString() : "never"}`
+                              : "No value — click Update KBB Value"}
+                          </p>
+                          {v.baseline_value != null && (
+                            <p style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", margin: "2px 0 0" }}>
+                              {`KBB baseline: $${parseFloat(v.baseline_value).toLocaleString("en-US", { maximumFractionDigits: 0 })} · ${v.baseline_date ? new Date(v.baseline_date + 'T12:00:00').toLocaleDateString() : ""} · ${Math.round((v.depreciation_rate ?? 0.15) * 100)}%/yr`}
+                            </p>
+                          )}
+                        </div>
+                        <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+                          {editingVehicle?.id !== v.id && (
+                            <button style={styles.regenerateBtn} onClick={() => setEditingVehicle({ id: v.id, value: "", rate: String(Math.round((v.depreciation_rate ?? 0.15) * 100)) })}>
+                              Update KBB Value
+                            </button>
+                          )}
+                          <button style={styles.deleteBtn} onClick={() => handleDeleteVehicle(v.id)}>Remove</button>
+                        </div>
+                      </div>
+                      {editingVehicle?.id === v.id && (
+                        <div style={{ marginTop: 10, width: "100%" }}>
+                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                            <input
+                              style={{ ...styles.propInput, width: 190 }}
+                              type="number"
+                              placeholder="KBB Private Party value"
+                              value={editingVehicle.value}
+                              onChange={(e) => setEditingVehicle((p) => ({ ...p, value: e.target.value }))}
+                            />
+                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              <input
+                                style={{ ...styles.propInput, width: 70 }}
+                                type="number"
+                                placeholder="15"
+                                min="0"
+                                max="50"
+                                step="1"
+                                value={editingVehicle.rate}
+                                onChange={(e) => setEditingVehicle((p) => ({ ...p, rate: e.target.value }))}
+                              />
+                              <span style={{ fontSize: 12, color: "var(--muted)" }}>%/yr depreciation</span>
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                            <button
+                              style={styles.generateBtn}
+                              onClick={() => handleSetVehicleBaseline(v.id)}
+                              disabled={syncingVeh || !editingVehicle.value}
+                            >
+                              {syncingVeh ? "Saving…" : "Save"}
+                            </button>
+                            <button style={styles.regenerateBtn} onClick={() => setEditingVehicle(null)}>Cancel</button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            <div style={styles.propForm}>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <input style={{ ...styles.propInput, width: 70 }} placeholder="Year" type="number" value={newVehYear} onChange={(e) => setNewVehYear(e.target.value)} />
+                <input style={{ ...styles.propInput, flex: 1, minWidth: 100 }} placeholder="Make (e.g. Toyota)" value={newVehMake} onChange={(e) => setNewVehMake(e.target.value)} />
+                <input style={{ ...styles.propInput, flex: 1, minWidth: 100 }} placeholder="Model (e.g. Camry)" value={newVehModel} onChange={(e) => setNewVehModel(e.target.value)} />
+              </div>
+              <input style={{ ...styles.propInput, marginTop: 8 }} placeholder="Trim (optional, e.g. XSE V6)" value={newVehTrim} onChange={(e) => setNewVehTrim(e.target.value)} />
+              <input style={{ ...styles.propInput, marginTop: 8 }} placeholder="Nickname (optional, e.g. Jared's Car)" value={newVehNick} onChange={(e) => setNewVehNick(e.target.value)} />
+              <button style={{ ...styles.generateBtn, marginTop: 10 }} onClick={handleAddVehicle} disabled={addingVeh || !newVehMake.trim() || !newVehModel.trim()}>
+                {addingVeh ? "Adding…" : "Add Vehicle"}
+              </button>
+            </div>
+            {vehicles.length > 0 && (
+              <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--border)" }}>
+                <button style={styles.regenerateBtn} onClick={handleSyncVehicles} disabled={syncingVeh}>
+                  {syncingVeh ? "Refreshing…" : "Refresh Depreciation"}
+                </button>
+              </div>
+            )}
+            {vehResult && (
+              <p style={vehResult.startsWith("Error") ? styles.importError : styles.importSuccess}>{vehResult}</p>
+            )}
+          </>
+        )}
+      </section>
+
       {/* Account Nicknames */}
       {accounts.length > 0 && (
         <section style={styles.card}>
@@ -906,6 +1097,30 @@ export default function Settings({ reloadData, user, accounts = [] }) {
           </div>
         </section>
       )}
+
+      {/* Clear imported transactions */}
+      <section style={styles.card}>
+        <h2 style={styles.cardTitle}>Clear Imported Transactions</h2>
+        <p style={styles.description}>
+          Removes all CSV-imported and Simplifi-imported transactions. Plaid-synced transactions, house values, account balances, and investment holdings are <strong>not</strong> affected.
+        </p>
+        {clearConfirm ? (
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <span style={{ fontSize: 13, color: "var(--muted)" }}>Delete all imported transactions?</span>
+            <button style={styles.generateBtn} onClick={handleClearImported} disabled={clearing}>
+              {clearing ? "Deleting…" : "Yes, delete"}
+            </button>
+            <button style={styles.regenerateBtn} onClick={() => setClearConfirm(false)}>Cancel</button>
+          </div>
+        ) : (
+          <button style={{ ...styles.generateBtn, background: "var(--red, #ef4444)" }} onClick={() => setClearConfirm(true)}>
+            Clear Imported Transactions
+          </button>
+        )}
+        {clearResult && (
+          <p style={clearResult.startsWith("Error") ? styles.importError : styles.importSuccess}>{clearResult}</p>
+        )}
+      </section>
 
       {/* Deduplication */}
       <section style={styles.card}>

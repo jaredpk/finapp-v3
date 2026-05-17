@@ -35,6 +35,7 @@ import {
   upsertAccountBalances, getLatestBalances,
   upsertInvestmentHoldings, getLatestHoldings,
   getProperties, upsertProperty, deleteProperty, updatePropertyValue, setPropertyBaseline,
+  getVehicles, upsertVehicle, deleteVehicle, setVehicleBaseline, applyVehicleDepreciation,
   getManualAccounts, upsertManualAccount, deleteManualAccount,
   getCashflowPresets, upsertCashflowPreset, getCashflowStates, upsertCashflowState,
   getCashflowMappings, upsertCashflowMapping, parseMacuCsvText,
@@ -273,7 +274,7 @@ app.get("/link", async (req, res) => {
     const r = await plaidClient.linkTokenCreate({
       user: { client_user_id: 'jared' },
       client_name: "FinApp",
-      products: [Products.Transactions, Products.Auth],
+      products: [Products.Transactions],
       country_codes: [CountryCode.Us],
       language: "en",
       webhook: `${APP_URL}/api/webhooks/plaid`,
@@ -351,14 +352,18 @@ app.get("/link", async (req, res) => {
 // ── Create link token (from web app) ─────────────────────────────────────────
 app.post("/api/create_link_token", requireAuth, async (req, res) => {
   try {
-    const response = await plaidClient.linkTokenCreate({
+    const linkTokenRequest = {
       user: { client_user_id: 'jared' },
       client_name: "FinApp",
-      products: [Products.Transactions, Products.Auth],
+      products: [Products.Transactions],
       country_codes: [CountryCode.Us],
       language: "en",
       webhook: `${APP_URL}/api/webhooks/plaid`,
-    });
+    };
+    if (process.env.PLAID_REDIRECT_URI) {
+      linkTokenRequest.redirect_uri = process.env.PLAID_REDIRECT_URI;
+    }
+    const response = await plaidClient.linkTokenCreate(linkTokenRequest);
     res.json({ link_token: response.data.link_token });
   } catch (err) {
     console.error(err.response?.data || err.message);
@@ -387,7 +392,7 @@ app.post("/api/exchange_public_token", async (req, res) => {
       }
     } catch (_) {}
     await upsertUserItem(access_token, item_id, institutionName);
-    await syncTransactions();
+    syncTransactions().catch((e) => console.error("Post-link sync failed:", e.message));
     const acctResp = await plaidClient.accountsGet({ access_token });
     const newAccounts = acctResp.data.accounts.map((a) => ({ ...a, institutionName, itemId: item_id, source: "plaid" }));
     res.json({ success: true, newAccounts });
@@ -422,9 +427,9 @@ function normalizePlaidType(rawType) {
 }
 
 app.get("/api/accounts", requireAuth, async (req, res) => {
-  const [items, nicknames, balRows, holdingRows, propRows, manualRows] = await Promise.all([
+  const [items, nicknames, balRows, holdingRows, propRows, manualRows, vehicleRows] = await Promise.all([
     getUserItems(), getAccountNicknames(), getLatestBalances(), getLatestHoldings(),
-    getProperties(), getManualAccounts(),
+    getProperties(), getManualAccounts(), getVehicles(),
   ]);
   const applyNicknames = (accts) =>
     accts.map((a) => nicknames[a.account_id] ? { ...a, name: nicknames[a.account_id], official_name: a.official_name || a.name } : a);
@@ -483,9 +488,17 @@ app.get("/api/accounts", requireAuth, async (req, res) => {
   // Manual accounts
   const manualAccounts = manualRows.map((m) => ({ account_id: `manual_${m.id}`, name: m.name, official_name: m.name, type: "investment", subtype: m.subtype || "retirement", balances: { current: parseFloat(m.balance), available: null }, institutionName: m.institution || "Manual", mask: null, source: "manual" }));
 
+  // Vehicles (KBB-seeded, depreciation-drifted)
+  const vehicleAccounts = vehicleRows
+    .filter((v) => v.last_value != null)
+    .map((v) => {
+      const label = [v.year, v.make, v.model, v.trim].filter(Boolean).join(" ");
+      return { account_id: `vehicle_${v.id}`, name: v.nickname || label, official_name: label, type: "other", subtype: "vehicle", balances: { current: parseFloat(v.last_value), available: null }, institutionName: "KBB Estimate", mask: null, source: "vehicle" };
+    });
+
   const snapshotDate = balRows[0]?.snapshot_date || holdingRows[0]?.snapshot_date;
   res.json({
-    accounts: applyNicknames([...plaidAccounts, ...importedAccounts, ...holdingAccounts, ...propertyAccounts, ...manualAccounts]),
+    accounts: applyNicknames([...plaidAccounts, ...importedAccounts, ...holdingAccounts, ...propertyAccounts, ...manualAccounts, ...vehicleAccounts]),
     ...(snapshotDate ? { snapshotDate } : {}),
   });
 });
@@ -506,7 +519,7 @@ app.delete("/api/account-nicknames/:accountId", requireAuth, async (req, res) =>
 // ── Transactions ──────────────────────────────────────────────────────────────
 app.get("/api/transactions", requireApiKeyOrAuth, async (req, res) => {
   try {
-    const limit = Math.min(parseInt(req.query.limit) || 200, 1000);
+    const limit = Math.min(parseInt(req.query.limit) || 2000, 10000);
     const transactions = await getTransactions({
       limit,
       startDate: req.query.start_date,
@@ -866,6 +879,42 @@ app.post("/api/manual-accounts", requireAuth, async (req, res) => {
 app.delete("/api/manual-accounts/:id", requireAuth, async (req, res) => {
   await deleteManualAccount(parseInt(req.params.id));
   res.json({ ok: true });
+});
+
+// ── Vehicles ──────────────────────────────────────────────────────────────────
+app.get("/api/vehicles", requireAuth, async (req, res) => {
+  const rows = await getVehicles();
+  res.json({ vehicles: rows });
+});
+
+app.post("/api/vehicles", requireAuth, async (req, res) => {
+  const { id, year, make, model, trim, nickname } = req.body;
+  if (!make || !model) return res.status(400).json({ error: "make and model required" });
+  const vehicle = await upsertVehicle(id || null, year ? parseInt(year) : null, make, model, trim, nickname);
+  res.json({ vehicle });
+});
+
+app.delete("/api/vehicles/:id", requireAuth, async (req, res) => {
+  await deleteVehicle(parseInt(req.params.id));
+  res.json({ ok: true });
+});
+
+app.post("/api/vehicles/sync", requireAuth, async (req, res) => {
+  try {
+    const { updated, results } = await applyVehicleDepreciation();
+    res.json({ synced: updated, results });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/vehicles/:id/baseline", requireAuth, async (req, res) => {
+  const { value, rate } = req.body;
+  if (!value || isNaN(parseFloat(value))) return res.status(400).json({ error: "value required" });
+  const depRate = rate != null ? parseFloat(rate) : 0.15;
+  await setVehicleBaseline(parseInt(req.params.id), parseFloat(value), depRate);
+  const vehicles = await getVehicles();
+  res.json({ vehicle: vehicles.find((v) => v.id === parseInt(req.params.id)) });
 });
 
 // ── Deduplication ─────────────────────────────────────────────────────────────
@@ -1437,6 +1486,10 @@ initDb().then(async () => {
     if (updated > 0) console.log(`Startup: applied FHFA drift to ${updated} property value(s)`);
     results.filter((r) => !r.ok).forEach((r) => console.error(`Startup FHFA drift failed [${r.address}]: ${r.error}`));
   }).catch((e) => console.error("Startup FHFA drift failed (non-fatal):", e.message));
+  // Apply depreciation to vehicles with baselines (non-blocking)
+  applyVehicleDepreciation().then(({ updated }) => {
+    if (updated > 0) console.log(`Startup: applied depreciation to ${updated} vehicle(s)`);
+  }).catch((e) => console.error("Startup vehicle depreciation failed (non-fatal):", e.message));
   // Register webhook URL for all existing Items (non-blocking)
   getUserItems().then(async (items) => {
     const webhookUrl = `${APP_URL}/api/webhooks/plaid`;

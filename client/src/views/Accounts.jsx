@@ -88,8 +88,8 @@ export default function Accounts({ accounts, hiddenAccounts, setHiddenAccounts }
                       <span style={{ ...styles.badge, background: TYPE_COLORS[a.type] || "var(--blue)" + "22", color: TYPE_COLORS[a.type] || "var(--blue)" }}>
                         {a.type}
                       </span>
-                      {a.source && a.source !== "plaid" && (
-                        <span style={styles.sourceBadge}>{a.source}</span>
+                      {a.source && (
+                        <span style={{ ...styles.sourceBadge, ...(a.source === "plaid" ? styles.sourceBadgePlaid : {}) }}>{a.source}</span>
                       )}
                       <button
                         onClick={() => toggleHide(a)}
@@ -161,6 +161,9 @@ const styles = {
     fontSize: 9, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase",
     padding: "3px 6px", borderRadius: 99, background: "var(--surface2)", color: "var(--muted)",
     fontFamily: "var(--font-mono)",
+  },
+  sourceBadgePlaid: {
+    background: "rgba(99,102,241,0.12)", color: "var(--accent)",
   },
   hideBtn: {
     background: "none", border: "none", cursor: "pointer", fontSize: 14, padding: "0 2px",

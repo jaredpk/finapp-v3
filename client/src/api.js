@@ -341,6 +341,46 @@ export async function saveCashflowMapping(merchantPattern, accountId, txnName) {
   return r.json();
 }
 
+// ── Vehicles ─────────────────────────────────────────────────────────────────
+export async function fetchVehicles() {
+  const r = await fetch(`${BASE}/vehicles`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function saveVehicle(id, year, make, model, trim, nickname) {
+  const r = await fetch(`${BASE}/vehicles`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ id: id || undefined, year, make, model, trim, nickname }),
+  });
+  return r.json();
+}
+
+export async function deleteVehicleApi(id) {
+  const r = await fetch(`${BASE}/vehicles/${id}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+  });
+  return r.json();
+}
+
+export async function setVehicleBaselineApi(id, value, rate) {
+  const r = await fetch(`${BASE}/vehicles/${id}/baseline`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ value, rate }),
+  });
+  return r.json();
+}
+
+export async function syncVehiclesApi() {
+  const r = await fetch(`${BASE}/vehicles/sync`, {
+    method: "POST",
+    headers: await authHeaders(),
+  });
+  return r.json();
+}
+
 // ── Audit ──────────────────────────────────────────────────────────────────────
 export async function getLastAudit() {
   const r = await fetch(`${BASE}/audit/last`, { headers: await authHeaders() });
