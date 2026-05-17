@@ -863,7 +863,7 @@ export default function Settings({ reloadData, user, accounts = [] }) {
                           </p>
                           {v.baseline_value != null && (
                             <p style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", margin: "2px 0 0" }}>
-                              {`KBB baseline: $${parseFloat(v.baseline_value).toLocaleString("en-US", { maximumFractionDigits: 0 })} · ${v.baseline_date ? new Date(v.baseline_date + 'T12:00:00').toLocaleDateString() : ""} · ${Math.round((v.depreciation_rate ?? 0.15) * 100)}%/yr`}
+                              {`KBB baseline: $${parseFloat(v.baseline_value).toLocaleString("en-US", { maximumFractionDigits: 0 })} · ${v.baseline_date ? new Date(v.baseline_date).toLocaleDateString() : ""} · ${Math.round((v.depreciation_rate ?? 0.15) * 100)}%/yr`}
                             </p>
                           )}
                         </div>
