@@ -912,9 +912,13 @@ app.post("/api/vehicles/:id/baseline", requireAuth, async (req, res) => {
   const { value, rate } = req.body;
   if (!value || isNaN(parseFloat(value))) return res.status(400).json({ error: "value required" });
   const depRate = rate != null ? parseFloat(rate) : 0.15;
-  await setVehicleBaseline(parseInt(req.params.id), parseFloat(value), depRate);
-  const vehicles = await getVehicles();
-  res.json({ vehicle: vehicles.find((v) => v.id === parseInt(req.params.id)) });
+  try {
+    await setVehicleBaseline(parseInt(req.params.id), parseFloat(value), depRate);
+    const vehicles = await getVehicles();
+    res.json({ vehicle: vehicles.find((v) => v.id === parseInt(req.params.id)) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ── Deduplication ─────────────────────────────────────────────────────────────

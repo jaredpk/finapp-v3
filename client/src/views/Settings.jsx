@@ -315,11 +315,14 @@ export default function Settings({ reloadData, user, accounts = [] }) {
     setSyncingVeh(true);
     setVehResult(null);
     try {
-      const res = await setVehicleBaselineApi(id, parseFloat(value), rate ? parseFloat(rate) : 0.15);
+      const depRate = rate ? parseFloat(rate) / 100 : 0.15;
+      const res = await setVehicleBaselineApi(id, parseFloat(value), depRate);
       if (res.error) { setVehResult(`Error: ${res.error}`); return; }
       setVehicles((prev) => prev.map((v) => (v.id === id ? res.vehicle : v)));
       setEditingVehicle(null);
       if (reloadData) reloadData();
+    } catch (err) {
+      setVehResult(`Error: ${err.message}`);
     } finally { setSyncingVeh(false); }
   }
 
