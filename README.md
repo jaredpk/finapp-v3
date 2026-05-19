@@ -100,6 +100,22 @@ finapp/
 
 ---
 
+## Deployment (fly.io)
+
+The app is deployed on [fly.io](https://fly.io) via the `fly.toml` in the project root.
+
+```bash
+# Set required secrets
+fly secrets set PLAID_CLIENT_ID=... PLAID_SECRET=... NODE_ENV=production
+
+# Deploy
+fly deploy
+```
+
+The live app: **https://finapp-v3.fly.dev**
+
+---
+
 ## Moving to Production
 
 - Replace the in-memory `userItems` store with a real database (PostgreSQL, SQLite, etc.)

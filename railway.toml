@@ -1,8 +1,0 @@
-[build]
-buildCommand = "npm run install-server && npm run build"
-
-[deploy]
-startCommand = "NODE_ENV=production npm start"
-healthcheckPath = "/api/health"
-healthcheckTimeout = 30
-restartPolicyType = "ON_FAILURE"
