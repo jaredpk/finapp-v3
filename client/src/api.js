@@ -169,26 +169,6 @@ export async function downloadXlsx() {
   URL.revokeObjectURL(url);
 }
 
-// ── XLSX Import ───────────────────────────────────────────────────────────────
-export async function importXlsx(base64) {
-  const r = await fetch(`${BASE}/import-xlsx`, {
-    method: "POST",
-    headers: await authHeaders(),
-    body: JSON.stringify({ xlsx: base64 }),
-  });
-  return r.json();
-}
-
-// ── CSV Import ────────────────────────────────────────────────────────────────
-export async function importCsvTransactions(csvText) {
-  const r = await fetch(`${BASE}/import-csv`, {
-    method: "POST",
-    headers: await authHeaders(),
-    body: JSON.stringify({ csv: csvText }),
-  });
-  return r.json();
-}
-
 export async function importTransactions(transactions) {
   const r = await fetch(`${BASE}/import`, {
     method: "POST",
@@ -198,10 +178,35 @@ export async function importTransactions(transactions) {
   return r.json();
 }
 
-export async function clearImportedTransactions() {
+// ── Simplifi import ───────────────────────────────────────────────────────────
+export async function analyzeSimplifi(csvText, accounts = []) {
+  const r = await fetch(`${BASE}/simplifi/analyze`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ csv: csvText, accounts }),
+  });
+  return r.json();
+}
+
+export async function importSimplifi(csvText, newMappings = {}, newAccountMappings = {}) {
+  const r = await fetch(`${BASE}/simplifi/import`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ csv: csvText, newMappings, newAccountMappings }),
+  });
+  return r.json();
+}
+
+export async function fetchImportedAccounts() {
+  const r = await fetch(`${BASE}/import/accounts`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function clearImportedTransactions(accounts = null) {
   const r = await fetch(`${BASE}/import`, {
     method: "DELETE",
     headers: await authHeaders(),
+    body: JSON.stringify({ accounts }),
   });
   return r.json();
 }
@@ -314,15 +319,6 @@ export async function saveCashflowState(accountId, txnId, monthKey, isPending, a
     method: "POST",
     headers: await authHeaders(),
     body: JSON.stringify({ accountId, txnId, monthKey, isPending, actualAmount, plaidTxnId, actualDay, note }),
-  });
-  return r.json();
-}
-
-export async function importMacuCsv(csvText, accountName) {
-  const r = await fetch(`${BASE}/import-macu-csv`, {
-    method: "POST",
-    headers: await authHeaders(),
-    body: JSON.stringify({ csv: csvText, accountName }),
   });
   return r.json();
 }

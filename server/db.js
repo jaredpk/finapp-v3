@@ -201,6 +201,20 @@ export async function initDb() {
     );
   `);
 
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS simplifi_category_mappings (
+      simplifi_category TEXT PRIMARY KEY,
+      finapp_category_id UUID REFERENCES categories(id) ON DELETE SET NULL
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS simplifi_account_mappings (
+      simplifi_account TEXT PRIMARY KEY,
+      finapp_account_id TEXT
+    );
+  `);
+
   // Add new transaction columns from Perplexity schema
   await pool.query(`
     ALTER TABLE transactions
@@ -1054,6 +1068,83 @@ export function parseXlsxBase64(base64, snapshotDate) {
   return { transactions, balances, holdings, snapshotDate: snapshotDate ?? new Date().toISOString().slice(0, 10) };
 }
 
+// ── Simplifi CSV import ───────────────────────────────────────────────────────
+
+// Categories in Simplifi that carry no meaningful categorization signal.
+// Transactions with these will still be imported but never used to apply categories.
+const SIMPLIFI_JUNK_CATEGORIES = new Set([
+  '', '-', 'n/a', 'na', 'none', 'uncategorized', 'other', 'unknown',
+  'balance adjustment', 'transfer',
+]);
+
+export function isJunkSimplifiCategory(cat) {
+  return !cat || SIMPLIFI_JUNK_CATEGORIES.has(cat.toLowerCase().trim());
+}
+
+// Parses Quicken Simplifi "Transactions" CSV export.
+// Format: Date,Account,Payee,Category,Exclusion,Amount
+// Simplifi sign: negative=expense, positive=income → negate to match Plaid convention.
+export function parseSimplifiCsv(csvText) {
+  const lines = csvText.split('\n').map(l => l.trim()).filter(Boolean);
+  const rows = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols = splitCsvLine(lines[i]);
+    if (cols.length < 6) continue;
+    const dateStr  = cols[0].replace(/^"|"$/g, '').trim();
+    const account  = cols[1].replace(/^"|"$/g, '').trim();
+    const payee    = cols[2].replace(/^"|"$/g, '').trim();
+    const category = cols[3].replace(/^"|"$/g, '').trim();
+    const exclusion = cols[4].replace(/^"|"$/g, '').trim().toLowerCase();
+    const amountStr = cols[5].replace(/^"|"$/g, '').trim();
+    if (exclusion === 'yes') continue;
+    if (category === 'Balance Adjustment') continue;
+    const raw = parseFloat(amountStr);
+    if (isNaN(raw)) continue;
+    const dateObj = new Date(dateStr);
+    if (isNaN(dateObj.getTime())) continue;
+    const date = dateObj.toISOString().slice(0, 10);
+    const dbAmount = parseFloat((-raw).toFixed(2));
+    rows.push({ date, account, payee, category, dbAmount });
+  }
+  return rows;
+}
+
+export async function getSimplifiMappings() {
+  const { rows } = await pool.query('SELECT simplifi_category, finapp_category_id FROM simplifi_category_mappings');
+  const map = {};
+  for (const r of rows) map[r.simplifi_category] = r.finapp_category_id;
+  return map;
+}
+
+export async function saveSimplifiMappings(mappings) {
+  for (const [simplifi_category, finapp_category_id] of Object.entries(mappings)) {
+    await pool.query(
+      `INSERT INTO simplifi_category_mappings (simplifi_category, finapp_category_id)
+       VALUES ($1, $2)
+       ON CONFLICT (simplifi_category) DO UPDATE SET finapp_category_id = EXCLUDED.finapp_category_id`,
+      [simplifi_category, finapp_category_id || null]
+    );
+  }
+}
+
+export async function getSimplifiAccountMappings() {
+  const { rows } = await pool.query('SELECT simplifi_account, finapp_account_id FROM simplifi_account_mappings');
+  const map = {};
+  for (const r of rows) map[r.simplifi_account] = r.finapp_account_id;
+  return map;
+}
+
+export async function saveSimplifiAccountMappings(mappings) {
+  for (const [simplifi_account, finapp_account_id] of Object.entries(mappings)) {
+    await pool.query(
+      `INSERT INTO simplifi_account_mappings (simplifi_account, finapp_account_id)
+       VALUES ($1, $2)
+       ON CONFLICT (simplifi_account) DO UPDATE SET finapp_account_id = EXCLUDED.finapp_account_id`,
+      [simplifi_account, finapp_account_id || null]
+    );
+  }
+}
+
 export async function upsertCsvTransaction(t) {
   // Skip if a Plaid-native row already covers this date+amount; avoids needing manual dedup after import.
   const { rowCount } = await pool.query(
@@ -1247,7 +1338,31 @@ export async function deduplicateTransactions(selectedGroups) {
   return rowCount;
 }
 
-export async function deleteImportedTransactions() {
+export async function getImportedTransactionAccounts() {
+  const { rows } = await pool.query(`
+    SELECT
+      COALESCE(account, '(unknown)') AS account,
+      COUNT(*) AS count,
+      MIN(date) AS earliest,
+      MAX(date) AS latest
+    FROM transactions
+    WHERE id LIKE 'simplifi_%' OR id LIKE 'csv_%'
+    GROUP BY account
+    ORDER BY count DESC
+  `);
+  return rows;
+}
+
+export async function deleteImportedTransactions(accounts = null) {
+  if (accounts && accounts.length > 0) {
+    const { rowCount } = await pool.query(
+      `DELETE FROM transactions
+       WHERE (id LIKE 'simplifi_%' OR id LIKE 'csv_%')
+         AND COALESCE(account, '(unknown)') = ANY($1)`,
+      [accounts]
+    );
+    return rowCount;
+  }
   const { rowCount } = await pool.query(
     "DELETE FROM transactions WHERE id LIKE 'simplifi_%' OR id LIKE 'csv_%'"
   );
@@ -1763,7 +1878,7 @@ export async function applyVehicleDepreciation() {
   const results = [];
   const msPerYear = 365.25 * 24 * 3600 * 1000;
   for (const v of toUpdate) {
-    const yearsElapsed = (Date.now() - new Date(v.baseline_date + 'T12:00:00Z').getTime()) / msPerYear;
+    const yearsElapsed = (Date.now() - new Date(v.baseline_date).getTime()) / msPerYear;
     const rate = v.depreciation_rate ?? 0.15;
     const newValue = Math.max(0, Math.round(v.baseline_value * Math.pow(1 - rate, yearsElapsed)));
     await updateVehicleValue(v.id, newValue);

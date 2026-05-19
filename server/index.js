@@ -31,14 +31,16 @@ import {
   getMerchantOverrides, upsertMerchantOverride,
   parseCsvText, upsertCsvTransaction,
   parseXlsxBase64, upsertPlaidTransactions,
-  upsertImportedTransaction, deleteImportedTransactions,
+  upsertImportedTransaction, deleteImportedTransactions, getImportedTransactionAccounts,
   upsertAccountBalances, getLatestBalances,
   upsertInvestmentHoldings, getLatestHoldings,
   getProperties, upsertProperty, deleteProperty, updatePropertyValue, setPropertyBaseline,
   getVehicles, upsertVehicle, deleteVehicle, setVehicleBaseline, applyVehicleDepreciation,
   getManualAccounts, upsertManualAccount, deleteManualAccount,
   getCashflowPresets, upsertCashflowPreset, getCashflowStates, upsertCashflowState,
-  getCashflowMappings, upsertCashflowMapping, parseMacuCsvText,
+  getCashflowMappings, upsertCashflowMapping,
+  parseSimplifiCsv, isJunkSimplifiCategory, getSimplifiMappings, saveSimplifiMappings,
+  getSimplifiAccountMappings, saveSimplifiAccountMappings,
   getAccountNicknames, upsertAccountNickname, deleteAccountNickname,
   getLastAuditLog, saveAuditLog, updateAuditInsertedCount, completeAuditLog,
   getTransactionDateAmountSet, parseAuditXlsx,
@@ -682,64 +684,163 @@ app.post("/api/import", requireAuth, async (req, res) => {
   res.json({ imported: rows.length });
 });
 
+app.get("/api/import/accounts", requireAuth, async (req, res) => {
+  const accounts = await getImportedTransactionAccounts();
+  res.json({ accounts });
+});
+
 app.delete("/api/import", requireAuth, async (req, res) => {
-  const deleted = await deleteImportedTransactions();
+  const { accounts } = req.body || {};
+  const deleted = await deleteImportedTransactions(accounts?.length ? accounts : null);
   res.json({ deleted });
 });
 
-// ── CSV Import (Perplexity 90-day export) ─────────────────────────────────────
-app.post("/api/import-csv", requireApiKeyOrAuth, async (req, res) => {
+// ── Simplifi CSV import ───────────────────────────────────────────────────────
+app.post("/api/simplifi/analyze", requireAuth, async (req, res) => {
   try {
-    const { csv } = req.body;
-    if (!csv || typeof csv !== "string") return res.status(400).json({ error: "csv string required" });
-    const rows = parseCsvText(csv);
-    let imported = 0;
-    for (const row of rows) {
-      if (await upsertCsvTransaction(row)) imported++;
-    }
-    res.json({ imported, skipped: rows.length - imported });
+    const { csv, accounts: clientAccounts = [] } = req.body;
+    if (!csv || typeof csv !== "string") return res.status(400).json({ error: "csv required" });
+    const rows = parseSimplifiCsv(csv);
+
+    // ── Category suggestions ──────────────────────────────────────────────────
+    const [existingCatMappings, existingAcctMappings, categories, manualAccounts] = await Promise.all([
+      getSimplifiMappings(),
+      getSimplifiAccountMappings(),
+      getCategories(),
+      getManualAccounts(),
+    ]);
+
+    const uniqueCats = [...new Set(rows.map(r => r.category))];
+    const unmappedCategories = uniqueCats
+      .filter(c => !isJunkSimplifiCategory(c) && !(c in existingCatMappings))
+      .map(name => {
+        const lower = name.toLowerCase().replace(/[^a-z]/g, '');
+        let bestId = null, bestScore = 0;
+        for (const cat of categories) {
+          const cl = cat.name.toLowerCase().replace(/[^a-z]/g, '');
+          let score = lower === cl ? 1 : (lower.includes(cl) || cl.includes(lower)) ? 0.7 : 0;
+          if (!score) {
+            const w1 = name.toLowerCase().split(/[\s:&/-]+/);
+            const w2 = cat.name.toLowerCase().split(/[\s:&/-]+/);
+            const common = w1.filter(w => w.length > 2 && w2.includes(w)).length;
+            score = common > 0 ? 0.3 + common * 0.1 : 0;
+          }
+          if (score > bestScore) { bestScore = score; bestId = cat.id; }
+        }
+        return { name, suggestedId: bestScore >= 0.3 ? bestId : null };
+      });
+
+    // ── Account suggestions ───────────────────────────────────────────────────
+    const finappAccounts = [
+      ...clientAccounts.map(a => ({
+        account_id: a.account_id,
+        name: a.name,
+        official_name: a.official_name || null,
+        mask: a.mask || null,
+        type: a.type,
+        subtype: a.subtype || null,
+        institutionName: a.institutionName || null,
+        source: 'plaid',
+      })),
+      ...manualAccounts.map(a => ({
+        account_id: String(a.id),
+        name: a.name,
+        official_name: null,
+        mask: null,
+        type: a.subtype || 'manual',
+        source: 'manual',
+      })),
+    ];
+
+    const uniqueAccts = [...new Set(rows.map(r => r.account))];
+    const unmappedAccounts = uniqueAccts
+      .filter(a => !(a in existingAcctMappings))
+      .map(name => {
+        const lower = name.toLowerCase().replace(/[^a-z]/g, '');
+        let bestId = null, bestScore = 0;
+        for (const fa of finappAccounts) {
+          const fl = fa.name.toLowerCase().replace(/[^a-z]/g, '');
+          let score = lower === fl ? 1 : (lower.includes(fl) || fl.includes(lower)) ? 0.7 : 0;
+          if (!score) {
+            const w1 = name.toLowerCase().split(/[\s_&-]+/);
+            const w2 = fa.name.toLowerCase().split(/[\s_&-]+/);
+            const common = w1.filter(w => w.length > 2 && w2.includes(w)).length;
+            score = common > 0 ? 0.3 + common * 0.1 : 0;
+          }
+          if (score > bestScore) { bestScore = score; bestId = fa.account_id; }
+        }
+        return { name, suggestedId: bestScore >= 0.3 ? bestId : null };
+      });
+
+    res.json({ unmappedCategories, unmappedAccounts, finappCategories: categories, finappAccounts, totalRows: rows.length });
   } catch (err) {
-    console.error("CSV import error:", err);
+    console.error("Simplifi analyze error:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── MACU CSV Import (Mountain America exportedtransactions.csv) ───────────────
-app.post("/api/import-macu-csv", requireAuth, async (req, res) => {
+app.post("/api/simplifi/import", requireAuth, async (req, res) => {
   try {
-    const { csv, accountName } = req.body;
-    if (!csv || typeof csv !== "string") return res.status(400).json({ error: "csv string required" });
-    const rows = parseMacuCsvText(csv, accountName || "MACU Shared Checking");
-    let imported = 0;
+    const { csv, newMappings = {}, newAccountMappings = {} } = req.body;
+    if (!csv || typeof csv !== "string") return res.status(400).json({ error: "csv required" });
+    const filteredMappings = Object.fromEntries(Object.entries(newMappings).filter(([, v]) => v !== '__DEFER__'));
+    const filteredAccountMappings = Object.fromEntries(Object.entries(newAccountMappings).filter(([, v]) => v !== '__DEFER__'));
+    if (Object.keys(filteredMappings).length) await saveSimplifiMappings(filteredMappings);
+    if (Object.keys(filteredAccountMappings).length) await saveSimplifiAccountMappings(filteredAccountMappings);
+    const [allMappings, allAccountMappings] = await Promise.all([
+      getSimplifiMappings(),
+      getSimplifiAccountMappings(),
+    ]);
+    const rows = parseSimplifiCsv(csv);
+    let inserted = 0, categorized = 0, skipped = 0;
     for (const row of rows) {
-      if (await upsertCsvTransaction(row)) imported++;
-    }
-    res.json({ imported, skipped: rows.length - imported });
-  } catch (err) {
-    console.error("MACU CSV import error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post("/api/import-xlsx", requireApiKeyOrAuth, async (req, res) => {
-  try {
-    const { xlsx, snapshot_date } = req.body;
-    if (!xlsx || typeof xlsx !== "string") return res.status(400).json({ error: "xlsx base64 string required" });
-    const { transactions, balances, holdings, snapshotDate, isPlaidNative } = parseXlsxBase64(xlsx, snapshot_date);
-    let imported = 0;
-    if (isPlaidNative) {
-      await upsertPlaidTransactions(transactions);
-      imported = transactions.length;
-    } else {
-      for (const row of transactions) {
-        if (await upsertCsvTransaction(row)) imported++;
+      const resolvedAccount = allAccountMappings[row.account] ?? row.account;
+      const { rows: matches } = await pool.query(
+        `SELECT id FROM transactions
+         WHERE date = $1::date
+           AND ROUND(ABS(amount)::numeric, 2) = ROUND(ABS($2::numeric), 2)
+           AND id NOT LIKE 'simplifi_%'
+         LIMIT 5`,
+        [row.date, row.dbAmount]
+      );
+      const catId = isJunkSimplifiCategory(row.category) ? null : (allMappings[row.category] || null);
+      if (matches.length > 0) {
+        if (catId) {
+          for (const m of matches) {
+            const { rowCount } = await pool.query(
+              `INSERT INTO assignments (transaction_id, category_id)
+               VALUES ($1, $2) ON CONFLICT (transaction_id) DO NOTHING`,
+              [m.id, catId]
+            );
+            if (rowCount > 0) categorized++;
+          }
+        } else {
+          skipped++;
+        }
+      } else {
+        const id = 'simplifi_' + createHash('sha256')
+          .update(`${row.date}|${row.payee}|${row.dbAmount}|${row.account}`)
+          .digest('hex').slice(0, 16);
+        const { rowCount } = await pool.query(
+          `INSERT INTO transactions (id, date, merchant, amount, account, plaid_category, status, currency)
+           VALUES ($1, $2, $3, $4, $5, $6, 'reviewed', 'USD')
+           ON CONFLICT (id) DO NOTHING`,
+          [id, row.date, row.payee, row.dbAmount, resolvedAccount, row.category]
+        );
+        if (rowCount > 0) {
+          if (catId) await pool.query(
+            `INSERT INTO assignments (transaction_id, category_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+            [id, catId]
+          );
+          inserted++;
+        } else {
+          skipped++;
+        }
       }
     }
-    if (balances.length) await upsertAccountBalances(snapshotDate, balances);
-    if (holdings.length) await upsertInvestmentHoldings(snapshotDate, holdings);
-    res.json({ imported, skipped: isPlaidNative ? 0 : transactions.length - imported, balances: balances.length, holdings: holdings.length, snapshot_date: snapshotDate });
+    res.json({ inserted, categorized, skipped });
   } catch (err) {
-    console.error("XLSX import error:", err);
+    console.error("Simplifi import error:", err);
     res.status(500).json({ error: err.message });
   }
 });
