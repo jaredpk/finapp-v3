@@ -1586,6 +1586,10 @@ initDb().then(async () => {
   } catch (e) {
     console.error("Startup dedup failed (non-fatal):", e.message);
   }
+  // Sync transactions on startup so data is fresh whenever the machine wakes up
+  syncTransactions()
+    .then(() => console.log("Startup: transaction sync complete"))
+    .catch((e) => console.error("Startup: transaction sync failed (non-fatal):", e.message));
   // Apply FHFA drift to properties with baselines (non-blocking)
   applyFHFADrift().then(({ updated, results }) => {
     if (updated > 0) console.log(`Startup: applied FHFA drift to ${updated} property value(s)`);
