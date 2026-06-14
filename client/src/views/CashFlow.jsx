@@ -310,7 +310,7 @@ function SummaryBar({ takeHome, expenses, freeCashflow }) {
   );
 }
 
-function AccountTable({ account, startingBalance, allowEditStart, presetsMap, monthStates, monthAmounts, isThreePaycheckMonth, onTogglePending, onEditNote, onEditAmount, onUpdateDay, onEditStart, onAddRow, onDeleteRow, txnOrder, onReorder }) {
+function AccountTable({ account, startingBalance, allowEditStart, isLinked, presetsMap, monthStates, monthAmounts, isThreePaycheckMonth, onTogglePending, onEditNote, onEditAmount, onUpdateDay, onEditStart, onLinkAccount, onAddRow, onDeleteRow, txnOrder, onReorder }) {
   const [dragOverId, setDragOverId] = useState(null);
   const [noteEditId, setNoteEditId] = useState(null);
   const [noteEditVal, setNoteEditVal] = useState("");
@@ -408,7 +408,22 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
     <div style={styles.accountBlock}>
       <div style={styles.accountHeader}>
         <div>
-          <p style={styles.accountName}>{account.name}</p>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
+            <p style={{ ...styles.accountName, marginBottom: 0 }}>{account.name}</p>
+            <button
+              onClick={onLinkAccount}
+              title={isLinked ? "Plaid account linked — click to change" : "Link a Plaid account for automatic balance"}
+              style={{
+                background: "none", border: "none", cursor: "pointer", padding: "1px 5px",
+                fontSize: 10, fontFamily: "var(--font-mono)", fontWeight: 600,
+                color: isLinked ? "var(--green)" : "var(--muted)",
+                borderRadius: 4, border: `1px solid ${isLinked ? "var(--green)" : "var(--border2)"}`,
+                opacity: isLinked ? 1 : 0.7, lineHeight: 1.4,
+              }}
+            >
+              {isLinked ? "plaid ✓" : "link plaid"}
+            </button>
+          </div>
           <p
             style={{
               ...styles.accountStartBal,
@@ -720,6 +735,60 @@ function CreditCardBlock({ card, config, monthData, onUpdateConfig, onUpdateMont
 }
 
 // ── Modals ────────────────────────────────────────────────────────────────────
+function LinkAccountModal({ accountName, currentLinkId, plaidAccounts, onSelect, onClose }) {
+  const checking = plaidAccounts.filter(p => p.subtype === "checking" || p.type === "depository");
+  const others = plaidAccounts.filter(p => p.subtype !== "checking" && p.type !== "depository");
+  const all = [...checking, ...others];
+
+  return (
+    <div style={styles.modalOverlay} onClick={onClose}>
+      <div style={{ ...styles.modal, width: 440, maxHeight: "80vh", overflowY: "auto" }} onClick={e => e.stopPropagation()}>
+        <p style={styles.modalTitle}>Link Plaid Account</p>
+        <p style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", marginBottom: 12 }}>
+          Select the Plaid account that maps to <strong>{accountName}</strong>
+        </p>
+        {all.length === 0 && (
+          <p style={{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-mono)" }}>No Plaid accounts found. Make sure a bank is linked.</p>
+        )}
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {all.map(p => {
+            const isLinked = p.account_id === currentLinkId;
+            return (
+              <button
+                key={p.account_id}
+                onClick={() => onSelect(p.account_id)}
+                style={{
+                  display: "flex", justifyContent: "space-between", alignItems: "center",
+                  padding: "10px 14px", borderRadius: "var(--radius)",
+                  border: isLinked ? "2px solid var(--accent)" : "1px solid var(--border)",
+                  background: isLinked ? "rgba(123,44,191,0.08)" : "var(--surface2)",
+                  cursor: "pointer", textAlign: "left",
+                }}
+              >
+                <div>
+                  <p style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", marginBottom: 2 }}>{p.name}</p>
+                  <p style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-mono)" }}>
+                    {p.institutionName} · {p.subtype ?? p.type} {p.mask ? `·· ${p.mask}` : ""}
+                  </p>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <p style={{ fontSize: 13, fontWeight: 700, fontFamily: "var(--font-mono)", color: "var(--green)" }}>
+                    {p.balances?.current != null ? fmt(p.balances.current) : "—"}
+                  </p>
+                  {isLinked && <p style={{ fontSize: 9, color: "var(--accent)", fontFamily: "var(--font-mono)", fontWeight: 700 }}>LINKED</p>}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+        <div style={{ ...styles.modalActions, marginTop: 16 }}>
+          <button onClick={onClose} style={styles.cancelBtn}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AddModal({ accountName, onSave, onClose }) {
   const [form, setForm] = useState({ day: "", name: "", freq: "Monthly", amount: "" });
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
@@ -883,6 +952,10 @@ export default function CashFlow() {
   const [modal, setModal] = useState(null);
   const [ccConfig, setCcConfig] = useState(DEFAULT_CC_CONFIG);
   const [ccMonthData, setCcMonthData] = useState({});
+  // plaidAcctLinks: { [cashflowAcctId]: plaid_account_id string }
+  const [plaidAcctLinks, setPlaidAcctLinks] = useState({});
+  // allPlaidAccts: full list from /api/accounts, used for the link-picker modal
+  const [allPlaidAccts, setAllPlaidAccts] = useState([]);
   const autoConfirmedRef = useRef(new Set());
 
   const presetsMap = useMemo(() => {
@@ -959,15 +1032,19 @@ export default function CashFlow() {
 
           const newBals = {};
           const newOrders = {};
+          const newLinks = {};
           DEFAULT_ACCOUNTS.forEach(a => {
             const db = dbPresets.find(p => p.name === `__start_${a.id}`);
             if (db) { newBals[a.id] = db.amount; userSetIds.add(a.id); } // protect user-set balance from Plaid overwrite
             const orderPref = dbPresets.find(p => p.name === `__order_${a.id}`);
             if (orderPref?.note) { try { newOrders[a.id] = JSON.parse(orderPref.note); } catch {} }
+            const linkPref = dbPresets.find(p => p.name === `__plaid_id_${a.id}`);
+            if (linkPref?.note) newLinks[a.id] = linkPref.note;
           });
           if (Object.keys(newBals).length > 0) setStartingBals(prev => ({ ...prev, ...newBals }));
           if (userSetIds.size > 0) setUserSetStartIds(userSetIds);
           if (Object.keys(newOrders).length > 0) setTxnOrders(newOrders);
+          if (Object.keys(newLinks).length > 0) setPlaidAcctLinks(newLinks);
 
           const newNotes = {};
           dbPresets.forEach(p => {
@@ -1018,16 +1095,20 @@ export default function CashFlow() {
 
       if (cancelled) return;
 
-      // 2. Live Plaid balances — always overwrites DB defaults for all accounts
+      // 2. Live Plaid balances — prefer direct account_id link; fall back to fuzzy name matching
       try {
         const data = await fetchAccounts();
         const plaidAccts = data?.accounts ?? [];
         if (!cancelled && plaidAccts.length) {
+          setAllPlaidAccts(plaidAccts);
           setStartingBals(prev => {
             const next = { ...prev };
             DEFAULT_ACCOUNTS.forEach(acct => {
               if (userSetIds.has(acct.id)) return;
-              const match = plaidAccts.find(p => matchPlaidToAccount(p.name, p.institutionName, acct.id, acct.name));
+              const linkedId = newLinks[acct.id];
+              const match = linkedId
+                ? plaidAccts.find(p => p.account_id === linkedId)
+                : plaidAccts.find(p => matchPlaidToAccount(p.name, p.institutionName, acct.id, acct.name));
               if (match?.balances?.current != null) next[acct.id] = match.balances.current;
             });
             return next;
@@ -1234,6 +1315,17 @@ export default function CashFlow() {
     setModal(null);
   }, []);
 
+  const savePlaidLink = useCallback((accountId, plaidAccountId) => {
+    setPlaidAcctLinks(prev => ({ ...prev, [accountId]: plaidAccountId }));
+    saveCashflowPreset(`__plaid_id_${accountId}`, 0, null, plaidAccountId).catch(() => {});
+    // Immediately apply the balance from the newly-linked account
+    const matched = allPlaidAccts.find(p => p.account_id === plaidAccountId);
+    if (matched?.balances?.current != null) {
+      setStartingBals(prev => ({ ...prev, [accountId]: matched.balances.current }));
+    }
+    setModal(null);
+  }, [allPlaidAccts]);
+
   const savePayCycleDate = useCallback((newDateNum) => {
     setPayBaseDate(newDateNum);
     saveCashflowPreset("__pay_cycle_date", newDateNum, null, null).catch(() => {});
@@ -1395,6 +1487,7 @@ export default function CashFlow() {
                     account={acct}
                     startingBalance={startBals[acct.id] ?? acct.defaultStart}
                     allowEditStart={isFirstMonth}
+                    isLinked={!!plaidAcctLinks[acct.id]}
                     presetsMap={presetsMap}
                     monthStates={monthStates}
                     monthAmounts={allMonthAmounts[monthKey] ?? {}}
@@ -1404,6 +1497,7 @@ export default function CashFlow() {
                     onEditAmount={(aId, tId, tName) => editAmount(monthKey, aId, tId, tName)}
                     onUpdateDay={(aId, tId, day) => updateDay(monthKey, aId, tId, day)}
                     onEditStart={() => editStartingBalance(acct.id)}
+                    onLinkAccount={() => setModal({ type: "linkAccount", accountId: acct.id })}
                     onAddRow={addRow}
                     onDeleteRow={deleteRow}
                     txnOrder={txnOrders[acct.id]}
@@ -1468,6 +1562,15 @@ export default function CashFlow() {
         <EditPayCycleModal
           currentDateNum={payBaseDate}
           onSave={savePayCycleDate}
+          onClose={() => setModal(null)}
+        />
+      )}
+      {modal?.type === "linkAccount" && (
+        <LinkAccountModal
+          accountName={accounts.find(a => a.id === modal.accountId)?.name}
+          currentLinkId={plaidAcctLinks[modal.accountId]}
+          plaidAccounts={allPlaidAccts}
+          onSelect={(plaidAccountId) => savePlaidLink(modal.accountId, plaidAccountId)}
           onClose={() => setModal(null)}
         />
       )}
