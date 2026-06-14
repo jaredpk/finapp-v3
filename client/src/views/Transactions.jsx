@@ -130,7 +130,11 @@ export default function Transactions({
       const amt = Math.abs(toNum(t.amount) ?? 0);
       if (search && !name.includes(search.toLowerCase())) return false;
       if (catFilter === "unassigned" && (assignments?.[t.transaction_id] || splits?.[t.transaction_id]?.length)) return false;
-      if (catFilter !== "all" && catFilter !== "unassigned" && assignments?.[t.transaction_id] !== catFilter) return false;
+      if (catFilter !== "all" && catFilter !== "unassigned") {
+        const directMatch = assignments?.[t.transaction_id] === catFilter;
+        const splitMatch  = splits?.[t.transaction_id]?.some(s => s.category_id === catFilter);
+        if (!directMatch && !splitMatch) return false;
+      }
       if (acctFilter !== "all" && t.account_id !== acctFilter) return false;
       if (min !== null && amt < min) return false;
       if (max !== null && amt > max) return false;
@@ -721,12 +725,12 @@ const styles = {
   actionCell: { display: "flex", alignItems: "center", gap: 3, justifyContent: "flex-end" },
   splitBtn: {
     background: "none", border: "none", color: "var(--muted)", cursor: "pointer",
-    fontSize: 15, lineHeight: 1, padding: "2px 5px", borderRadius: 4, opacity: 0.6,
+    fontSize: 15, lineHeight: 1, padding: "2px 5px", borderRadius: 4, opacity: 0.85,
     fontFamily: "var(--font-display)",
   },
   deleteBtn: {
     background: "none", border: "none", color: "var(--muted)", cursor: "pointer",
-    fontSize: 16, lineHeight: 1, padding: "2px 5px", borderRadius: 4, opacity: 0.4,
+    fontSize: 16, lineHeight: 1, padding: "2px 5px", borderRadius: 4, opacity: 0.65,
     fontFamily: "var(--font-display)",
   },
   unhideBtn: {

@@ -73,7 +73,7 @@ const DEFAULT_ACCOUNTS = [
     transactions: [
       { id: 1,  day: 1,  name: "Other Misc. Shared",       freq: "Bi-Monthly", amount: -500                       },
       { id: 2,  day: 1,  name: "House Payment",            freq: "Bi-Monthly", amount: -2017                      },
-      { id: 3,  day: 2,  name: "Personal Jared",           freq: "Monthly",    amount: 500,    isTransfer: true   },
+      { id: 3,  day: 2,  name: "Personal Jared In",          freq: "Monthly",    amount: 500,    isTransfer: true   },
       { id: 4,  day: 7,  name: "Jared Transfer In",        freq: "Monthly",    amount: 1900,   isTransfer: true   },
       { id: 5,  day: 12, name: "Alta Transfer",            freq: "Bi-Weekly",  amount: 1500                       },
       { id: 6,  day: 15, name: "Car Payment",              freq: "Monthly",    amount: -500                       },
@@ -132,6 +132,8 @@ const DEFAULT_CC_CONFIG = {
 const TRANSFER_MIRRORS = {
   "Jared Transfer to Shared":  "Jared Transfer In",
   "Jared Transfer In":         "Jared Transfer to Shared",
+  "Personal Jared":            "Personal Jared In",
+  "Personal Jared In":         "Personal Jared",
   "Extra Transfer Out":        "Extra Transfer In",
   "Extra Transfer In":         "Extra Transfer Out",
 };
@@ -200,14 +202,33 @@ function scoreMatch(plaidTxn, row, presetsMap) {
   return score;
 }
 
+// Generic financial words that appear in many account names and must not drive matching
+const GENERIC_ACCT_WORDS = new Set(["checking", "savings", "account", "credit", "debit", "draft"]);
+
 function matchPlaidToAccount(plaidName, institutionName, acctId, acctDisplayName) {
   const p = plaidName.toLowerCase();
   const inst = (institutionName || "").toLowerCase();
+
+  // Institution-specific matching for the three known cashflow accounts
+  if (acctId === "amex") return inst.includes("american express");
+  if (acctId === "macu") {
+    // MACU personal: must be Mountain America, and must NOT look like the shared account
+    if (!inst.includes("mountain america")) return false;
+    if (p.includes("share") || p.includes("joint")) return false;
+    return true;
+  }
+  if (acctId === "shared") {
+    // Shared checking: Mountain America account with a shared/joint indicator in the name,
+    // OR any account whose (possibly nicknames-applied) name contains "shared"
+    if (inst.includes("mountain america") && (p.includes("share") || p.includes("joint"))) return true;
+    return p.includes("shared");
+  }
+
+  // Generic fallback for any other account IDs — exclude common financial words to avoid
+  // false matches (e.g. "checking" appearing in unrelated account names)
   if (p.includes(acctId.toLowerCase())) return true;
-  // MACU accounts are named "PERSONAL MYFREE", "ASHTON", etc. — match by institution
-  if (acctId === "macu" && inst.includes("mountain america")) return true;
   return acctDisplayName.toLowerCase().split(/\s+/)
-    .filter(w => w.length > 3)
+    .filter(w => w.length > 3 && !GENERIC_ACCT_WORDS.has(w))
     .some(w => p.includes(w));
 }
 
@@ -236,14 +257,22 @@ function computeSummary(accounts, effectiveAmtFn, isThreePaycheck) {
 }
 
 // ── Projected ending balance helper ──────────────────────────────────────────
-function computeProjectedEndBals(accounts, startBals, effectiveAmtFn, isThreePaycheck) {
+function computeProjectedEndBals(accounts, startBals, effectiveAmtFn, isThreePaycheck, monthStates) {
   const result = {};
   accounts.forEach(acct => {
     const start = startBals[acct.id] ?? acct.defaultStart;
     const sorted = [...acct.transactions].sort((a, b) => a.day - b.day);
     const filtered = sorted.filter(t => !t.defaultPending || isThreePaycheck);
     let running = start;
-    filtered.forEach(t => { running += effectiveAmtFn(t, acct.id); });
+    filtered.forEach(t => {
+      // Use confirmed (non-pending) balance as the carry-forward to the next month
+      const stateKey = `${acct.id}_${t.id}`;
+      const state = monthStates?.[stateKey] ?? {};
+      const isPending = state.isPending !== undefined
+        ? state.isPending
+        : !!(t.defaultPending && isThreePaycheck);
+      if (!isPending) running += effectiveAmtFn(t, acct.id);
+    });
     result[acct.id] = running;
   });
   return result;
@@ -281,7 +310,7 @@ function SummaryBar({ takeHome, expenses, freeCashflow }) {
   );
 }
 
-function AccountTable({ account, startingBalance, allowEditStart, presetsMap, monthStates, monthAmounts, isThreePaycheckMonth, onTogglePending, onEditNote, onEditAmount, onEditStart, onAddRow, onDeleteRow, txnOrder, onReorder }) {
+function AccountTable({ account, startingBalance, allowEditStart, presetsMap, monthStates, monthAmounts, isThreePaycheckMonth, onTogglePending, onEditNote, onEditAmount, onUpdateDay, onEditStart, onAddRow, onDeleteRow, txnOrder, onReorder }) {
   const [dragOverId, setDragOverId] = useState(null);
   const [noteEditId, setNoteEditId] = useState(null);
   const [noteEditVal, setNoteEditVal] = useState("");
@@ -319,14 +348,26 @@ function AccountTable({ account, startingBalance, allowEditStart, presetsMap, mo
     e.preventDefault();
     const fromId = dragItemId.current;
     if (!fromId || fromId === targetId) { setDragOverId(null); return; }
-    const ids = filteredRef.current.map(t => t.id);
+    const rows = filteredRef.current;
+    const ids = rows.map(t => t.id);
     const fromIdx = ids.indexOf(fromId);
     const toIdx = ids.indexOf(targetId);
     if (fromIdx === -1 || toIdx === -1) { setDragOverId(null); return; }
     const newOrder = [...ids];
     newOrder.splice(fromIdx, 1);
     newOrder.splice(toIdx, 0, fromId);
+
+    // Compute interpolated day for the dragged item based on its new neighbours
+    const rowMap = Object.fromEntries(rows.map(r => [r.id, r]));
+    const dropIdx = newOrder.indexOf(fromId);
+    const prevRow = dropIdx > 0 ? rowMap[newOrder[dropIdx - 1]] : null;
+    const nextRow = dropIdx < newOrder.length - 1 ? rowMap[newOrder[dropIdx + 1]] : null;
+    const prevDay = prevRow ? (prevRow.displayDay ?? prevRow.day) : 1;
+    const nextDay = nextRow ? (nextRow.displayDay ?? nextRow.day) : 31;
+    const newDay = Math.max(1, Math.min(31, Math.round((prevDay + nextDay) / 2)));
+
     onReorder(account.id, newOrder);
+    if (onUpdateDay) onUpdateDay(account.id, fromId, newDay);
     setDragOverId(null);
   };
   const effectiveAmt = (t) => {
@@ -870,13 +911,14 @@ export default function CashFlow() {
     for (let i = 0; i < 2; i++) {
       const { monthIdx, year, monthKey } = months[i];
       const mAmts = allMonthAmounts[monthKey] ?? {};
+      const mStates = allMonthStates[monthKey] ?? {};
       const effFn = (t, acctId) => mAmts[`${acctId}_${t.id}`] ?? presetsMap[t.name] ?? t.amount;
-      const endBals = computeProjectedEndBals(accounts, prev, effFn, isThreePaycheck(monthIdx, year));
+      const endBals = computeProjectedEndBals(accounts, prev, effFn, isThreePaycheck(monthIdx, year), mStates);
       result.push(endBals);
       prev = endBals;
     }
     return result;
-  }, [months, startingBals, accounts, presetsMap, isThreePaycheck, allMonthAmounts]);
+  }, [months, startingBals, accounts, presetsMap, isThreePaycheck, allMonthAmounts, allMonthStates]);
 
   // Summary per month
   const summaries = useMemo(() => {
@@ -919,7 +961,7 @@ export default function CashFlow() {
           const newOrders = {};
           DEFAULT_ACCOUNTS.forEach(a => {
             const db = dbPresets.find(p => p.name === `__start_${a.id}`);
-            if (db) { newBals[a.id] = db.amount; } // DB value is a fallback only; live balances always win
+            if (db) { newBals[a.id] = db.amount; userSetIds.add(a.id); } // protect user-set balance from Plaid overwrite
             const orderPref = dbPresets.find(p => p.name === `__order_${a.id}`);
             if (orderPref?.note) { try { newOrders[a.id] = JSON.parse(orderPref.note); } catch {} }
           });
@@ -1101,6 +1143,16 @@ export default function CashFlow() {
       }
     });
   }, [months, allRecentTxns, mappings, allMonthStates, presetsMap]);
+
+  const updateDay = useCallback((monthKey, accountId, txnId, newDay) => {
+    const key = `${accountId}_${txnId}`;
+    const existing = allMonthStates[monthKey]?.[key] ?? {};
+    setAllMonthStates(prev => ({
+      ...prev,
+      [monthKey]: { ...(prev[monthKey] ?? {}), [key]: { ...existing, actualDay: newDay } },
+    }));
+    saveCashflowState(accountId, txnId, monthKey, existing.isPending ?? false, null, existing.plaidTxnId ?? null, newDay, existing.note ?? null).catch(() => {});
+  }, [allMonthStates]);
 
   const togglePending = useCallback((monthKey, accountId, txnId) => {
     const key = `${accountId}_${txnId}`;
@@ -1350,6 +1402,7 @@ export default function CashFlow() {
                     onTogglePending={(aId, tId) => togglePending(monthKey, aId, tId)}
                     onEditNote={(aId, tId, note) => editNote(monthKey, aId, tId, note)}
                     onEditAmount={(aId, tId, tName) => editAmount(monthKey, aId, tId, tName)}
+                    onUpdateDay={(aId, tId, day) => updateDay(monthKey, aId, tId, day)}
                     onEditStart={() => editStartingBalance(acct.id)}
                     onAddRow={addRow}
                     onDeleteRow={deleteRow}

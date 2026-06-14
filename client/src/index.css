@@ -1,16 +1,16 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --bg:        #071833;
-  --surface:   #0d2144;
-  --surface2:  #112a55;
-  --border:    rgba(255,255,255,0.08);
-  --border2:   rgba(255,255,255,0.14);
-  --text:      #f7f8fb;
-  --muted:     #6c7383;
+  --bg:        #f8fafc;
+  --surface:   #ffffff;
+  --surface2:  #f1f5f9;
+  --border:    #e2e8f0;
+  --border2:   #cbd5e1;
+  --text:      #071833;
+  --muted:     #64748b;
   --accent:    #7b2cbf;
   --accent2:   #6922a8;
-  --green:     #00a19a;
+  --green:     #0f766e;
   --red:       #dc2626;
   --blue:      #3c6ff0;
 
@@ -38,7 +38,7 @@ body::before {
   transform: translateX(-50%);
   width: 800px;
   height: 400px;
-  background: radial-gradient(ellipse, rgba(123,44,191,0.12) 0%, transparent 70%);
+  background: radial-gradient(ellipse, rgba(123,44,191,0.06) 0%, transparent 70%);
   pointer-events: none;
   z-index: 0;
 }
