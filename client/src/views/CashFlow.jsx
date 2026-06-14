@@ -1011,6 +1011,7 @@ export default function CashFlow() {
     async function loadAll() {
       // 1. DB presets — amounts, starting balances, pay cycle, row order, notes
       let userSetIds = new Set();
+      let newLinks = {};   // hoisted so step 2 can read the saved Plaid account_id links
       try {
         const dbPresets = await fetchCashflowPresets();
         if (!cancelled && Array.isArray(dbPresets) && dbPresets.length > 0) {
@@ -1032,7 +1033,6 @@ export default function CashFlow() {
 
           const newBals = {};
           const newOrders = {};
-          const newLinks = {};
           DEFAULT_ACCOUNTS.forEach(a => {
             const db = dbPresets.find(p => p.name === `__start_${a.id}`);
             if (db) { newBals[a.id] = db.amount; userSetIds.add(a.id); } // protect user-set balance from Plaid overwrite
