@@ -12,7 +12,7 @@ const TYPE_COLORS = {
 const fmt = (n) =>
   n == null ? "—" : "$" + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2 });
 
-export default function Accounts({ accounts, hiddenAccounts, setHiddenAccounts }) {
+export default function Accounts({ accounts, itemErrors, hiddenAccounts, setHiddenAccounts, openUpdate, updating }) {
   const [showHidden, setShowHidden] = useState(false);
   const [toggling, setToggling] = useState({});
 
@@ -56,6 +56,23 @@ export default function Accounts({ accounts, hiddenAccounts, setHiddenAccounts }
 
   return (
     <div style={styles.wrap}>
+      {itemErrors?.length > 0 && (
+        <div style={styles.errorBanner}>
+          <span style={{ fontWeight: 600 }}>Reconnect required</span>
+          {itemErrors.map((e) => (
+            <div key={e.itemId} style={styles.errorRow}>
+              <span>{e.institutionName || e.itemId} — login credentials changed</span>
+              <button
+                style={styles.reconnectBtn}
+                disabled={updating}
+                onClick={() => openUpdate?.(e.itemId)}
+              >
+                {updating ? "Opening…" : "Reconnect"}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       <div style={styles.headingRow}>
         <h1 className="fade-up" style={styles.heading}>Accounts</h1>
         {hiddenAccountsList.length > 0 && (
@@ -148,6 +165,18 @@ const styles = {
     background: "none", border: "1px solid var(--border)", color: "var(--muted)",
     borderRadius: "var(--radius)", padding: "6px 12px", fontSize: 12,
     fontFamily: "var(--font-mono)", cursor: "pointer",
+  },
+  errorBanner: {
+    background: "rgba(248, 113, 113, 0.1)", border: "1px solid var(--red)", borderRadius: "var(--radius2)",
+    padding: "14px 18px", marginBottom: 24, color: "var(--text)", fontSize: 13,
+  },
+  errorRow: {
+    display: "flex", justifyContent: "space-between", alignItems: "center",
+    marginTop: 8, fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-mono)",
+  },
+  reconnectBtn: {
+    background: "var(--red)", color: "#fff", border: "none", borderRadius: "var(--radius)",
+    padding: "5px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer",
   },
   empty: { color: "var(--muted)", fontSize: 13, fontFamily: "var(--font-mono)", marginTop: 48, textAlign: "center" },
   groupLabel: { fontSize: 11, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--muted)", fontFamily: "var(--font-mono)", marginBottom: 12 },

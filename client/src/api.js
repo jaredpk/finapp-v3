@@ -28,6 +28,28 @@ export async function exchangePublicToken(public_token) {
   return r.json();
 }
 
+export async function fetchLinkedInstitutions() {
+  const r = await fetch(`${BASE}/linked-institutions`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function removeLinkedInstitution(itemId) {
+  const r = await fetch(`${BASE}/linked-institutions/${itemId}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+  });
+  return r.json();
+}
+
+export async function createUpdateLinkToken(item_id) {
+  const r = await fetch(`${BASE}/create_update_link_token`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ item_id }),
+  });
+  return r.json();
+}
+
 export async function fetchAccounts() {
   const r = await fetch(`${BASE}/accounts`, { headers: await authHeaders() });
   return r.json();
@@ -305,6 +327,14 @@ export async function saveCashflowPreset(name, amount, freq, note) {
     method: "PUT",
     headers: await authHeaders(),
     body: JSON.stringify({ name, amount, freq, note }),
+  });
+  return r.json();
+}
+
+export async function deleteCashflowPreset(name) {
+  const r = await fetch(`${BASE}/cashflow/presets/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
   });
   return r.json();
 }

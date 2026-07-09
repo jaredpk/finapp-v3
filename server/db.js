@@ -1636,6 +1636,10 @@ export async function upsertCashflowPreset(name, amount, freq, note) {
   );
 }
 
+export async function deleteCashflowPreset(name) {
+  await pool.query(`DELETE FROM cashflow_presets WHERE name = $1`, [name]);
+}
+
 export async function getCashflowStates(monthKey) {
   const { rows } = await pool.query(
     `SELECT account_id, txn_id, is_pending, actual_amount::float, plaid_txn_id, actual_day, note

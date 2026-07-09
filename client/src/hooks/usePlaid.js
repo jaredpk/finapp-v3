@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from "react";
 import { usePlaidLink } from "react-plaid-link";
-import { createLinkToken, exchangePublicToken } from "../api.js";
+import { createLinkToken, exchangePublicToken, createUpdateLinkToken } from "../api.js";
 
 const LINK_TOKEN_KEY = "plaid_link_token";
 
@@ -57,4 +57,47 @@ export function usePlaidConnect(onSuccess) {
   }, [linkToken, ready, open]);
 
   return { openPlaid, connecting };
+}
+
+export function usePlaidUpdateLink(onSuccess) {
+  const [linkToken, setLinkToken] = useState(null);
+  const [updating, setUpdating] = useState(false);
+
+  const openUpdate = useCallback(async (item_id) => {
+    setUpdating(true);
+    try {
+      const { link_token, error } = await createUpdateLinkToken(item_id);
+      if (error) throw new Error(error);
+      setLinkToken(link_token);
+    } catch (e) {
+      console.error("Failed to create update link token:", e);
+      setUpdating(false);
+    }
+  }, []);
+
+  const { open, ready } = usePlaidLink({
+    token: linkToken,
+    onSuccess: () => {
+      setLinkToken(null);
+      setUpdating(false);
+      onSuccess?.();
+    },
+    onExit: () => {
+      setLinkToken(null);
+      setUpdating(false);
+    },
+    onError: (err) => {
+      console.error("Plaid update error:", err);
+      setLinkToken(null);
+      setUpdating(false);
+    },
+  });
+
+  useEffect(() => {
+    if (linkToken && ready) {
+      open();
+    }
+  }, [linkToken, ready, open]);
+
+  return { openUpdate, updating };
 }

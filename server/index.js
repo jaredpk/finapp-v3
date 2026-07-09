@@ -37,7 +37,7 @@ import {
   getProperties, upsertProperty, deleteProperty, updatePropertyValue, setPropertyBaseline,
   getVehicles, upsertVehicle, deleteVehicle, setVehicleBaseline, applyVehicleDepreciation,
   getManualAccounts, upsertManualAccount, deleteManualAccount,
-  getCashflowPresets, upsertCashflowPreset, getCashflowStates, upsertCashflowState,
+  getCashflowPresets, upsertCashflowPreset, deleteCashflowPreset, getCashflowStates, upsertCashflowState,
   getCashflowMappings, upsertCashflowMapping,
   parseSimplifiCsv, isJunkSimplifiCategory, getSimplifiMappings, saveSimplifiMappings,
   getSimplifiAccountMappings, saveSimplifiAccountMappings,
@@ -376,6 +376,51 @@ app.post("/api/create_link_token", requireAuth, async (req, res) => {
   }
 });
 
+// ── List linked institutions ──────────────────────────────────────────────────
+app.get("/api/linked-institutions", requireAuth, async (req, res) => {
+  const items = await getUserItems();
+  res.json({ institutions: items.map(i => ({ itemId: i.itemId, institutionName: i.institutionName })) });
+});
+
+// ── Remove a linked institution ───────────────────────────────────────────────
+app.delete("/api/linked-institutions/:itemId", requireAuth, async (req, res) => {
+  const { itemId } = req.params;
+  const items = await getUserItems();
+  const item = items.find(i => i.itemId === itemId);
+  if (!item) return res.status(404).json({ error: "Institution not found" });
+  try {
+    await plaidClient.itemRemove({ access_token: item.accessToken });
+  } catch (_) {}
+  await removeUserItem(itemId);
+  await pool.query("DELETE FROM transaction_cursors WHERE item_id = $1", [itemId]);
+  res.json({ ok: true });
+});
+
+// ── Create update link token (re-auth an existing item) ──────────────────────
+app.post("/api/create_update_link_token", requireAuth, async (req, res) => {
+  const { item_id } = req.body;
+  if (!item_id) return res.status(400).json({ error: "item_id required" });
+  const items = await getUserItems();
+  const item = items.find((i) => i.itemId === item_id);
+  if (!item) return res.status(404).json({ error: "item not found" });
+  try {
+    const linkTokenRequest = {
+      user: { client_user_id: 'jared' },
+      client_name: "FinApp",
+      country_codes: [CountryCode.Us],
+      language: "en",
+      webhook: `${APP_URL}/api/webhooks/plaid`,
+      access_token: item.accessToken,
+    };
+    if (process.env.PLAID_REDIRECT_URI) linkTokenRequest.redirect_uri = process.env.PLAID_REDIRECT_URI;
+    const response = await plaidClient.linkTokenCreate(linkTokenRequest);
+    res.json({ link_token: response.data.link_token });
+  } catch (err) {
+    console.error(err.response?.data || err.message);
+    res.status(500).json({ error: "Failed to create update link token" });
+  }
+});
+
 // ── Exchange public token ─────────────────────────────────────────────────────
 app.post("/api/exchange_public_token", async (req, res) => {
   const { public_token, session } = req.body;
@@ -396,6 +441,16 @@ app.post("/api/exchange_public_token", async (req, res) => {
         institutionName = instResp.data.institution.name;
       }
     } catch (_) {}
+    // Remove any existing item for the same institution with a different item_id
+    // (happens when "Connect Bank" is used to re-link an already-connected institution)
+    if (institutionName) {
+      const existing = await getUserItems();
+      for (const old of existing.filter(i => i.institutionName === institutionName && i.itemId !== item_id)) {
+        await removeUserItem(old.itemId);
+        await pool.query("DELETE FROM transaction_cursors WHERE item_id = $1", [old.itemId]);
+        console.log(`Replaced duplicate item for ${institutionName} (old: ${old.itemId})`);
+      }
+    }
     await upsertUserItem(access_token, item_id, institutionName);
     syncTransactions().catch((e) => console.error("Post-link sync failed:", e.message));
     const acctResp = await plaidClient.accountsGet({ access_token });
@@ -439,20 +494,25 @@ app.get("/api/accounts", requireAuth, async (req, res) => {
   const applyNicknames = (accts) =>
     accts.map((a) => nicknames[a.account_id] ? { ...a, name: nicknames[a.account_id], official_name: a.official_name || a.name } : a);
 
-  // Plaid live accounts
+  // Plaid live accounts — use allSettled so one bad item doesn't wipe the rest
   let plaidAccounts = [];
+  let itemErrors = [];
   if (items.length > 0) {
-    try {
-      const all = await Promise.all(
-        items.map(async ({ accessToken, itemId, institutionName }) => {
-          const r = await plaidClient.accountsGet({ access_token: accessToken });
-          return r.data.accounts.map((a) => ({ ...a, institutionName, itemId, source: "plaid" }));
-        })
-      );
-      plaidAccounts = all.flat();
-    } catch (err) {
-      console.error("Plaid accountsGet error:", err.message);
-    }
+    const results = await Promise.allSettled(
+      items.map(async ({ accessToken, itemId, institutionName }) => {
+        const r = await plaidClient.accountsGet({ access_token: accessToken });
+        return r.data.accounts.map((a) => ({ ...a, institutionName, itemId, source: "plaid" }));
+      })
+    );
+    plaidAccounts = results.filter((r) => r.status === "fulfilled").flatMap((r) => r.value);
+    itemErrors = items
+      .map(({ itemId, institutionName }, i) =>
+        results[i].status === "rejected"
+          ? { itemId, institutionName, error: results[i].reason?.response?.data?.error_code || results[i].reason?.message }
+          : null
+      )
+      .filter(Boolean);
+    for (const e of itemErrors) console.error(`Plaid accountsGet error [${e.institutionName}]:`, e.error);
   }
 
   // Imported balance snapshot accounts
@@ -468,8 +528,21 @@ app.get("/api/accounts", requireAuth, async (req, res) => {
     return { account_id, name: r.account, official_name: r.account, type, subtype: r.type || type, balances: { current, available }, institutionName: r.institution, mask: null, source: "imported" };
   });
 
-  // Investment holdings (skip institutions already in balance rows)
+  // Deduplicate imported accounts against live Plaid accounts (same institution + last-4 mask)
   const normInst = (s) => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const plaidMaskKeys = new Set(
+    plaidAccounts
+      .filter((pa) => pa.mask && pa.institutionName)
+      .map((pa) => `${normInst(pa.institutionName)}|${pa.mask}`)
+  );
+  const maskSuffix = (name) => { const m = (name || "").match(/(\d{4})$/); return m ? m[1] : null; };
+  const filteredImportedAccounts = importedAccounts.filter((ia) => {
+    const mask = maskSuffix(ia.name);
+    if (!mask || !ia.institutionName) return true;
+    return !plaidMaskKeys.has(`${normInst(ia.institutionName)}|${mask}`);
+  });
+
+  // Investment holdings (skip institutions already in balance rows)
   const isSummaryTicker = (t) => /total|count|change|\btoday\b|portfolio|holding/i.test(t || "");
   const balInstitutions = new Set(balRows.map((r) => normInst(r.institution)));
   const isCoveredInst = (inst) => { const n = normInst(inst); return Array.from(balInstitutions).some((c) => n.startsWith(c) || c.startsWith(n)); };
@@ -503,8 +576,9 @@ app.get("/api/accounts", requireAuth, async (req, res) => {
 
   const snapshotDate = balRows[0]?.snapshot_date || holdingRows[0]?.snapshot_date;
   res.json({
-    accounts: applyNicknames([...plaidAccounts, ...importedAccounts, ...holdingAccounts, ...propertyAccounts, ...manualAccounts, ...vehicleAccounts]),
+    accounts: applyNicknames([...plaidAccounts, ...filteredImportedAccounts, ...holdingAccounts, ...propertyAccounts, ...manualAccounts, ...vehicleAccounts]),
     ...(snapshotDate ? { snapshotDate } : {}),
+    ...(itemErrors.length > 0 ? { itemErrors } : {}),
   });
 });
 
@@ -1451,6 +1525,15 @@ app.put("/api/cashflow/presets", requireAuth, async (req, res) => {
   try {
     const { name, amount, freq, note } = req.body;
     await upsertCashflowPreset(name, parseFloat(amount), freq, note);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/cashflow/presets/:name", requireAuth, async (req, res) => {
+  try {
+    await deleteCashflowPreset(req.params.name);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });

@@ -1,7 +1,10 @@
 import React, { useState, useEffect, useRef } from "react";
-import { getApiKey, generateApiKey, analyzeSimplifi, importSimplifi, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi, setPropertyBaselineApi, fetchManualAccounts, saveManualAccount, deleteManualAccountApi, downloadXlsx, saveAccountNickname, deleteAccountNicknameApi, getLastAudit, uploadAuditSheet, insertAuditTransactions, completeAudit, fetchImportedAccounts, clearImportedTransactions, fetchVehicles, saveVehicle, deleteVehicleApi, setVehicleBaselineApi, syncVehiclesApi } from "../api.js";
+import { getApiKey, generateApiKey, analyzeSimplifi, importSimplifi, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi, setPropertyBaselineApi, fetchManualAccounts, saveManualAccount, deleteManualAccountApi, downloadXlsx, saveAccountNickname, deleteAccountNicknameApi, getLastAudit, uploadAuditSheet, insertAuditTransactions, completeAudit, fetchImportedAccounts, clearImportedTransactions, fetchVehicles, saveVehicle, deleteVehicleApi, setVehicleBaselineApi, syncVehiclesApi, fetchLinkedInstitutions, removeLinkedInstitution } from "../api.js";
 
 export default function Settings({ reloadData, user, accounts = [] }) {
+  // Connected banks state
+  const [institutions, setInstitutions] = useState([]);
+  const [removingInstitution, setRemovingInstitution] = useState(null);
   const [apiKey, setApiKey] = useState(null);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
@@ -95,7 +98,20 @@ export default function Settings({ reloadData, user, accounts = [] }) {
     fetchManualAccounts().then((data) => { setManualAccounts(data.accounts || []); setManualLoading(false); });
     fetchVehicles().then((data) => { setVehicles(data.vehicles || []); setVehiclesLoading(false); });
     getLastAudit().then(({ log }) => setLastAudit(log || null)).catch(() => {});
+    fetchLinkedInstitutions().then((data) => setInstitutions(data.institutions || [])).catch(() => {});
   }, []);
+
+  async function removeInstitution(itemId, institutionName) {
+    if (!window.confirm(`Remove ${institutionName}? You can reconnect at any time.`)) return;
+    setRemovingInstitution(itemId);
+    try {
+      await removeLinkedInstitution(itemId);
+      setInstitutions((prev) => prev.filter((i) => i.itemId !== itemId));
+      reloadData?.();
+    } finally {
+      setRemovingInstitution(null);
+    }
+  }
 
   // Seed nickname inputs from current account names whenever accounts load
   useEffect(() => {
@@ -550,6 +566,34 @@ export default function Settings({ reloadData, user, accounts = [] }) {
           <span style={styles.label}>Email</span>
           <span style={styles.value}>{user?.email || "—"}</span>
         </div>
+      </section>
+
+      {/* Connected Banks */}
+      <section style={styles.card}>
+        <h2 style={styles.cardTitle}>Connected Banks</h2>
+        <p style={styles.description}>
+          Remove a linked institution to disconnect it and start fresh. Transactions already synced are not deleted.
+        </p>
+        {institutions.length === 0 ? (
+          <p style={styles.muted}>No institutions linked yet.</p>
+        ) : (
+          <div>
+            {institutions.map((inst) => (
+              <div style={styles.propRow} key={inst.itemId}>
+                <p style={{ flex: 1, fontSize: 13, fontWeight: 600, color: "var(--text)", margin: 0 }}>
+                  {inst.institutionName || inst.itemId}
+                </p>
+                <button
+                  style={styles.deleteBtn}
+                  disabled={removingInstitution === inst.itemId}
+                  onClick={() => removeInstitution(inst.itemId, inst.institutionName)}
+                >
+                  {removingInstitution === inst.itemId ? "Removing…" : "Remove"}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
       {/* Audit */}

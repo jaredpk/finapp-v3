@@ -9,7 +9,7 @@ import Budget from "./views/Budget.jsx";
 import CashFlow from "./views/CashFlow.jsx";
 import PropertyFinance from "./views/PropertyFinance.jsx";
 import Settings from "./views/Settings.jsx";
-import { usePlaidConnect } from "./hooks/usePlaid.js";
+import { usePlaidConnect, usePlaidUpdateLink } from "./hooks/usePlaid.js";
 import {
   fetchAccounts, fetchTransactions, setTokenGetter,
   fetchCategories, fetchAssignments, fetchMerchantOverrides,
@@ -98,6 +98,7 @@ function LoginScreen({ supabase }) {
 function AuthenticatedApp({ supabase, session }) {
   const [view, setView] = useState("dashboard");
   const [accounts, setAccounts] = useState([]);
+  const [itemErrors, setItemErrors] = useState([]);
   const [transactions, setTransactions] = useState([]);
   const [categories, setCategories] = useState([]);
   const [assignments, setAssignments] = useState({});
@@ -132,6 +133,7 @@ function AuthenticatedApp({ supabase, session }) {
         fetchHiddenAccounts(),
       ]);
       setAccounts(acctRes.accounts || []);
+      setItemErrors(acctRes.itemErrors || []);
       setTransactions(txnRes.transactions || []);
       setCategories(catRes.categories || []);
 
@@ -175,6 +177,7 @@ function AuthenticatedApp({ supabase, session }) {
   }
 
   const { openPlaid, connecting } = usePlaidConnect(handleNewAccounts);
+  const { openUpdate, updating } = usePlaidUpdateLink(loadData);
 
   useEffect(() => {
     loadData();
@@ -182,6 +185,9 @@ function AuthenticatedApp({ supabase, session }) {
 
   const sharedProps = {
     accounts,
+    itemErrors,
+    openUpdate,
+    updating,
     transactions,
     categories,
     assignments,
