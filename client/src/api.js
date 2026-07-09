@@ -465,6 +465,107 @@ export async function removeHiddenAccountApi(account_id) {
   return r.json();
 }
 
+// ── Property Finance ──────────────────────────────────────────────────────────
+export async function fetchPropertyFinanceProperties() {
+  const r = await fetch(`${BASE}/property-finance/properties`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function seedPropertyFinanceApi() {
+  const r = await fetch(`${BASE}/property-finance/seed`, {
+    method: "POST",
+    headers: await authHeaders(),
+  });
+  return r.json();
+}
+
+export async function fetchPropertyFinanceDetail(propertyId) {
+  const r = await fetch(`${BASE}/property-finance/properties/${propertyId}`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function fetchPropertyTransactions(propertyId, params = {}) {
+  const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v !== undefined && v !== "")).toString();
+  const r = await fetch(`${BASE}/property-finance/properties/${propertyId}/transactions${qs ? `?${qs}` : ""}`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function updatePropertyTransactionCategory(transactionId, normalizedCategory) {
+  const r = await fetch(`${BASE}/property-finance/transactions/${encodeURIComponent(transactionId)}/category`, {
+    method: "PUT",
+    headers: await authHeaders(),
+    body: JSON.stringify({ normalizedCategory }),
+  });
+  return r.json();
+}
+
+export async function updatePropertyTransactionAllocation(transactionId, allocation) {
+  const r = await fetch(`${BASE}/property-finance/transactions/${encodeURIComponent(transactionId)}/allocation`, {
+    method: "PUT",
+    headers: await authHeaders(),
+    body: JSON.stringify(allocation),
+  });
+  return r.json();
+}
+
+export async function reconcilePropertyTransaction(transactionId, isReconciled, viaReserveAccount = false) {
+  const r = await fetch(`${BASE}/property-finance/transactions/${encodeURIComponent(transactionId)}/reconcile`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ isReconciled, viaReserveAccount }),
+  });
+  return r.json();
+}
+
+export async function excludePropertyTransaction(transactionId, excluded = true) {
+  const r = await fetch(`${BASE}/property-finance/transactions/${encodeURIComponent(transactionId)}/exclude`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ excluded }),
+  });
+  return r.json();
+}
+
+export async function fetchPropertyReviewQueue(propertyId) {
+  const r = await fetch(`${BASE}/property-finance/properties/${propertyId}/review-queue`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function resolvePropertyReviewRow(id) {
+  const r = await fetch(`${BASE}/property-finance/review-queue/${id}/resolve`, {
+    method: "POST",
+    headers: await authHeaders(),
+  });
+  return r.json();
+}
+
+export async function fetchPropertyUsagePeriods(propertyId, year) {
+  const qs = year ? `?year=${year}` : "";
+  const r = await fetch(`${BASE}/property-finance/properties/${propertyId}/usage-periods${qs}`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function fetchPropertyAuditLog(propertyId) {
+  const r = await fetch(`${BASE}/property-finance/properties/${propertyId}/audit-log`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function fetchPropertyPlaidPreview(propertyId, year) {
+  const qs = year ? `?year=${year}` : "";
+  const r = await fetch(`${BASE}/property-finance/properties/${propertyId}/plaid-preview${qs}`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function applyPropertyPlaidPreview(propertyId, transactionId, year) {
+  const qs = year ? `?year=${year}` : "";
+  const r = await fetch(`${BASE}/property-finance/properties/${propertyId}/plaid-preview/apply${qs}`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ transactionId }),
+  });
+  return r.json();
+}
+
 export async function fetchTransactionsForMonth(monthKey) {
   const [year, month] = monthKey.split("-");
   const startDate = `${year}-${month}-01`;

@@ -1,6 +1,7 @@
 import pg from "pg";
 import { randomBytes, createHash } from "crypto";
 import xlsxLib from "xlsx";
+import { initPropertyFinanceSchema } from "./property/schema.js";
 
 const { Pool } = pg;
 
@@ -410,6 +411,8 @@ export async function initDb() {
       END IF;
     END $$;
   `);
+
+  await initPropertyFinanceSchema(pool);
 }
 
 // ── API Keys ──────────────────────────────────────────────────────────────────
