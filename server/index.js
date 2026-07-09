@@ -46,6 +46,7 @@ import {
   getTransactionDateAmountSet, parseAuditXlsx,
 } from "./db.js";
 import pool from "./db.js";
+import { registerPropertyFinanceRoutes } from "./property/routes.js";
 
 dotenv.config();
 
@@ -241,6 +242,8 @@ async function requireApiKeyOrAuth(req, res, next) {
   }
   return res.status(401).json({ error: "Unauthorized" });
 }
+
+registerPropertyFinanceRoutes(app, requireAuth);
 
 // ── User API key management ───────────────────────────────────────────────────
 app.get("/api/user/api-key", requireAuth, async (req, res) => {

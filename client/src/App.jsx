@@ -7,6 +7,7 @@ import Transactions from "./views/Transactions.jsx";
 import Categories from "./views/Categories.jsx";
 import Budget from "./views/Budget.jsx";
 import CashFlow from "./views/CashFlow.jsx";
+import PropertyFinance from "./views/PropertyFinance.jsx";
 import Settings from "./views/Settings.jsx";
 import { usePlaidConnect } from "./hooks/usePlaid.js";
 import {
@@ -203,6 +204,7 @@ function AuthenticatedApp({ supabase, session }) {
     categories: Categories,
     budget: Budget,
     cashflow: CashFlow,
+    property: PropertyFinance,
     settings: Settings,
   };
   const ActiveView = VIEWS[view] || Dashboard;
