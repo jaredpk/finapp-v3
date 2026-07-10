@@ -216,11 +216,18 @@ export async function listUsagePeriods(propertyId, year) {
 export async function insertReviewRows(propertyId, importBatchId, reviewQueue) {
   let count = 0;
   for (const r of reviewQueue) {
-    await pool.query(
-      `INSERT INTO pf_review_queue (property_id, import_batch_id, year, raw_row, reason) VALUES ($1,$2,$3,$4,$5)`,
+    // Re-importing a year re-parses the same failing rows; skip any row already
+    // queued (or already resolved) so re-imports don't duplicate the queue.
+    const { rowCount } = await pool.query(
+      `INSERT INTO pf_review_queue (property_id, import_batch_id, year, raw_row, reason)
+       SELECT $1, $2, $3, $4::jsonb, $5
+       WHERE NOT EXISTS (
+         SELECT 1 FROM pf_review_queue
+         WHERE property_id = $1 AND year = $3 AND raw_row = $4::jsonb
+       )`,
       [propertyId, importBatchId, r.year, JSON.stringify(r.rawRow), r.reason]
     );
-    count++;
+    count += rowCount;
   }
   return count;
 }
