@@ -514,6 +514,15 @@ export async function fetchPropertyFinanceDetail(propertyId) {
   return r.json();
 }
 
+export async function uploadPropertyWorkbook(propertyId, { fileBase64, mode = "preview", years } = {}) {
+  const r = await fetch(`${BASE}/property-finance/properties/${propertyId}/import/upload`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ fileBase64, mode, years }),
+  });
+  return r.json();
+}
+
 export async function fetchPropertyTransactions(propertyId, params = {}) {
   const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v !== undefined && v !== "")).toString();
   const r = await fetch(`${BASE}/property-finance/properties/${propertyId}/transactions${qs ? `?${qs}` : ""}`, { headers: await authHeaders() });

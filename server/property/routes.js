@@ -1,5 +1,6 @@
 import {
   listProperties, getProperty, createProperty, listYearsForProperty,
+  ensurePropertyYear,
   listTransactions, updateTransactionCategory, updateTransactionAllocation,
   setTransactionReconciled, setTransactionExcluded, listReviewQueue, resolveReviewRow,
   listUsagePeriods, listAuditLog, listCategoryMappings, upsertTransaction,
@@ -7,10 +8,33 @@ import {
   bulkUpsertTransactions,
 } from "./repository.js";
 import { parseWorkbook } from "./importParsers/index.js";
+import { workbookBase64ToSheets } from "./importParsers/xlsxToSheets.js";
 import { matchPlaidTransaction, detectRecurringCharges } from "./matching.js";
 import { sampleLivePlaidTransactions } from "./fixtures/samplePlaidTransactions.js";
 import { NORMALIZED_CATEGORIES } from "./categories.js";
 import { seedPropertyFinanceData } from "./seed.js";
+
+// Commits parsed sheets for a property: one import batch per sheet, and a
+// pf_property_years row per imported year so the year shows up as a card on
+// the Property page. Years that already exist are left untouched (never
+// downgrades a live year to backfill).
+async function commitSheets(propertyId, sheets) {
+  const existingYears = new Set((await listYearsForProperty(propertyId)).map((y) => y.year));
+  const batchResults = [];
+  for (const sheet of sheets) {
+    if (!existingYears.has(sheet.year)) {
+      await ensurePropertyYear(propertyId, sheet.year, { isLive: false, dataSource: "backfill" });
+    }
+    const batch = await createImportBatch(propertyId, { year: sheet.year, sheetLabel: sheet.label });
+    const { transactions, usagePeriods, reviewQueue } = parseWorkbook([sheet], { propertyId, batchLabelPrefix: `batch_${batch.id}` });
+    const imported = await bulkUpsertTransactions(transactions);
+    const usageCount = await insertUsagePeriods(propertyId, usagePeriods);
+    const reviewCount = await insertReviewRows(propertyId, batch.id, reviewQueue);
+    await updateImportBatchCounts(batch.id, { rowCount: sheet.rows.length - 1, importedCount: imported, reviewCount, usagePeriodCount: usageCount });
+    batchResults.push({ batchId: batch.id, year: sheet.year, imported, reviewCount, usageCount });
+  }
+  return batchResults;
+}
 
 // Registers all /api/property-finance/* routes. Business logic lives in
 // repository.js / matching.js / importParsers — handlers here only translate
@@ -120,18 +144,50 @@ export function registerPropertyFinanceRoutes(app, requireAuth) {
   app.post("/api/property-finance/properties/:id/import/commit", requireAuth, async (req, res) => {
     const { sheets } = req.body || {};
     if (!Array.isArray(sheets)) return res.status(400).json({ error: "sheets array required" });
+    res.json({ batches: await commitSheets(Number(req.params.id), sheets) });
+  });
+
+  // Accepts a raw workbook upload (base64 xlsx) and either previews or commits
+  // it. Year-ledger tabs are auto-detected from tab names; `years` optionally
+  // restricts which tabs are used (so a live year fed by Plaid can be skipped).
+  app.post("/api/property-finance/properties/:id/import/upload", requireAuth, async (req, res) => {
+    const { fileBase64, mode = "preview", years } = req.body || {};
+    if (!fileBase64) return res.status(400).json({ error: "fileBase64 required" });
     const propertyId = Number(req.params.id);
-    const batchResults = [];
-    for (const sheet of sheets) {
-      const batch = await createImportBatch(propertyId, { year: sheet.year, sheetLabel: sheet.label });
-      const { transactions, usagePeriods, reviewQueue } = parseWorkbook([sheet], { propertyId, batchLabelPrefix: `batch_${batch.id}` });
-      const imported = await bulkUpsertTransactions(transactions);
-      const usageCount = await insertUsagePeriods(propertyId, usagePeriods);
-      const reviewCount = await insertReviewRows(propertyId, batch.id, reviewQueue);
-      await updateImportBatchCounts(batch.id, { rowCount: sheet.rows.length - 1, importedCount: imported, reviewCount, usagePeriodCount: usageCount });
-      batchResults.push({ batchId: batch.id, year: sheet.year, imported, reviewCount, usageCount });
+    let sheets;
+    try {
+      sheets = workbookBase64ToSheets(fileBase64);
+    } catch (err) {
+      return res.status(400).json({ error: `could not read workbook: ${err.message}` });
     }
-    res.json({ batches: batchResults });
+    if (Array.isArray(years) && years.length > 0) {
+      const wanted = new Set(years.map(Number));
+      sheets = sheets.filter((s) => wanted.has(s.year));
+    }
+    if (sheets.length === 0) return res.status(400).json({ error: "no year tabs found in workbook" });
+
+    if (mode === "commit") {
+      return res.json({ batches: await commitSheets(propertyId, sheets) });
+    }
+
+    const existingYears = await listYearsForProperty(propertyId);
+    const preview = sheets.map((sheet) => {
+      const { transactions, usagePeriods, reviewQueue } = parseWorkbook([sheet], { propertyId, batchLabelPrefix: "preview" });
+      const income = transactions.filter((t) => t.direction === "income").reduce((s, t) => s + t.amount, 0);
+      const expenses = transactions.filter((t) => t.direction === "expense").reduce((s, t) => s + t.amount, 0);
+      return {
+        year: sheet.year,
+        label: sheet.label,
+        transactionCount: transactions.length,
+        income: Math.round(income * 100) / 100,
+        expenses: Math.round(expenses * 100) / 100,
+        reviewCount: reviewQueue.length,
+        usageCount: usagePeriods.length,
+        isLive: !!existingYears.find((y) => y.year === sheet.year)?.is_live,
+        alreadyExists: existingYears.some((y) => y.year === sheet.year),
+      };
+    });
+    res.json({ preview });
   });
 
   // Runs the mock live Plaid feed through the matching layer against this

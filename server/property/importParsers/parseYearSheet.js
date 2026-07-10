@@ -37,6 +37,8 @@ export function parseYearSheet(sheet) {
     const parsed = parseTransactionRow(row, columnMap, year);
     if (parsed) {
       transactions.push(parsed);
+    } else if (isZeroNoiseRow(row, columnMap)) {
+      continue; // zero-value placeholder rows with no label — not worth review
     } else {
       reviewQueue.push({
         year,
@@ -48,6 +50,21 @@ export function parseYearSheet(sheet) {
   }
 
   return { transactions, usagePeriods, reviewQueue };
+}
+
+// A row that failed to parse is silent noise (vs. review-worthy) when it has
+// no descriptive text and no non-zero amount in any mapped amount column —
+// e.g. "$0.00" placeholder rows carried down by spreadsheet fill.
+function isZeroNoiseRow(row, columnMap) {
+  for (const key of ["type", "category", "notes"]) {
+    if (columnMap[key] !== undefined && String(row[columnMap[key]] ?? "").trim() !== "") return false;
+  }
+  for (const key of ["rents", "directExpense", "impliedExpense", "expense", "gross"]) {
+    if (columnMap[key] === undefined) continue;
+    const n = parseAmountCell(row[columnMap[key]]);
+    if (n != null && n !== 0) return false;
+  }
+  return true;
 }
 
 function tryParseUsageRow(row, columnMap, year) {

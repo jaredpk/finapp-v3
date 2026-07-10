@@ -14,6 +14,7 @@ import ReconciliationQueue from "../components/property/ReconciliationQueue.jsx"
 import AllocationPanel from "../components/property/AllocationPanel.jsx";
 import YearComparisonCards from "../components/property/YearComparisonCards.jsx";
 import AuditDetail from "../components/property/AuditDetail.jsx";
+import ImportSpreadsheetPanel from "../components/property/ImportSpreadsheetPanel.jsx";
 
 export default function PropertyFinance() {
   const [properties, setProperties] = useState(null); // null = loading
@@ -129,6 +130,12 @@ export default function PropertyFinance() {
     setReviewQueue((prev) => prev.filter((r) => r.id !== id));
   }
 
+  async function handleImported() {
+    setTransactionsByYear({}); // re-imported years need fresh summaries
+    await loadProperties();
+    if (property && selectedYear) await loadYearData(property.id, selectedYear);
+  }
+
   if (properties === null) {
     return <div style={styles.wrap}><p style={styles.muted}>Loading property finance…</p></div>;
   }
@@ -178,6 +185,7 @@ export default function PropertyFinance() {
             onResolveReview={handleResolveReview}
           />
           <AllocationPanel transactions={transactions} usagePeriods={usagePeriods} />
+          <ImportSpreadsheetPanel propertyId={property.id} onImported={handleImported} />
           <AuditDetail entries={auditLog} />
         </>
       )}

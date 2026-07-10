@@ -18,7 +18,7 @@
 // A "sheet" for the parser is: { year, rows: Array<Array<any>> }
 
 export const SUMMARY_ROW_PATTERN =
-  /^\s*(total|totals|subtotal|depreciation|net income|net rental income|gross income|summary|grand total)\s*:?\s*$/i;
+  /^\s*(total|totals|subtotal|depreciation|net income|net rental income|gross income|summary|grand total|year end summary|1099 misc box \d+|total income reported on 1099-misc)\s*:?\s*$/i;
 
 const USAGE_HEADER_ALIASES = ["days rented", "days personal use", "days vacant"];
 
@@ -45,8 +45,11 @@ export function isBlankRow(row) {
 // these rows are frequently mis-shifted by a column in the source sheet.
 export function isSummaryRow(row) {
   if (!row) return false;
-  const firstText = row.find((c) => c !== null && c !== undefined && String(c).trim() !== "");
-  return firstText != null && SUMMARY_ROW_PATTERN.test(String(firstText));
+  // Summary labels can sit next to a totals number (e.g. [18051.67, "1099 MISC
+  // Box 1"]), so test the first few non-empty cells, not just the first. Real
+  // transaction rows start with a date then amounts, which never match.
+  const nonEmpty = row.filter((c) => c !== null && c !== undefined && String(c).trim() !== "").slice(0, 3);
+  return nonEmpty.some((c) => SUMMARY_ROW_PATTERN.test(String(c)));
 }
 
 export function isUsageHeaderPresent(headerMap) {
@@ -84,6 +87,16 @@ export function parseDateCell(raw, fallbackYear) {
     const monthIdx = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
       .indexOf(monthNameMatch[1].toLowerCase());
     const year = fallbackYear || new Date().getFullYear();
+    return `${year}-${String(monthIdx + 1).padStart(2, "0")}-01`;
+  }
+  // "Jan-26" / "Jan 2026" month-year cells — must run before the Date()
+  // fallback, which misparses "Jan-26" as a day-of-month.
+  const monthYearName = s.match(/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?[-\s'](\d{2}|\d{4})$/i);
+  if (monthYearName) {
+    const monthIdx = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+      .indexOf(monthYearName[1].slice(0, 3).toLowerCase());
+    const yy = monthYearName[2];
+    const year = yy.length === 4 ? Number(yy) : 2000 + Number(yy);
     return `${year}-${String(monthIdx + 1).padStart(2, "0")}-01`;
   }
   const d = new Date(s);
