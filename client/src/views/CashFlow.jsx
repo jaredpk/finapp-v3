@@ -1,11 +1,12 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import {
-  fetchCashflowPresets, saveCashflowPreset,
+  fetchCashflowPresets, saveCashflowPreset, deleteCashflowPreset,
   fetchCashflowStates, saveCashflowState,
   fetchCashflowMappings, saveCashflowMapping,
   fetchTransactionsForMonth,
   fetchAccounts,
   fetchAccountBalances,
+  saveAssignment, createCategoryApi,
 } from "../api";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -243,6 +244,95 @@ function matchImportedBalance(row, acctId) {
   return false;
 }
 
+// ── Auto-Match helpers ──────────────────────────────────────────────────────────
+// Days since epoch, for comparing transaction dates independent of timezone.
+const dayNumber = (dateStr) => Math.floor(new Date((dateStr || "").slice(0, 10) + "T12:00:00").getTime() / 86400000);
+const merchantLabel = (txn) => txn.merchant_name || txn.name || "Unknown";
+// Normalized merchant key for grouping recurring charges — strips digits, punctuation, and common payment-processor noise words.
+function merchantKey(txn) {
+  return merchantLabel(txn)
+    .toLowerCase()
+    .replace(/[0-9]+/g, " ")
+    .replace(/[^a-z\s]/g, " ")
+    .replace(/\b(payment|pmt|ach|pos|debit|credit|purchase|recurring|autopay|auto|web|online|id|ref|xx+|x+)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Finds outflow/inflow transaction pairs across different accounts with equal
+// (opposite-signed) amounts within a few days of each other — i.e. transfers
+// between your own accounts, so both sides can be tagged "Transfer" together.
+function findTransferMatches(transactions) {
+  const candidates = transactions.filter((t) => !t.hidden && t.account_id && Math.abs(t.amount) >= 1 && t.date);
+  const inflows = candidates.filter((t) => t.amount > 0).sort((a, b) => (a.date < b.date ? 1 : -1));
+  const outflows = candidates.filter((t) => t.amount < 0);
+  const usedOutflowIds = new Set();
+  const matches = [];
+  for (const inTxn of inflows) {
+    let best = null;
+    let bestDayDiff = 4; // must be within 4 days to count as a match
+    for (const outTxn of outflows) {
+      if (usedOutflowIds.has(outTxn.transaction_id)) continue;
+      if (outTxn.account_id === inTxn.account_id) continue;
+      if (Math.abs(inTxn.amount + outTxn.amount) > 0.01) continue;
+      const dayDiff = Math.abs(dayNumber(inTxn.date) - dayNumber(outTxn.date));
+      if (dayDiff < bestDayDiff) { best = outTxn; bestDayDiff = dayDiff; }
+    }
+    if (best) {
+      usedOutflowIds.add(best.transaction_id);
+      matches.push({ key: `xfer_${inTxn.transaction_id}_${best.transaction_id}`, out: best, in: inTxn, amount: Math.abs(inTxn.amount), dayDiff: bestDayDiff });
+    }
+  }
+  return matches.sort((a, b) => (a.out.date < b.out.date ? 1 : -1));
+}
+
+// Groups transactions by normalized merchant + direction, then flags groups
+// whose intervals cluster around a known cadence (weekly/bi-weekly/monthly/
+// quarterly) as likely recurring charges (paychecks, card payments, etc).
+function findRecurringGroups(transactions, excludeIds) {
+  const groups = {};
+  for (const t of transactions) {
+    if (t.hidden || excludeIds.has(t.transaction_id) || !t.date || Math.abs(t.amount) < 1) continue;
+    const key = merchantKey(t);
+    if (key.length < 3) continue;
+    const groupKey = `${t.amount > 0 ? "out" : "in"}|${key}`;
+    (groups[groupKey] = groups[groupKey] || []).push(t);
+  }
+  const CADENCES = [
+    { label: "weekly", days: 7 },
+    { label: "bi-weekly", days: 14 },
+    { label: "monthly", days: 30 },
+    { label: "quarterly", days: 91 },
+  ];
+  const results = [];
+  for (const [groupKey, txns] of Object.entries(groups)) {
+    if (txns.length < 3) continue;
+    const sorted = [...txns].sort((a, b) => (a.date < b.date ? -1 : 1));
+    const intervals = [];
+    for (let i = 1; i < sorted.length; i++) intervals.push(dayNumber(sorted[i].date) - dayNumber(sorted[i - 1].date));
+    const medianInterval = [...intervals].sort((a, b) => a - b)[Math.floor(intervals.length / 2)];
+    let cadence = null;
+    for (const c of CADENCES) {
+      const withinTolerance = intervals.filter((d) => Math.abs(d - c.days) <= c.days * 0.3).length / intervals.length;
+      if (withinTolerance >= 0.6) { cadence = c.label; break; }
+    }
+    if (!cadence) continue;
+    const amounts = sorted.map((t) => Math.abs(t.amount));
+    results.push({
+      key: groupKey,
+      txns: sorted,
+      merchant: merchantLabel(sorted[sorted.length - 1]),
+      direction: groupKey.startsWith("out") ? "expense" : "income",
+      cadence,
+      count: sorted.length,
+      minAmt: Math.min(...amounts),
+      maxAmt: Math.max(...amounts),
+      medianInterval,
+    });
+  }
+  return results.sort((a, b) => b.count - a.count);
+}
+
 // ── Summary helper ────────────────────────────────────────────────────────────
 function computeSummary(accounts, effectiveAmtFn, isThreePaycheck) {
   let takeHome = 0, expenses = 0;
@@ -287,21 +377,22 @@ function MonthBadge({ label }) {
   );
 }
 
-function SummaryBar({ takeHome, expenses, freeCashflow }) {
+function SummaryBar({ takeHome, expenses, freeCashflow, labels }) {
+  const [inLabel, outLabel, netLabel] = labels ?? ["Take-Home Income", "Est. Expenses", "Free Cashflow"];
   return (
     <div style={styles.summaryBar}>
       <div style={styles.summaryItem}>
-        <span style={styles.summaryLabel}>Take-Home Income</span>
+        <span style={styles.summaryLabel}>{inLabel}</span>
         <span style={{ ...styles.summaryVal, color: "var(--green)" }}>{fmt(takeHome)}</span>
       </div>
       <div style={styles.summaryDivider} />
       <div style={styles.summaryItem}>
-        <span style={styles.summaryLabel}>Est. Expenses</span>
+        <span style={styles.summaryLabel}>{outLabel}</span>
         <span style={{ ...styles.summaryVal, color: "var(--red)" }}>{fmt(expenses)}</span>
       </div>
       <div style={styles.summaryDivider} />
       <div style={styles.summaryItem}>
-        <span style={styles.summaryLabel}>Free Cashflow</span>
+        <span style={styles.summaryLabel}>{netLabel}</span>
         <span style={{ ...styles.summaryVal, color: freeCashflow >= 0 ? "var(--accent)" : "var(--red)" }}>
           {fmt(freeCashflow, true)}
         </span>
@@ -310,7 +401,10 @@ function SummaryBar({ takeHome, expenses, freeCashflow }) {
   );
 }
 
-function AccountTable({ account, startingBalance, allowEditStart, isLinked, presetsMap, monthStates, monthAmounts, isThreePaycheckMonth, onTogglePending, onEditNote, onEditAmount, onUpdateDay, onEditStart, onLinkAccount, onAddRow, onDeleteRow, txnOrder, onReorder }) {
+// `compact` is accepted (used in the "All Accounts" tab, which shows every account
+// side by side) but currently has no visual effect — the original compact styling
+// couldn't be reliably reconstructed from minified code, so this renders full-size.
+function AccountTable({ account, startingBalance, allowEditStart, isLinked, presetsMap, monthStates, monthAmounts, isThreePaycheckMonth, onTogglePending, onEditNote, onEditAmount, onUpdateDay, onEditStart, onLinkAccount, onAddRow, onDeleteRow, txnOrder, onReorder, compact }) {
   const [dragOverId, setDragOverId] = useState(null);
   const [noteEditId, setNoteEditId] = useState(null);
   const [noteEditVal, setNoteEditVal] = useState("");
@@ -914,13 +1008,275 @@ function MonthNotes({ note, onSave }) {
   );
 }
 
+// ── Temp Loans panel ─────────────────────────────────────────────────────────
+// Tracks money that temporarily left one of your pots (e.g. paid for something
+// shared out of Personal, to be paid back from Shared later). Stored as rows in
+// the generic cashflow_presets key/value table under __tloan_<id> / __tpay_<loanId>_<id>.
+function formatMonthKey(monthKey) {
+  const m = /^(\d{4})-(\d{2})$/.exec(monthKey || "");
+  return m ? `${MONTHS[parseInt(m[2], 10) - 1]} ${m[1]}` : monthKey || "—";
+}
+
+function TempLoansPanel({ loans, currentMonthKey, onAddLoan, onAddPayback, onDeleteLoan, onDeletePayback }) {
+  const [editing, setEditing] = useState(null); // { type: "loan" } | { type: "payback", loanId }
+  const [desc, setDesc] = useState("");
+  const [amount, setAmount] = useState("");
+  const [month, setMonth] = useState(currentMonthKey);
+
+  const startEditing = (target) => { setEditing(target); setDesc(""); setAmount(""); setMonth(currentMonthKey); };
+
+  const commit = () => {
+    const amt = Math.abs(parseFloat(amount));
+    const monthKey = /^\d{4}-\d{2}$/.test(month) ? month : currentMonthKey;
+    if (!isNaN(amt) && amt > 0) {
+      if (editing.type === "loan" && desc.trim()) onAddLoan(desc.trim(), amt, monthKey);
+      if (editing.type === "payback") onAddPayback(editing.loanId, amt, monthKey, desc.trim() || null);
+    }
+    setEditing(null);
+  };
+
+  const withTotals = loans.map((loan) => {
+    const repaid = loan.paybacks.reduce((sum, p) => sum + p.amount, 0);
+    return { ...loan, repaid, outstanding: loan.amount - repaid };
+  });
+  const totalOutstanding = withTotals.reduce((sum, l) => sum + l.outstanding, 0);
+
+  const editRow = editing && (
+    <div style={{ display: "flex", gap: 8, alignItems: "center", padding: "8px 0", flexWrap: "wrap" }}>
+      <span style={{ fontSize: 10, color: "var(--accent)", fontFamily: "var(--font-mono)", textTransform: "uppercase" }}>
+        {editing.type === "loan" ? "New loan" : "Payback"}
+      </span>
+      <input
+        autoFocus
+        value={desc}
+        onChange={(e) => setDesc(e.target.value)}
+        placeholder={editing.type === "loan" ? "Description (e.g. Trip reimbursement → Joint)" : "Note (optional)"}
+        style={{ ...styles.noteInput, width: 280 }}
+        onKeyDown={(e) => { if (e.key === "Escape") setEditing(null); }}
+      />
+      <input
+        type="number" min="0" step="0.01"
+        value={amount}
+        onChange={(e) => setAmount(e.target.value)}
+        placeholder="Amount"
+        style={styles.presetInput}
+        onKeyDown={(e) => { if (e.key === "Enter") commit(); if (e.key === "Escape") setEditing(null); }}
+      />
+      <input
+        value={month}
+        onChange={(e) => setMonth(e.target.value)}
+        placeholder="YYYY-MM"
+        style={{ ...styles.presetInput, width: 70 }}
+        onKeyDown={(e) => { if (e.key === "Enter") commit(); if (e.key === "Escape") setEditing(null); }}
+      />
+      <button onClick={commit} style={styles.loanBtn}>Save</button>
+      <button onClick={() => setEditing(null)} style={{ ...styles.loanBtn, color: "var(--muted)", borderColor: "var(--border2)" }}>Cancel</button>
+    </div>
+  );
+
+  return (
+    <div style={styles.fixedPanel}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <p style={styles.fixedTitle}>Temp Loans</p>
+        {editing?.type !== "loan" && (
+          <button onClick={() => startEditing({ type: "loan" })} style={styles.loanBtn}>+ Add Loan</button>
+        )}
+      </div>
+      {editing?.type === "loan" && editRow}
+      {withTotals.length === 0 && !editing && (
+        <p style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)" }}>
+          Nothing outstanding. Add a loan when money temporarily leaves one of your pots.
+        </p>
+      )}
+      <div style={styles.fixedGrid}>
+        {withTotals.map((loan) => (
+          <div key={loan.id} style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ flex: 1, fontSize: 12, color: "var(--text)" }}>{loan.desc}</span>
+              <span style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-mono)" }}>{formatMonthKey(loan.month)}</span>
+              <span style={{ fontSize: 12, fontFamily: "var(--font-mono)", color: "var(--red)", minWidth: 80, textAlign: "right" }}>{fmt(-loan.amount)}</span>
+              <span style={{ fontSize: 11, fontFamily: "var(--font-mono)", fontWeight: 600, minWidth: 130, textAlign: "right", color: loan.outstanding <= 0 ? "var(--green)" : "var(--accent)" }}>
+                {loan.outstanding <= 0 ? "✓ settled" : `${fmt(loan.outstanding)} outstanding`}
+              </span>
+              <button onClick={() => startEditing({ type: "payback", loanId: loan.id })} style={styles.loanBtn}>+ Payback</button>
+              <button onClick={() => onDeleteLoan(loan.id)} style={styles.deleteBtn} title="Remove loan and its paybacks">×</button>
+            </div>
+            {loan.paybacks.map((p) => (
+              <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 4, paddingLeft: 16 }}>
+                <span style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-mono)" }}>↳ payback</span>
+                <span style={{ flex: 1, fontSize: 11, color: "var(--muted)" }}>{p.note}</span>
+                <span style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-mono)" }}>{formatMonthKey(p.month)}</span>
+                <span style={{ fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--green)", minWidth: 80, textAlign: "right" }}>{fmt(p.amount)}</span>
+                <button onClick={() => onDeletePayback(loan.id, p.id)} style={styles.deleteBtn} title="Remove payback">×</button>
+              </div>
+            ))}
+            {editing?.type === "payback" && editing.loanId === loan.id && editRow}
+          </div>
+        ))}
+      </div>
+      {withTotals.length > 0 && (
+        <div style={styles.fixedFooter}>
+          <span style={{ color: totalOutstanding <= 0 ? "var(--green)" : "var(--accent)", fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 600 }}>
+            Total outstanding: {fmt(totalOutstanding)}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Auto-Match modal ─────────────────────────────────────────────────────────
+function AutoMatchModal({ transferPairs, recurringGroups, acctNameMap, categories, assignments, onApplyTransfer, onApplyRecurring, onClose }) {
+  const [status, setStatus] = useState({}); // { [key]: "busy" | "accepted" | "rejected" | "skipped" }
+  const [selectedCategory, setSelectedCategory] = useState(() => {
+    // Pre-select whichever category is already most common among a recurring group's transactions.
+    const initial = {};
+    recurringGroups.forEach((group) => {
+      const counts = {};
+      group.txns.forEach((t) => {
+        const catId = assignments[t.transaction_id];
+        if (catId) counts[catId] = (counts[catId] || 0) + 1;
+      });
+      const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+      initial[group.key] = top ? top[0] : "";
+    });
+    return initial;
+  });
+
+  const setRowStatus = (key, value) => setStatus((s) => ({ ...s, [key]: value }));
+
+  const acceptTransfer = async (pair) => {
+    setRowStatus(pair.key, "busy");
+    try {
+      await onApplyTransfer(pair);
+      setRowStatus(pair.key, "accepted");
+    } catch (e) {
+      console.error("Apply transfer failed", e);
+      setRowStatus(pair.key, undefined);
+      alert("Could not apply: " + e.message);
+    }
+  };
+
+  const acceptRecurring = async (group) => {
+    const catId = selectedCategory[group.key];
+    if (!catId) { alert("Pick a category for this group first."); return; }
+    setRowStatus(group.key, "busy");
+    try {
+      await onApplyRecurring(group, catId);
+      setRowStatus(group.key, "accepted");
+    } catch (e) {
+      console.error("Apply recurring failed", e);
+      setRowStatus(group.key, undefined);
+      alert("Could not apply: " + e.message);
+    }
+  };
+
+  const amountRange = (min, max) => (min === max ? fmt(min) : `${fmt(min)}–${fmt(max)}`);
+  const shortDate = (d) => (d || "").slice(5, 10);
+  const isResolved = (key) => ["accepted", "rejected", "skipped"].includes(status[key]);
+  const visibleTransfers = transferPairs.filter((p) => !isResolved(p.key));
+  const visibleRecurring = recurringGroups.filter((g) => !isResolved(g.key));
+  const isEmpty = transferPairs.length === 0 && recurringGroups.length === 0;
+
+  const StatusTag = ({ s }) => {
+    if (s === "accepted") return <span style={{ ...styles.matchTag, color: "var(--green)", borderColor: "var(--green)" }}>✓ applied</span>;
+    if (s === "rejected") return <span style={{ ...styles.matchTag, color: "var(--red)", borderColor: "var(--red)" }}>rejected</span>;
+    if (s === "skipped") return <span style={{ ...styles.matchTag, color: "var(--muted)" }}>skipped</span>;
+    return null;
+  };
+
+  return (
+    <div style={styles.matchOverlay} onClick={onClose}>
+      <div style={styles.matchModal} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.matchHeader}>
+          <div>
+            <p style={styles.matchTitle}>Auto-Match Review</p>
+            <p style={styles.matchSub}>High-confidence suggestions from your last 90 days. Nothing is applied until you accept it.</p>
+          </div>
+          <button style={styles.matchClose} onClick={onClose}>×</button>
+        </div>
+        <div style={styles.matchBody}>
+          {isEmpty && <p style={styles.matchEmpty}>No high-confidence transfers or recurring transactions found right now.</p>}
+
+          {transferPairs.length > 0 && (
+            <>
+              <p style={styles.matchSectionLabel}>Transfers <span style={styles.matchSectionCount}>{visibleTransfers.length} to review</span></p>
+              <p style={styles.matchSectionHint}>Matched an outflow to an equal inflow in another account. Accepting tags both as <strong>Transfer</strong>.</p>
+              {transferPairs.map((pair) => (
+                <div key={pair.key} style={{ ...styles.matchRow, opacity: isResolved(pair.key) ? 0.55 : 1 }}>
+                  <div style={styles.matchRowMain}>
+                    <span style={styles.matchAmount}>{fmt(pair.amount)}</span>
+                    <span style={styles.matchDetail}>
+                      {acctNameMap[pair.out.account_id] || pair.out.account_id} → {acctNameMap[pair.in.account_id] || pair.in.account_id}
+                      {"  ·  "}{shortDate(pair.out.date)}{pair.dayDiff > 0 ? ` / ${shortDate(pair.in.date)}` : ""}
+                    </span>
+                    <span style={styles.matchDetailMuted}>{merchantLabel(pair.out)}</span>
+                  </div>
+                  {isResolved(pair.key) ? <StatusTag s={status[pair.key]} /> : (
+                    <div style={styles.matchActions}>
+                      <button style={styles.matchAccept} disabled={status[pair.key] === "busy"} onClick={() => acceptTransfer(pair)}>
+                        {status[pair.key] === "busy" ? "…" : "Accept"}
+                      </button>
+                      <button style={styles.matchReject} onClick={() => setRowStatus(pair.key, "rejected")}>Reject</button>
+                      <button style={styles.matchSkip} onClick={() => setRowStatus(pair.key, "skipped")}>Skip</button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </>
+          )}
+
+          {recurringGroups.length > 0 && (
+            <>
+              <p style={{ ...styles.matchSectionLabel, marginTop: transferPairs.length ? 22 : 0 }}>
+                Recurring <span style={styles.matchSectionCount}>{visibleRecurring.length} to review</span>
+              </p>
+              <p style={styles.matchSectionHint}>
+                Same payee on a steady cadence (paychecks, car & card payments). Pick a category, then accept to apply it to all {recurringGroups.reduce((s, g) => s + g.count, 0)} matched transactions.
+              </p>
+              {recurringGroups.map((group) => (
+                <div key={group.key} style={{ ...styles.matchRow, opacity: isResolved(group.key) ? 0.55 : 1 }}>
+                  <div style={styles.matchRowMain}>
+                    <span style={styles.matchDetail}>{group.merchant}</span>
+                    <span style={styles.matchDetailMuted}>{group.count}× · {group.cadence} · {group.direction} · {amountRange(group.minAmt, group.maxAmt)}</span>
+                  </div>
+                  {isResolved(group.key) ? <StatusTag s={status[group.key]} /> : (
+                    <div style={styles.matchActions}>
+                      <select
+                        value={selectedCategory[group.key] || ""}
+                        onChange={(e) => setSelectedCategory((s) => ({ ...s, [group.key]: e.target.value }))}
+                        style={styles.matchCatSelect}
+                      >
+                        <option value="">— category —</option>
+                        {(categories || []).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                      </select>
+                      <button style={styles.matchAccept} disabled={status[group.key] === "busy"} onClick={() => acceptRecurring(group)}>
+                        {status[group.key] === "busy" ? "…" : "Accept"}
+                      </button>
+                      <button style={styles.matchReject} onClick={() => setRowStatus(group.key, "rejected")}>Reject</button>
+                      <button style={styles.matchSkip} onClick={() => setRowStatus(group.key, "skipped")}>Skip</button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+        <div style={styles.matchFooter}>
+          <button style={styles.matchDoneBtn} onClick={onClose}>Done</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main CashFlow View ────────────────────────────────────────────────────────
 const now = new Date();
 
-export default function CashFlow() {
+export default function CashFlow({ transactions = [], categories = [], assignments = {}, setAssignments, setCategories }) {
   // monthOffset: 0 = current month is first, 1 = next month is first, etc.
   const [monthOffset, setMonthOffset] = useState(0);
-  const [activeTab, setActiveTab] = useState("amex");
+  const [activeTab, setActiveTab] = useState("all");
 
   // Compute the 3 months to display
   const months = useMemo(() => {
@@ -957,6 +1313,11 @@ export default function CashFlow() {
   // allPlaidAccts: full list from /api/accounts, used for the link-picker modal
   const [allPlaidAccts, setAllPlaidAccts] = useState([]);
   const autoConfirmedRef = useRef(new Set());
+
+  // Temp loans (money that temporarily left one pot, tracked until paid back)
+  const [loans, setLoans] = useState([]);
+  // Auto-Match modal
+  const [showAutoMatch, setShowAutoMatch] = useState(false);
 
   const presetsMap = useMemo(() => {
     const m = {};
@@ -1090,6 +1451,20 @@ export default function CashFlow() {
             }
           });
           if (Object.keys(newMonthAmts).length > 0) setAllMonthAmounts(newMonthAmts);
+
+          // Temp loans, stored as __tloan_<id> (the loan) + __tpay_<loanId>_<paybackId> (each payback)
+          const newLoans = {};
+          dbPresets.forEach(p => {
+            const m = p.name.match(/^__tloan_(\d+)$/);
+            if (m) newLoans[m[1]] = { id: m[1], amount: p.amount, month: p.freq ?? "", desc: p.note ?? "", paybacks: [] };
+          });
+          dbPresets.forEach(p => {
+            const m = p.name.match(/^__tpay_(\d+)_(\d+)$/);
+            if (m && newLoans[m[1]]) newLoans[m[1]].paybacks.push({ id: m[2], amount: p.amount, month: p.freq ?? "", note: p.note ?? "" });
+          });
+          if (Object.keys(newLoans).length > 0) {
+            setLoans(Object.values(newLoans).sort((a, b) => a.id.localeCompare(b.id)));
+          }
         }
       } catch {}
 
@@ -1342,6 +1717,83 @@ export default function CashFlow() {
     saveCashflowPreset(`__note_${monthKey}`, 0, null, text).catch(() => {});
   }, []);
 
+  // ── Temp loans ──────────────────────────────────────────────────────────────
+  const addLoan = useCallback((desc, amount, monthKey) => {
+    const id = String(Date.now());
+    setLoans(prev => [...prev, { id, desc, amount, month: monthKey, paybacks: [] }]);
+    saveCashflowPreset(`__tloan_${id}`, amount, monthKey, desc).catch(() => {});
+  }, []);
+
+  const addPayback = useCallback((loanId, amount, monthKey, note) => {
+    const id = String(Date.now());
+    setLoans(prev => prev.map(l => l.id === loanId ? { ...l, paybacks: [...l.paybacks, { id, amount, month: monthKey, note: note ?? "" }] } : l));
+    saveCashflowPreset(`__tpay_${loanId}_${id}`, amount, monthKey, note ?? null).catch(() => {});
+  }, []);
+
+  const deleteLoan = useCallback((loanId) => {
+    const loan = loans.find(l => l.id === loanId);
+    setLoans(prev => prev.filter(l => l.id !== loanId));
+    deleteCashflowPreset(`__tloan_${loanId}`).catch(() => {});
+    loan?.paybacks.forEach(p => deleteCashflowPreset(`__tpay_${loanId}_${p.id}`).catch(() => {}));
+  }, [loans]);
+
+  const deletePayback = useCallback((loanId, paybackId) => {
+    setLoans(prev => prev.map(l => l.id === loanId ? { ...l, paybacks: l.paybacks.filter(p => p.id !== paybackId) } : l));
+    deleteCashflowPreset(`__tpay_${loanId}_${paybackId}`).catch(() => {});
+  }, []);
+
+  // ── Auto-Match ──────────────────────────────────────────────────────────────
+  const transferMatches = useMemo(() => findTransferMatches(transactions), [transactions]);
+  const matchedTxnIds = useMemo(() => {
+    const ids = new Set();
+    transferMatches.forEach(m => { ids.add(m.out.transaction_id); ids.add(m.in.transaction_id); });
+    return ids;
+  }, [transferMatches]);
+  const recurringGroups = useMemo(() => findRecurringGroups(transactions, matchedTxnIds), [transactions, matchedTxnIds]);
+  // Unresolved transfer pairs — both legs not already categorized as a transfer.
+  const unresolvedTransferMatches = useMemo(() => {
+    const alreadyTransfer = new Set();
+    (categories || []).forEach(c => { if (/transfer/i.test(c.name)) alreadyTransfer.add(c.id); });
+    return transferMatches.filter(m => !(alreadyTransfer.has(assignments[m.out.transaction_id]) && alreadyTransfer.has(assignments[m.in.transaction_id])));
+  }, [transferMatches, categories, assignments]);
+  const autoMatchBadgeCount = unresolvedTransferMatches.length + recurringGroups.length;
+
+  const acctNameMap = useMemo(() => {
+    const map = {};
+    allPlaidAccts.forEach(a => { map[a.account_id] = a.name || a.official_name || a.account_id; });
+    return map;
+  }, [allPlaidAccts]);
+
+  const findOrCreateCategoryId = useCallback(async (name) => {
+    const existing = (categories || []).find(c => c.name.toLowerCase() === name.toLowerCase());
+    if (existing) return existing.id;
+    const created = await createCategoryApi(name, "#64748b");
+    const category = created.category || created;
+    if (category?.id && setCategories) setCategories(prev => [...prev, category]);
+    return category?.id ?? null;
+  }, [categories, setCategories]);
+
+  const applyAssignments = useCallback(async (transactionIds, categoryId) => {
+    if (!categoryId) return;
+    await Promise.all(transactionIds.map(id => saveAssignment(id, categoryId)));
+    if (setAssignments) {
+      setAssignments(prev => {
+        const next = { ...prev };
+        transactionIds.forEach(id => { next[id] = categoryId; });
+        return next;
+      });
+    }
+  }, [setAssignments]);
+
+  const applyTransferMatch = useCallback(async (pair) => {
+    const categoryId = await findOrCreateCategoryId("Transfer");
+    await applyAssignments([pair.out.transaction_id, pair.in.transaction_id], categoryId);
+  }, [findOrCreateCategoryId, applyAssignments]);
+
+  const applyRecurringMatch = useCallback(async (group, categoryId) => {
+    await applyAssignments(group.txns.map(t => t.transaction_id), categoryId);
+  }, [applyAssignments]);
+
   const saveCcConfig = useCallback((cardId, field, value) => {
     setCcConfig(prev => ({
       ...prev,
@@ -1397,13 +1849,17 @@ export default function CashFlow() {
   const primaryThreePaycheckMonths = threePaycheckMonthsByYear[primaryYear] ?? new Set();
 
   return (
-    <div style={styles.wrap}>
+    <div style={{ ...styles.wrap, maxWidth: activeTab === "all" ? 1500 : styles.wrap.maxWidth }}>
       <div className="fade-up" style={styles.topRow}>
         <div>
           <h1 style={styles.heading}>Cash Flow</h1>
           <p style={styles.sub}>3-month projected balances with carry-forward</p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <button onClick={() => setShowAutoMatch(true)} style={styles.autoMatchBtn} title="Review suggested transfer & recurring matches">
+            ⇄ Auto-Match
+            {autoMatchBadgeCount > 0 && <span style={styles.autoMatchBadge}>{autoMatchBadgeCount}</span>}
+          </button>
           <div style={styles.monthNav}>
             <button onClick={() => setMonthOffset(o => o - 1)} style={styles.navBtn}>‹</button>
             <div style={styles.monthBadge}>
@@ -1416,6 +1872,7 @@ export default function CashFlow() {
 
       <div style={styles.tabBar}>
         {[
+          { id: "all",    label: "All Accounts" },
           { id: "amex",   label: "Amex" },
           { id: "macu",   label: "Personal MACU" },
           { id: "shared", label: "Shared MACU" },
@@ -1452,11 +1909,11 @@ export default function CashFlow() {
 
             {activeTab !== "credit" && (
               <div className={i === 0 ? "fade-up" : undefined}>
-                <SummaryBar {...summary} />
+                <SummaryBar {...summary} labels={activeTab === "amex" || activeTab === "all" ? undefined : ["Money In", "Money Out", "Net"]} />
               </div>
             )}
 
-            <div className={i === 0 ? "fade-up-2" : undefined} style={styles.accountsGrid}>
+            <div className={i === 0 ? "fade-up-2" : undefined} style={activeTab === "all" ? styles.accountsGridAll : styles.accountsGrid}>
               {activeTab === "credit" ? (
                 <>
                   {CC_CARDS.map(card => (
@@ -1481,9 +1938,10 @@ export default function CashFlow() {
                   </div>
                 </>
               ) : (
-                accounts.filter(a => a.id === activeTab).map(acct => (
+                accounts.filter(a => activeTab === "all" || a.id === activeTab).map(acct => (
                   <AccountTable
                     key={acct.id}
+                    compact={activeTab === "all"}
                     account={acct}
                     startingBalance={startBals[acct.id] ?? acct.defaultStart}
                     allowEditStart={isFirstMonth}
@@ -1515,7 +1973,15 @@ export default function CashFlow() {
         );
       })}
 
-      <div className="fade-up-3" style={{ marginTop: 8 }}>
+      <div className="fade-up-3" style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 20 }}>
+        <TempLoansPanel
+          loans={loans}
+          currentMonthKey={months[0]?.monthKey}
+          onAddLoan={addLoan}
+          onAddPayback={addPayback}
+          onDeleteLoan={deleteLoan}
+          onDeletePayback={deletePayback}
+        />
         <FixedAmountsPanel
           presets={presets}
           year={primaryYear}
@@ -1525,6 +1991,19 @@ export default function CashFlow() {
           onEditPayCycle={() => setModal({ type: "editPayCycle" })}
         />
       </div>
+
+      {showAutoMatch && (
+        <AutoMatchModal
+          transferPairs={unresolvedTransferMatches}
+          recurringGroups={recurringGroups}
+          acctNameMap={acctNameMap}
+          categories={categories}
+          assignments={assignments}
+          onApplyTransfer={applyTransferMatch}
+          onApplyRecurring={applyRecurringMatch}
+          onClose={() => setShowAutoMatch(false)}
+        />
+      )}
 
       {modal?.type === "add" && (
         <AddModal
@@ -1605,6 +2084,37 @@ const styles = {
   summaryVal: { fontSize: 24, fontWeight: 700, fontFamily: "var(--font-mono)", letterSpacing: "-0.03em" },
 
   accountsGrid: { display: "flex", flexDirection: "column", gap: 20, marginBottom: 24 },
+  accountsGridAll: { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 14, marginBottom: 24, alignItems: "start" },
+
+  autoMatchBtn: { display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius)", color: "var(--text)", fontSize: 13, fontWeight: 600, fontFamily: "var(--font-display)", padding: "7px 14px", cursor: "pointer" },
+  autoMatchBadge: { background: "var(--accent)", color: "#fff", fontSize: 10, fontWeight: 700, fontFamily: "var(--font-mono)", borderRadius: 99, padding: "1px 6px" },
+
+  loanBtn: { background: "none", border: "1px solid var(--accent)", color: "var(--accent)", borderRadius: 6, padding: "3px 10px", fontSize: 11, fontWeight: 600, cursor: "pointer", fontFamily: "var(--font-display)" },
+
+  matchOverlay: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 },
+  matchModal: { background: "var(--surface)", border: "1px solid var(--border2)", borderRadius: "var(--radius2)", width: 640, maxWidth: "96vw", maxHeight: "88vh", display: "flex", flexDirection: "column" },
+  matchHeader: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "20px 24px 14px", borderBottom: "1px solid var(--border)" },
+  matchTitle: { fontSize: 18, fontWeight: 700, color: "var(--text)", marginBottom: 3 },
+  matchSub: { fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-mono)", lineHeight: 1.5 },
+  matchClose: { background: "none", border: "none", color: "var(--muted)", fontSize: 22, lineHeight: 1, cursor: "pointer", padding: 0 },
+  matchBody: { padding: "16px 24px", overflowY: "auto", flex: 1 },
+  matchEmpty: { fontSize: 13, color: "var(--muted)", fontFamily: "var(--font-mono)", textAlign: "center", padding: "32px 0" },
+  matchSectionLabel: { fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--text)", fontFamily: "var(--font-mono)", marginBottom: 4, display: "flex", alignItems: "center", gap: 8 },
+  matchSectionCount: { fontSize: 10, fontWeight: 500, color: "var(--muted)", letterSpacing: "0.04em" },
+  matchSectionHint: { fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", lineHeight: 1.5, marginBottom: 10 },
+  matchRow: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: "1px solid var(--border)" },
+  matchRowMain: { display: "flex", flexDirection: "column", gap: 3, minWidth: 0, flex: 1 },
+  matchAmount: { fontSize: 14, fontWeight: 700, fontFamily: "var(--font-mono)", color: "var(--text)" },
+  matchDetail: { fontSize: 12, color: "var(--text)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  matchDetailMuted: { fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  matchActions: { display: "flex", alignItems: "center", gap: 6, flexShrink: 0 },
+  matchCatSelect: { padding: "5px 7px", background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)", fontSize: 11, fontFamily: "var(--font-mono)", outline: "none", cursor: "pointer", maxWidth: 130 },
+  matchAccept: { background: "var(--accent)", color: "#fff", border: "none", borderRadius: 6, padding: "5px 11px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "var(--font-display)" },
+  matchReject: { background: "none", color: "var(--red)", border: "1px solid var(--border)", borderRadius: 6, padding: "5px 9px", fontSize: 11, cursor: "pointer", fontFamily: "var(--font-display)" },
+  matchSkip: { background: "none", color: "var(--muted)", border: "1px solid var(--border)", borderRadius: 6, padding: "5px 9px", fontSize: 11, cursor: "pointer", fontFamily: "var(--font-display)" },
+  matchTag: { fontSize: 10, fontWeight: 600, fontFamily: "var(--font-mono)", border: "1px solid var(--border)", borderRadius: 99, padding: "2px 8px" },
+  matchFooter: { padding: "14px 24px", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "flex-end" },
+  matchDoneBtn: { background: "var(--accent)", color: "#fff", border: "none", borderRadius: "var(--radius)", padding: "8px 18px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "var(--font-display)" },
 
   accountBlock: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", overflow: "hidden" },
   accountHeader: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "16px 20px 12px", borderBottom: "1px solid var(--border)", background: "var(--surface2)" },
