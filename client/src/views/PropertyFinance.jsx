@@ -5,6 +5,8 @@ import {
   reconcilePropertyTransaction, excludePropertyTransaction, fetchPropertyReviewQueue,
   resolvePropertyReviewRow, fetchPropertyUsagePeriods, fetchPropertyAuditLog,
   fetchPropertyPlaidPreview, applyPropertyPlaidPreview,
+  startPropertyYear, addPropertyUsagePeriod, deletePropertyUsagePeriod,
+  fetchPropertyDepreciation, savePropertyDepreciation, deletePropertyDepreciation,
 } from "../api.js";
 import PropertyHeader from "../components/property/PropertyHeader.jsx";
 import MonthlyPnL from "../components/property/MonthlyPnL.jsx";
@@ -14,7 +16,8 @@ import ReconciliationQueue from "../components/property/ReconciliationQueue.jsx"
 import AllocationPanel from "../components/property/AllocationPanel.jsx";
 import YearComparisonCards from "../components/property/YearComparisonCards.jsx";
 import AuditDetail from "../components/property/AuditDetail.jsx";
-import ImportSpreadsheetPanel from "../components/property/ImportSpreadsheetPanel.jsx";
+import UsagePeriodsPanel from "../components/property/UsagePeriodsPanel.jsx";
+import DepreciationPanel from "../components/property/DepreciationPanel.jsx";
 
 export default function PropertyFinance() {
   const [properties, setProperties] = useState(null); // null = loading
@@ -28,6 +31,7 @@ export default function PropertyFinance() {
   const [usagePeriods, setUsagePeriods] = useState([]);
   const [auditLog, setAuditLog] = useState([]);
   const [plaidPreview, setPlaidPreview] = useState([]);
+  const [depreciation, setDepreciation] = useState([]);
   const [seeding, setSeeding] = useState(false);
   const [loadingYear, setLoadingYear] = useState(false);
 
@@ -35,9 +39,13 @@ export default function PropertyFinance() {
     const { properties: list } = await fetchPropertyFinanceProperties();
     setProperties(list || []);
     if (list && list.length > 0) {
-      const { property: p, years: y } = await fetchPropertyFinanceDetail(list[0].id);
+      const [{ property: p, years: y }, depRes] = await Promise.all([
+        fetchPropertyFinanceDetail(list[0].id),
+        fetchPropertyDepreciation(list[0].id),
+      ]);
       setProperty(p);
       setYears(y);
+      setDepreciation(depRes.depreciation || []);
       const liveYear = y.find((yr) => yr.is_live)?.year;
       setSelectedYear(liveYear || y[y.length - 1]?.year || new Date().getFullYear());
     }
@@ -130,10 +138,37 @@ export default function PropertyFinance() {
     setReviewQueue((prev) => prev.filter((r) => r.id !== id));
   }
 
-  async function handleImported() {
-    setTransactionsByYear({}); // re-imported years need fresh summaries
-    await loadProperties();
-    if (property && selectedYear) await loadYearData(property.id, selectedYear);
+  async function handleStartYear(year) {
+    const res = await startPropertyYear(property.id, year);
+    if (res.years) {
+      setYears(res.years);
+      setSelectedYear(year);
+    }
+  }
+
+  async function handleAddUsagePeriod(body) {
+    const res = await addPropertyUsagePeriod(property.id, { ...body, year: selectedYear });
+    if (res.usagePeriod) setUsagePeriods((prev) => [...prev, res.usagePeriod]);
+  }
+
+  async function handleDeleteUsagePeriod(id) {
+    setUsagePeriods((prev) => prev.filter((p) => p.id !== id));
+    await deletePropertyUsagePeriod(id);
+  }
+
+  async function handleSaveDepreciation(year, amount) {
+    const res = await savePropertyDepreciation(property.id, year, amount);
+    if (res.depreciation) {
+      setDepreciation((prev) => {
+        const rest = prev.filter((d) => d.year !== year);
+        return [...rest, res.depreciation].sort((a, b) => a.year - b.year);
+      });
+    }
+  }
+
+  async function handleDeleteDepreciation(year) {
+    setDepreciation((prev) => prev.filter((d) => d.year !== year));
+    await deletePropertyDepreciation(property.id, year);
   }
 
   if (properties === null) {
@@ -158,7 +193,7 @@ export default function PropertyFinance() {
 
   return (
     <div style={styles.wrap}>
-      <PropertyHeader property={property} years={years} selectedYear={selectedYear} onSelectYear={setSelectedYear} transactions={transactions} />
+      <PropertyHeader property={property} years={years} selectedYear={selectedYear} onSelectYear={setSelectedYear} onStartYear={handleStartYear} transactions={transactions} />
 
       {loadingYear ? (
         <p style={styles.muted}>Loading {selectedYear}…</p>
@@ -184,8 +219,9 @@ export default function PropertyFinance() {
             reviewQueue={reviewQueue}
             onResolveReview={handleResolveReview}
           />
+          <UsagePeriodsPanel year={selectedYear} usagePeriods={usagePeriods} onAdd={handleAddUsagePeriod} onDelete={handleDeleteUsagePeriod} />
+          <DepreciationPanel depreciation={depreciation} selectedYear={selectedYear} onSave={handleSaveDepreciation} onDelete={handleDeleteDepreciation} />
           <AllocationPanel transactions={transactions} usagePeriods={usagePeriods} />
-          <ImportSpreadsheetPanel propertyId={property.id} onImported={handleImported} />
           <AuditDetail entries={auditLog} />
         </>
       )}

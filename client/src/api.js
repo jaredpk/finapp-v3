@@ -514,11 +514,50 @@ export async function fetchPropertyFinanceDetail(propertyId) {
   return r.json();
 }
 
-export async function uploadPropertyWorkbook(propertyId, { fileBase64, mode = "preview", years } = {}) {
-  const r = await fetch(`${BASE}/property-finance/properties/${propertyId}/import/upload`, {
+export async function startPropertyYear(propertyId, year) {
+  const r = await fetch(`${BASE}/property-finance/properties/${propertyId}/years`, {
     method: "POST",
     headers: await authHeaders(),
-    body: JSON.stringify({ fileBase64, mode, years }),
+    body: JSON.stringify({ year }),
+  });
+  return r.json();
+}
+
+export async function addPropertyUsagePeriod(propertyId, body) {
+  const r = await fetch(`${BASE}/property-finance/properties/${propertyId}/usage-periods`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify(body),
+  });
+  return r.json();
+}
+
+export async function deletePropertyUsagePeriod(id) {
+  const r = await fetch(`${BASE}/property-finance/usage-periods/${id}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+  });
+  return r.json();
+}
+
+export async function fetchPropertyDepreciation(propertyId) {
+  const r = await fetch(`${BASE}/property-finance/properties/${propertyId}/depreciation`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function savePropertyDepreciation(propertyId, year, amount) {
+  const r = await fetch(`${BASE}/property-finance/properties/${propertyId}/depreciation/${year}`, {
+    method: "PUT",
+    headers: await authHeaders(),
+    body: JSON.stringify({ amount }),
+  });
+  return r.json();
+}
+
+export async function deletePropertyDepreciation(propertyId, year) {
+  const r = await fetch(`${BASE}/property-finance/properties/${propertyId}/depreciation/${year}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
   });
   return r.json();
 }

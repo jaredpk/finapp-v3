@@ -1,10 +1,12 @@
-import React from "react";
+import React, { useState } from "react";
 import StatCard from "../StatCard.jsx";
 import { fmt, fmtSigned, summarizeYear } from "./propertyFinanceUtils.js";
 
-export default function PropertyHeader({ property, years, selectedYear, onSelectYear, transactions }) {
+export default function PropertyHeader({ property, years, selectedYear, onSelectYear, onStartYear, transactions }) {
   const summary = summarizeYear(transactions);
   const isLiveYear = years.find((y) => y.year === selectedYear)?.is_live;
+  const [confirmingNewYear, setConfirmingNewYear] = useState(false);
+  const nextYear = years.length ? Math.max(...years.map((y) => y.year)) + 1 : new Date().getFullYear();
 
   return (
     <div style={styles.wrap}>
@@ -24,6 +26,19 @@ export default function PropertyHeader({ property, years, selectedYear, onSelect
               {y.is_live && <span style={styles.liveDot} title="Live year" />}
             </button>
           ))}
+          {onStartYear && (
+            <button
+              style={{ ...styles.yearBtn, ...(confirmingNewYear ? styles.yearBtnConfirm : {}) }}
+              onClick={() => {
+                if (confirmingNewYear) { onStartYear(nextYear); setConfirmingNewYear(false); }
+                else setConfirmingNewYear(true);
+              }}
+              onBlur={() => setConfirmingNewYear(false)}
+              title={`Start tracking ${nextYear} as the new live year`}
+            >
+              {confirmingNewYear ? `Start ${nextYear}?` : `+ ${nextYear}`}
+            </button>
+          )}
         </div>
       </div>
 
@@ -54,6 +69,7 @@ const styles = {
     cursor: "pointer", position: "relative", fontFamily: "var(--font-mono)",
   },
   yearBtnActive: { background: "var(--accent)", color: "#fff", borderColor: "var(--accent)" },
+  yearBtnConfirm: { borderColor: "var(--accent)", color: "var(--accent)" },
   liveDot: { display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "#22c55e", marginLeft: 6 },
   liveNote: { fontSize: 12, color: "var(--muted)", background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: "8px 12px", marginBottom: 16 },
   statsRow: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 },

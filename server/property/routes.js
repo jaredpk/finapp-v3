@@ -6,6 +6,8 @@ import {
   listUsagePeriods, listAuditLog, listCategoryMappings, upsertTransaction,
   createImportBatch, updateImportBatchCounts, insertUsagePeriods, insertReviewRows,
   bulkUpsertTransactions, deleteImportTransactions, deleteUsagePeriods,
+  demoteLiveYears, addUsagePeriod, deleteUsagePeriod,
+  listDepreciation, upsertDepreciation, deleteDepreciation,
 } from "./repository.js";
 import { parseWorkbook } from "./importParsers/index.js";
 import { workbookBase64ToSheets } from "./importParsers/xlsxToSheets.js";
@@ -130,6 +132,58 @@ export function registerPropertyFinanceRoutes(app, requireAuth) {
 
   app.get("/api/property-finance/properties/:id/usage-periods", requireAuth, async (req, res) => {
     res.json({ usagePeriods: await listUsagePeriods(req.params.id, req.query.year ? Number(req.query.year) : undefined) });
+  });
+
+  app.post("/api/property-finance/properties/:id/usage-periods", requireAuth, async (req, res) => {
+    const { year, usageType, startDate, endDate, days, sourceNote } = req.body || {};
+    if (!Number.isInteger(Number(year))) return res.status(400).json({ error: "year required" });
+    if (!["rental", "personal"].includes(usageType)) return res.status(400).json({ error: "usageType must be rental or personal" });
+    // Day count follows the sheet's nights convention (end minus start) when
+    // dates are given without an explicit count.
+    let d = days != null && days !== "" ? Number(days) : null;
+    if (d == null && startDate && endDate) d = Math.round((new Date(endDate) - new Date(startDate)) / 86400000);
+    if (!Number.isFinite(d) || d <= 0) return res.status(400).json({ error: "days (or start/end dates) required" });
+    const usagePeriod = await addUsagePeriod(Number(req.params.id), {
+      year: Number(year), usageType, startDate: startDate || null, endDate: endDate || null, days: d, sourceNote: sourceNote || null,
+    });
+    res.json({ usagePeriod });
+  });
+
+  app.delete("/api/property-finance/usage-periods/:id", requireAuth, async (req, res) => {
+    const ok = await deleteUsagePeriod(Number(req.params.id));
+    if (!ok) return res.status(404).json({ error: "not found" });
+    res.json({ ok: true });
+  });
+
+  // ── Depreciation ────────────────────────────────────────────────────────────
+  app.get("/api/property-finance/properties/:id/depreciation", requireAuth, async (req, res) => {
+    res.json({ depreciation: await listDepreciation(Number(req.params.id)) });
+  });
+
+  app.put("/api/property-finance/properties/:id/depreciation/:year", requireAuth, async (req, res) => {
+    const amount = Number(req.body?.amount);
+    if (!Number.isFinite(amount) || amount < 0) return res.status(400).json({ error: "amount required" });
+    const row = await upsertDepreciation(Number(req.params.id), Number(req.params.year), amount);
+    res.json({ depreciation: row });
+  });
+
+  app.delete("/api/property-finance/properties/:id/depreciation/:year", requireAuth, async (req, res) => {
+    const ok = await deleteDepreciation(Number(req.params.id), Number(req.params.year));
+    if (!ok) return res.status(404).json({ error: "not found" });
+    res.json({ ok: true });
+  });
+
+  // Spins up a new tracking year (e.g. Jan 2027): the new year becomes the
+  // live one and any previous live year is demoted to a closed history year.
+  app.post("/api/property-finance/properties/:id/years", requireAuth, async (req, res) => {
+    const propertyId = Number(req.params.id);
+    const year = Number(req.body?.year);
+    if (!Number.isInteger(year) || year < 2000 || year > 2100) return res.status(400).json({ error: "valid year required" });
+    const existing = await listYearsForProperty(propertyId);
+    if (existing.some((y) => y.year === year)) return res.status(400).json({ error: `${year} already exists` });
+    await demoteLiveYears(propertyId);
+    await ensurePropertyYear(propertyId, year, { isLive: true, dataSource: "live" });
+    res.json({ years: await listYearsForProperty(propertyId) });
   });
 
   app.get("/api/property-finance/properties/:id/audit-log", requireAuth, async (req, res) => {

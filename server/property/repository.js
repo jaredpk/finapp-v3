@@ -44,6 +44,10 @@ export async function ensurePropertyYear(propertyId, year, { isLive = false, dat
   return rows[0];
 }
 
+export async function demoteLiveYears(propertyId) {
+  await pool.query(`UPDATE pf_property_years SET is_live = FALSE WHERE property_id = $1 AND is_live = TRUE`, [propertyId]);
+}
+
 export async function listTransactions(propertyId, { year, category, sourceType, isReconciled, allocation, startDate, endDate } = {}) {
   const conditions = ["property_id = $1"];
   const params = [propertyId];
@@ -225,6 +229,44 @@ export async function listUsagePeriods(propertyId, year) {
   if (year) { where += " AND year = $2"; params.push(year); }
   const { rows } = await pool.query(`SELECT * FROM pf_usage_periods WHERE ${where} ORDER BY start_date`, params);
   return rows;
+}
+
+export async function addUsagePeriod(propertyId, { year, usageType, startDate, endDate, days, sourceNote }) {
+  const { rows } = await pool.query(
+    `INSERT INTO pf_usage_periods (property_id, year, start_date, end_date, usage_type, days, source_note)
+     VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+    [propertyId, year, startDate, endDate, usageType, days, sourceNote]
+  );
+  return rows[0];
+}
+
+export async function deleteUsagePeriod(id) {
+  const { rowCount } = await pool.query(`DELETE FROM pf_usage_periods WHERE id = $1`, [id]);
+  return rowCount > 0;
+}
+
+// ── Depreciation (annual amounts per tax year) ────────────────────────────────
+export async function listDepreciation(propertyId) {
+  const { rows } = await pool.query(
+    `SELECT property_id, year, amount::float FROM pf_depreciation WHERE property_id = $1 ORDER BY year`,
+    [propertyId]
+  );
+  return rows;
+}
+
+export async function upsertDepreciation(propertyId, year, amount) {
+  const { rows } = await pool.query(
+    `INSERT INTO pf_depreciation (property_id, year, amount) VALUES ($1, $2, $3)
+     ON CONFLICT (property_id, year) DO UPDATE SET amount = $3
+     RETURNING property_id, year, amount::float`,
+    [propertyId, year, amount]
+  );
+  return rows[0];
+}
+
+export async function deleteDepreciation(propertyId, year) {
+  const { rowCount } = await pool.query(`DELETE FROM pf_depreciation WHERE property_id = $1 AND year = $2`, [propertyId, year]);
+  return rowCount > 0;
 }
 
 export async function insertReviewRows(propertyId, importBatchId, reviewQueue) {

@@ -132,6 +132,14 @@ export async function initPropertyFinanceSchema(pool) {
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
+    CREATE TABLE IF NOT EXISTS pf_depreciation (
+      property_id INTEGER NOT NULL REFERENCES pf_properties(id) ON DELETE CASCADE,
+      year INTEGER NOT NULL,
+      amount NUMERIC(12,2) NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (property_id, year)
+    );
+
     CREATE TABLE IF NOT EXISTS pf_audit_log (
       id SERIAL PRIMARY KEY,
       property_id INTEGER NOT NULL REFERENCES pf_properties(id) ON DELETE CASCADE,
