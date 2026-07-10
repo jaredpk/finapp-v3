@@ -5,7 +5,7 @@ import {
   setTransactionReconciled, setTransactionExcluded, listReviewQueue, resolveReviewRow,
   listUsagePeriods, listAuditLog, listCategoryMappings, upsertTransaction,
   createImportBatch, updateImportBatchCounts, insertUsagePeriods, insertReviewRows,
-  bulkUpsertTransactions,
+  bulkUpsertTransactions, deleteImportTransactions, deleteUsagePeriods,
 } from "./repository.js";
 import { parseWorkbook } from "./importParsers/index.js";
 import { workbookBase64ToSheets } from "./importParsers/xlsxToSheets.js";
@@ -26,8 +26,13 @@ async function commitSheets(propertyId, sheets) {
       await ensurePropertyYear(propertyId, sheet.year, { isLive: false, dataSource: "backfill" });
     }
     const batch = await createImportBatch(propertyId, { year: sheet.year, sheetLabel: sheet.label });
-    const { transactions, usagePeriods, reviewQueue } = parseWorkbook([sheet], { propertyId, batchLabelPrefix: `batch_${batch.id}` });
+    // Replace, don't accumulate: ids must not vary between runs (a batch-scoped
+    // prefix made every re-import a full duplicate set), and clearing the
+    // year's import rows first also handles rows removed from the sheet.
+    await deleteImportTransactions(propertyId, sheet.year);
+    const { transactions, usagePeriods, reviewQueue } = parseWorkbook([sheet], { propertyId, batchLabelPrefix: "import" });
     const imported = await bulkUpsertTransactions(transactions);
+    await deleteUsagePeriods(propertyId, sheet.year);
     const usageCount = await insertUsagePeriods(propertyId, usagePeriods);
     const reviewCount = await insertReviewRows(propertyId, batch.id, reviewQueue);
     await updateImportBatchCounts(batch.id, { rowCount: sheet.rows.length - 1, importedCount: imported, reviewCount, usagePeriodCount: usageCount });

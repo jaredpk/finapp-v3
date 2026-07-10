@@ -107,6 +107,16 @@ export async function upsertTransaction(t) {
   return rows[0];
 }
 
+// Clears a year's sheet-imported rows ahead of a re-import so the sheet is
+// always the source of truth for that year. Plaid-sourced rows are untouched.
+export async function deleteImportTransactions(propertyId, year) {
+  const { rowCount } = await pool.query(
+    `DELETE FROM pf_transactions WHERE property_id = $1 AND year = $2 AND source_type = 'import'`,
+    [propertyId, year]
+  );
+  return rowCount;
+}
+
 export async function bulkUpsertTransactions(transactions) {
   let count = 0;
   for (const t of transactions) { await upsertTransaction(t); count++; }
@@ -190,6 +200,10 @@ export async function updateImportBatchCounts(id, { rowCount, importedCount, rev
     `UPDATE pf_import_batches SET row_count = $1, imported_count = $2, review_count = $3, usage_period_count = $4 WHERE id = $5`,
     [rowCount, importedCount, reviewCount, usagePeriodCount, id]
   );
+}
+
+export async function deleteUsagePeriods(propertyId, year) {
+  await pool.query(`DELETE FROM pf_usage_periods WHERE property_id = $1 AND year = $2`, [propertyId, year]);
 }
 
 export async function insertUsagePeriods(propertyId, usagePeriods) {
