@@ -404,7 +404,7 @@ function SummaryBar({ takeHome, expenses, freeCashflow, labels }) {
 // `compact` is accepted (used in the "All Accounts" tab, which shows every account
 // side by side) but currently has no visual effect — the original compact styling
 // couldn't be reliably reconstructed from minified code, so this renders full-size.
-function AccountTable({ account, startingBalance, allowEditStart, isLinked, presetsMap, monthStates, monthAmounts, isThreePaycheckMonth, onTogglePending, onEditNote, onEditAmount, onUpdateDay, onEditStart, onLinkAccount, onAddRow, onDeleteRow, txnOrder, onReorder, compact }) {
+function AccountTable({ account, startingBalance, allowEditStart, isLinked, presetsMap, monthStates, monthAmounts, dynamicAmounts, isThreePaycheckMonth, onTogglePending, onEditNote, onEditAmount, onUpdateDay, onEditStart, onLinkAccount, onAddRow, onDeleteRow, txnOrder, onReorder, compact }) {
   const [dragOverId, setDragOverId] = useState(null);
   const [noteEditId, setNoteEditId] = useState(null);
   const [noteEditVal, setNoteEditVal] = useState("");
@@ -466,7 +466,9 @@ function AccountTable({ account, startingBalance, allowEditStart, isLinked, pres
   };
   const effectiveAmt = (t) => {
     const key = `${account.id}_${t.id}`;
-    return monthAmounts?.[key] ?? presetsMap[t.name] ?? t.amount;
+    if (monthAmounts?.[key] != null) return monthAmounts[key];
+    if (dynamicAmounts && dynamicAmounts[t.name] != null) return dynamicAmounts[t.name];
+    return presetsMap[t.name] ?? t.amount;
   };
 
   let running = startingBalance;    // all items: full month projection
@@ -596,6 +598,8 @@ function AccountTable({ account, startingBalance, allowEditStart, isLinked, pres
                 {t.name}
                 {monthAmounts?.[`${account.id}_${t.id}`] != null
                   ? <span style={{ fontSize: 9, color: "var(--green)", fontFamily: "var(--font-mono)", marginLeft: 5, opacity: 0.7 }}>custom</span>
+                  : (dynamicAmounts && dynamicAmounts[t.name] != null)
+                  ? <span style={{ fontSize: 9, color: "var(--accent)", fontFamily: "var(--font-mono)", marginLeft: 5, opacity: 0.6 }}>auto</span>
                   : presetsMap[t.name] !== undefined && <span style={{ fontSize: 9, color: "var(--accent)", fontFamily: "var(--font-mono)", marginLeft: 5, opacity: 0.6 }}>preset</span>
                 }
               </span>
@@ -736,7 +740,7 @@ function FixedAmountsPanel({ presets, year, payBaseDate, threePaycheckMonths, on
 }
 
 // ── Credit Card Block ─────────────────────────────────────────────────────────
-function CreditCardBlock({ card, config, monthData, onUpdateConfig, onUpdateMonthData }) {
+function CreditCardBlock({ card, config, monthData, isLinked, onLinkAccount, onUpdateConfig, onUpdateMonthData }) {
   const [editing, setEditing] = useState(null);
   const [editVal, setEditVal] = useState("");
   const [editingNote, setEditingNote] = useState(false);
@@ -781,8 +785,23 @@ function CreditCardBlock({ card, config, monthData, onUpdateConfig, onUpdateMont
   return (
     <div style={styles.ccBlock}>
       <div style={styles.ccCardHeader}>
-        <span style={styles.ccCardName}>{card.label}</span>
-        <span style={styles.ccCardDue}>({card.dueDate})</span>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+          <span style={styles.ccCardName}>{card.label}</span>
+          <span style={styles.ccCardDue}>({card.dueDate})</span>
+        </div>
+        <button
+          onClick={onLinkAccount}
+          title={isLinked ? "Plaid account linked — click to change" : "Link a Plaid account for automatic balance"}
+          style={{
+            background: "none", cursor: "pointer", padding: "1px 5px",
+            fontSize: 10, fontFamily: "var(--font-mono)", fontWeight: 600,
+            color: isLinked ? "var(--green)" : "var(--muted)",
+            borderRadius: 4, border: `1px solid ${isLinked ? "var(--green)" : "var(--border2)"}`,
+            opacity: isLinked ? 1 : 0.7, lineHeight: 1.4, alignSelf: "center",
+          }}
+        >
+          {isLinked ? "plaid ✓" : "link plaid"}
+        </button>
       </div>
       <div style={styles.ccTableWrap}>
         <div style={styles.ccColHeader}>
@@ -818,7 +837,7 @@ function CreditCardBlock({ card, config, monthData, onUpdateConfig, onUpdateMont
           </div>
         ))}
         <div style={{ ...styles.ccTableRow, borderTop: "1px solid var(--border)", marginTop: 4, paddingTop: 8 }}>
-          <span style={{ ...styles.ccRowLabel, fontWeight: 700, color: "var(--text)" }}>Net</span>
+          <span style={{ ...styles.ccRowLabel, fontWeight: 700, color: "var(--text)" }}>Estimated Payment</span>
           <span style={{ width: 110, textAlign: "right", fontFamily: "var(--font-mono)", fontSize: 14, fontWeight: 700, color: net > 0 ? "var(--red)" : "var(--green)" }}>
             {fmt(net)}
           </span>
@@ -1310,6 +1329,8 @@ export default function CashFlow({ transactions = [], categories = [], assignmen
   const [ccMonthData, setCcMonthData] = useState({});
   // plaidAcctLinks: { [cashflowAcctId]: plaid_account_id string }
   const [plaidAcctLinks, setPlaidAcctLinks] = useState({});
+  // ccPlaidLinks: { [cardId]: plaid_account_id string }
+  const [ccPlaidLinks, setCcPlaidLinks] = useState({});
   // allPlaidAccts: full list from /api/accounts, used for the link-picker modal
   const [allPlaidAccts, setAllPlaidAccts] = useState([]);
   const autoConfirmedRef = useRef(new Set());
@@ -1337,6 +1358,19 @@ export default function CashFlow({ transactions = [], categories = [], assignmen
     return !!(threePaycheckMonthsByYear[year]?.has(monthIdx));
   }, [threePaycheckMonthsByYear]);
 
+  // Helper to compute dynamic CC transfer amount for a month
+  const computeDynamicCcPayment = useCallback((monthKey) => {
+    let sum = 0;
+    CC_CARDS.forEach(card => {
+      const md = ccMonthData[monthKey]?.[card.id];
+      const cfg = ccConfig[card.id] || DEFAULT_CC_CONFIG[card.id];
+      const bal = md?.balance ?? cfg.defaultBalance ?? 0;
+      const pen = md?.pending ?? 0;
+      sum += bal + pen + (cfg.recurring || 0) + (cfg.other || 0);
+    });
+    return -sum; // transfer is an outflow
+  }, [ccMonthData, ccConfig]);
+
   // Carry-forward starting balances: month 0 uses real startingBals,
   // month 1 uses projected end of month 0, month 2 uses projected end of month 1.
   const startBalsPerMonth = useMemo(() => {
@@ -1346,22 +1380,38 @@ export default function CashFlow({ transactions = [], categories = [], assignmen
       const { monthIdx, year, monthKey } = months[i];
       const mAmts = allMonthAmounts[monthKey] ?? {};
       const mStates = allMonthStates[monthKey] ?? {};
-      const effFn = (t, acctId) => mAmts[`${acctId}_${t.id}`] ?? presetsMap[t.name] ?? t.amount;
+      const dynamicCcAmount = computeDynamicCcPayment(monthKey);
+      
+      const effFn = (t, acctId) => {
+        if (t.name === "Transfer for Credit Card") {
+          return mAmts[`${acctId}_${t.id}`] ?? dynamicCcAmount;
+        }
+        return mAmts[`${acctId}_${t.id}`] ?? presetsMap[t.name] ?? t.amount;
+      };
+      
       const endBals = computeProjectedEndBals(accounts, prev, effFn, isThreePaycheck(monthIdx, year), mStates);
       result.push(endBals);
       prev = endBals;
     }
     return result;
-  }, [months, startingBals, accounts, presetsMap, isThreePaycheck, allMonthAmounts, allMonthStates]);
+  }, [months, startingBals, accounts, presetsMap, isThreePaycheck, allMonthAmounts, allMonthStates, computeDynamicCcPayment]);
 
   // Summary per month
   const summaries = useMemo(() => {
     return months.map(({ monthIdx, year, monthKey }) => {
       const mAmts = allMonthAmounts[monthKey] ?? {};
-      const effFn = (t, acctId) => mAmts[`${acctId}_${t.id}`] ?? presetsMap[t.name] ?? t.amount;
+      const dynamicCcAmount = computeDynamicCcPayment(monthKey);
+      
+      const effFn = (t, acctId) => {
+        if (t.name === "Transfer for Credit Card") {
+          return mAmts[`${acctId}_${t.id}`] ?? dynamicCcAmount;
+        }
+        return mAmts[`${acctId}_${t.id}`] ?? presetsMap[t.name] ?? t.amount;
+      };
+      
       return computeSummary(accounts, effFn, isThreePaycheck(monthIdx, year));
     });
-  }, [months, accounts, presetsMap, isThreePaycheck, allMonthAmounts]);
+  }, [months, accounts, presetsMap, isThreePaycheck, allMonthAmounts, computeDynamicCcPayment]);
 
   // Load all startup data sequentially so DB-saved balances are never overwritten by Plaid.
   // The race condition with separate effects: Plaid fires immediately with an empty userSetStartIds
@@ -1373,6 +1423,7 @@ export default function CashFlow({ transactions = [], categories = [], assignmen
       // 1. DB presets — amounts, starting balances, pay cycle, row order, notes
       let userSetIds = new Set();
       let newLinks = {};   // hoisted so step 2 can read the saved Plaid account_id links
+      let newCcLinks = {}; // hoisted for credit cards
       try {
         const dbPresets = await fetchCashflowPresets();
         if (!cancelled && Array.isArray(dbPresets) && dbPresets.length > 0) {
@@ -1402,10 +1453,15 @@ export default function CashFlow({ transactions = [], categories = [], assignmen
             const linkPref = dbPresets.find(p => p.name === `__plaid_id_${a.id}`);
             if (linkPref?.note) newLinks[a.id] = linkPref.note;
           });
+          CC_CARDS.forEach(card => {
+            const linkPref = dbPresets.find(p => p.name === `__plaid_id_cc_${card.id}`);
+            if (linkPref?.note) newCcLinks[card.id] = linkPref.note;
+          });
           if (Object.keys(newBals).length > 0) setStartingBals(prev => ({ ...prev, ...newBals }));
           if (userSetIds.size > 0) setUserSetStartIds(userSetIds);
           if (Object.keys(newOrders).length > 0) setTxnOrders(newOrders);
           if (Object.keys(newLinks).length > 0) setPlaidAcctLinks(newLinks);
+          if (Object.keys(newCcLinks).length > 0) setCcPlaidLinks(newCcLinks);
 
           const newNotes = {};
           dbPresets.forEach(p => {
@@ -1486,6 +1542,29 @@ export default function CashFlow({ transactions = [], categories = [], assignmen
                 : plaidAccts.find(p => matchPlaidToAccount(p.name, p.institutionName, acct.id, acct.name));
               if (match?.balances?.current != null) next[acct.id] = match.balances.current;
             });
+            return next;
+          });
+          
+          setCcMonthData(prev => {
+            const next = { ...prev };
+            const currentMonthKey = months[0]?.monthKey || toMonthKey(now.getFullYear(), now.getMonth());
+            const currentMonthData = { ...(next[currentMonthKey] || {}) };
+            let updated = false;
+            
+            CC_CARDS.forEach(card => {
+              const linkedId = newCcLinks[card.id];
+              const match = linkedId 
+                ? plaidAccts.find(p => p.account_id === linkedId)
+                : null;
+              if (match?.balances?.current != null) {
+                currentMonthData[card.id] = {
+                  ...(currentMonthData[card.id] || {}),
+                  balance: match.balances.current
+                };
+                updated = true;
+              }
+            });
+            if (updated) next[currentMonthKey] = currentMonthData;
             return next;
           });
         }
@@ -1701,6 +1780,27 @@ export default function CashFlow({ transactions = [], categories = [], assignmen
     setModal(null);
   }, [allPlaidAccts]);
 
+  const saveCcPlaidLink = useCallback((cardId, plaidAccountId) => {
+    setCcPlaidLinks(prev => ({ ...prev, [cardId]: plaidAccountId }));
+    saveCashflowPreset(`__plaid_id_cc_${cardId}`, 0, null, plaidAccountId).catch(() => {});
+    // Immediately apply the balance for the current month
+    const matched = allPlaidAccts.find(p => p.account_id === plaidAccountId);
+    if (matched?.balances?.current != null) {
+      const currentMonthKey = months[0]?.monthKey || toMonthKey(now.getFullYear(), now.getMonth());
+      setCcMonthData(prev => ({
+        ...prev,
+        [currentMonthKey]: {
+          ...(prev[currentMonthKey] || {}),
+          [cardId]: {
+            ...(prev[currentMonthKey]?.[cardId] || {}),
+            balance: matched.balances.current
+          }
+        }
+      }));
+    }
+    setModal(null);
+  }, [allPlaidAccts, months]);
+
   const savePayCycleDate = useCallback((newDateNum) => {
     setPayBaseDate(newDateNum);
     saveCashflowPreset("__pay_cycle_date", newDateNum, null, null).catch(() => {});
@@ -1804,12 +1904,8 @@ export default function CashFlow({ transactions = [], categories = [], assignmen
     } else {
       saveCashflowPreset(`__cc_${cardId}_${field}`, value, null, null).catch(() => {});
     }
-    if (field === "payment") {
-      const vcxPay  = cardId === "vcx"  ? value : (ccConfig.vcx?.payment  ?? DEFAULT_CC_CONFIG.vcx.payment);
-      const platPay = cardId === "plat" ? value : (ccConfig.plat?.payment ?? DEFAULT_CC_CONFIG.plat.payment);
-      savePreset("Transfer for Credit Card", -(vcxPay + platPay), "Monthly", null);
-    }
-  }, [ccConfig, savePreset]);
+    // "payment" field is deprecated now that it computes automatically
+  }, [ccConfig]);
 
   const saveCcMonthData = useCallback((monthKey, cardId, field, value) => {
     setCcMonthData(prev => ({
@@ -1922,6 +2018,8 @@ export default function CashFlow({ transactions = [], categories = [], assignmen
                       card={card}
                       config={ccConfig[card.id]}
                       monthData={ccMonthData[monthKey]?.[card.id]}
+                      isLinked={!!ccPlaidLinks[card.id]}
+                      onLinkAccount={() => setModal({ type: "linkCc", cardId: card.id })}
                       onUpdateConfig={(field, value) => saveCcConfig(card.id, field, value)}
                       onUpdateMonthData={(field, value) => saveCcMonthData(monthKey, card.id, field, value)}
                     />
@@ -1949,6 +2047,7 @@ export default function CashFlow({ transactions = [], categories = [], assignmen
                     presetsMap={presetsMap}
                     monthStates={monthStates}
                     monthAmounts={allMonthAmounts[monthKey] ?? {}}
+                    dynamicAmounts={{ "Transfer for Credit Card": computeDynamicCcPayment(monthKey) }}
                     isThreePaycheckMonth={isThree}
                     onTogglePending={(aId, tId) => togglePending(monthKey, aId, tId)}
                     onEditNote={(aId, tId, note) => editNote(monthKey, aId, tId, note)}
@@ -2050,6 +2149,15 @@ export default function CashFlow({ transactions = [], categories = [], assignmen
           currentLinkId={plaidAcctLinks[modal.accountId]}
           plaidAccounts={allPlaidAccts}
           onSelect={(plaidAccountId) => savePlaidLink(modal.accountId, plaidAccountId)}
+          onClose={() => setModal(null)}
+        />
+      )}
+      {modal?.type === "linkCc" && (
+        <LinkAccountModal
+          accountName={CC_CARDS.find(c => c.id === modal.cardId)?.label}
+          currentLinkId={ccPlaidLinks[modal.cardId]}
+          plaidAccounts={allPlaidAccts}
+          onSelect={(plaidAccountId) => saveCcPlaidLink(modal.cardId, plaidAccountId)}
           onClose={() => setModal(null)}
         />
       )}
@@ -2163,7 +2271,7 @@ const styles = {
   notesTextarea: { width: "100%", minHeight: 64, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: "var(--radius)", color: "var(--text)", fontSize: 12, fontFamily: "var(--font-mono)", padding: "8px 10px", resize: "vertical", outline: "none", lineHeight: 1.5, boxSizing: "border-box" },
 
   ccBlock: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", overflow: "hidden" },
-  ccCardHeader: { display: "flex", alignItems: "baseline", gap: 10, padding: "14px 20px 10px", borderBottom: "1px solid var(--border)", background: "var(--surface2)" },
+  ccCardHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "14px 20px 10px", borderBottom: "1px solid var(--border)", background: "var(--surface2)" },
   ccCardName: { fontSize: 15, fontWeight: 700, color: "var(--text)" },
   ccCardDue: { fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)" },
   ccTableWrap: { padding: "0 20px 12px" },
