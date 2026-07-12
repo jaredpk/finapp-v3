@@ -45,7 +45,6 @@ const DEFAULT_ACCOUNTS = [
       { id: 5,  day: 19, name: "Transfer Reserve Account",        freq: "Monthly",    amount: -500                                             },
       { id: 6,  day: 20, name: "Paycheck",                        freq: "Bi-Monthly", amount: 4009                                             },
       { id: 7,  day: 24, name: "Jared Transfer to Personal Macu", freq: "Monthly",    amount: -629.84, isTransfer: true                        },
-      { id: 18, day: 24, name: "Transfer for Credit Card",        freq: "Monthly",    amount: -6000                                            },
       { id: 8,  day: 27, name: "Transfer to Long-Term Purchases", freq: "Monthly",    amount: -250                                             },
       { id: 9,  day: 27, name: "Transfer to Emergency Fund",      freq: "Monthly",    amount: -250                                             },
       { id: 10, day: 27, name: "Jared Transfer to Shared",        freq: "Monthly",    amount: -1900,   isTransfer: true                        },
@@ -80,6 +79,7 @@ const DEFAULT_ACCOUNTS = [
       { id: 5,  day: 12, name: "Alta Transfer",            freq: "Bi-Weekly",  amount: 1500                       },
       { id: 6,  day: 15, name: "Car Payment",              freq: "Monthly",    amount: -500                       },
       { id: 7,  day: 24, name: "Alta Transfer",            freq: "Bi-Weekly",  amount: 1500                       },
+      { id: 8,  day: 24, name: "Transfer for Credit Card", freq: "Monthly",    amount: -6000                      },
       { id: 9,  day: 28, name: "Jared Transfer In",        freq: "Monthly",    amount: 1900,   isTransfer: true   },
       { id: 10, day: 28, name: "Misc. Utilities",          freq: "Monthly",    amount: -500                       },
       { id: 11, day: 30, name: "Jared Transfer In",        freq: "Monthly",    amount: 1900,   isTransfer: true,  defaultPending: true },
@@ -466,8 +466,8 @@ function AccountTable({ account, startingBalance, allowEditStart, isLinked, pres
   };
   const effectiveAmt = (t) => {
     const key = `${account.id}_${t.id}`;
-    if (monthAmounts?.[key] != null) return monthAmounts[key];
     if (dynamicAmounts && dynamicAmounts[t.name] != null) return dynamicAmounts[t.name];
+    if (monthAmounts?.[key] != null) return monthAmounts[key];
     return presetsMap[t.name] ?? t.amount;
   };
 
@@ -1384,7 +1384,7 @@ export default function CashFlow({ transactions = [], categories = [], assignmen
       
       const effFn = (t, acctId) => {
         if (t.name === "Transfer for Credit Card") {
-          return mAmts[`${acctId}_${t.id}`] ?? dynamicCcAmount;
+          return dynamicCcAmount;
         }
         return mAmts[`${acctId}_${t.id}`] ?? presetsMap[t.name] ?? t.amount;
       };
@@ -1404,7 +1404,7 @@ export default function CashFlow({ transactions = [], categories = [], assignmen
       
       const effFn = (t, acctId) => {
         if (t.name === "Transfer for Credit Card") {
-          return mAmts[`${acctId}_${t.id}`] ?? dynamicCcAmount;
+          return dynamicCcAmount;
         }
         return mAmts[`${acctId}_${t.id}`] ?? presetsMap[t.name] ?? t.amount;
       };
