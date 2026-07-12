@@ -2084,7 +2084,7 @@ const styles = {
   summaryVal: { fontSize: 24, fontWeight: 700, fontFamily: "var(--font-mono)", letterSpacing: "-0.03em" },
 
   accountsGrid: { display: "flex", flexDirection: "column", gap: 20, marginBottom: 24 },
-  accountsGridAll: { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 14, marginBottom: 24, alignItems: "start" },
+  accountsGridAll: { display: "flex", overflowX: "auto", gap: 14, marginBottom: 24, alignItems: "start", paddingBottom: 8 },
 
   autoMatchBtn: { display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius)", color: "var(--text)", fontSize: 13, fontWeight: 600, fontFamily: "var(--font-display)", padding: "7px 14px", cursor: "pointer" },
   autoMatchBadge: { background: "var(--accent)", color: "#fff", fontSize: 10, fontWeight: 700, fontFamily: "var(--font-mono)", borderRadius: 99, padding: "1px 6px" },
@@ -2116,7 +2116,7 @@ const styles = {
   matchFooter: { padding: "14px 24px", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "flex-end" },
   matchDoneBtn: { background: "var(--accent)", color: "#fff", border: "none", borderRadius: "var(--radius)", padding: "8px 18px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "var(--font-display)" },
 
-  accountBlock: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", overflow: "hidden" },
+  accountBlock: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", overflow: "hidden", minWidth: 320, flexShrink: 0 },
   accountHeader: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "16px 20px 12px", borderBottom: "1px solid var(--border)", background: "var(--surface2)" },
   accountName: { fontSize: 15, fontWeight: 700, color: "var(--text)", marginBottom: 2 },
   accountStartBal: { fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)" },

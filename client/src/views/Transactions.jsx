@@ -655,7 +655,7 @@ const styles = {
   wrap:    { padding: "36px 40px", maxWidth: 1100 },
   heading: { fontSize: 32, fontWeight: 800, letterSpacing: "-0.04em", marginBottom: 24, color: "var(--text)" },
 
-  stats: { display: "grid", gridTemplateColumns: "repeat(4, minmax(0,1fr))", gap: 10, marginBottom: 20 },
+  stats: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10, marginBottom: 20 },
   stat:  { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", padding: "14px 18px" },
   statLabel: { fontSize: 10, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontFamily: "var(--font-mono)", marginBottom: 6 },
   statVal:   { fontSize: 22, fontWeight: 700, color: "var(--text)" },
@@ -681,9 +681,9 @@ const styles = {
   count: { fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", marginLeft: "auto" },
   empty: { color: "var(--muted)", fontSize: 13, fontFamily: "var(--font-mono)", textAlign: "center", padding: "48px 0" },
 
-  tableWrap: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", overflow: "hidden" },
+  tableWrap: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", overflowX: "auto" },
   tableHeader: {
-    display: "grid", gridTemplateColumns: "76px minmax(0,1fr) minmax(0,150px) 96px minmax(0,210px) 110px",
+    display: "grid", gridTemplateColumns: "76px minmax(0,1fr) minmax(0,150px) 96px minmax(0,210px) 110px", minWidth: 800,
     padding: "10px 16px", background: "var(--surface2)",
     fontSize: 10, fontWeight: 600, letterSpacing: "0.1em",
     textTransform: "uppercase", color: "var(--muted)", fontFamily: "var(--font-mono)",
@@ -693,7 +693,7 @@ const styles = {
   sortNeutral: { opacity: 0.3, fontSize: 10 },
   sortActive:  { color: "var(--accent)", fontSize: 10 },
   row: {
-    display: "grid", gridTemplateColumns: "76px minmax(0,1fr) minmax(0,150px) 96px minmax(0,210px) 110px",
+    display: "grid", gridTemplateColumns: "76px minmax(0,1fr) minmax(0,150px) 96px minmax(0,210px) 110px", minWidth: 800,
     padding: "9px 16px", borderBottom: "1px solid var(--border)",
     alignItems: "center",
   },

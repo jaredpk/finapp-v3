@@ -72,7 +72,7 @@ export default function TransactionLedger({ transactions, categories, onCategory
               return (
                 <React.Fragment key={t.id}>
                   <tr style={{ ...styles.row, opacity: t.excluded ? 0.45 : 1, background: uncertain ? "rgba(245, 158, 11, 0.08)" : "transparent" }}>
-                    <td style={styles.td}>{t.transaction_date}</td>
+                    <td style={styles.td}>{t.transaction_date ? t.transaction_date.slice(0, 10) : "—"}</td>
                     <td style={styles.td} onClick={() => setExpandedId(expandedId === t.id ? null : t.id)} title="Click for notes / match explanation">
                       <span style={{ cursor: "pointer" }}>{t.merchant || t.memo || "—"}</span>
                       {uncertain && <span style={styles.uncertainBadge} title={t.match_explanation}>uncertain</span>}
