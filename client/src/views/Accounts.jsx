@@ -158,7 +158,7 @@ export default function Accounts({ accounts, itemErrors, hiddenAccounts, setHidd
 }
 
 const styles = {
-  wrap: { padding: "36px 40px", maxWidth: 960 },
+  wrap: { padding: "36px clamp(16px, 5vw, 40px)", maxWidth: 960 },
   headingRow: { display: "flex", alignItems: "center", gap: 16, marginBottom: 32 },
   heading: { fontSize: 32, fontWeight: 800, letterSpacing: "-0.04em", color: "var(--text)", margin: 0 },
   showHiddenBtn: {

@@ -136,7 +136,7 @@ export default function Budget({ transactions }) {
 }
 
 const styles = {
-  wrap: { padding: "36px 40px", maxWidth: 760 },
+  wrap: { padding: "36px clamp(16px, 5vw, 40px)", maxWidth: 760 },
   heading: { fontSize: 32, fontWeight: 800, letterSpacing: "-0.04em", color: "var(--text)", marginBottom: 4 },
   sub: { fontSize: 13, color: "var(--muted)", fontFamily: "var(--font-mono)", marginBottom: 28 },
   summaryRow: { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 14, marginBottom: 28 },

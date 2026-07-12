@@ -652,7 +652,7 @@ function DetailPanel({ t, onClose }) {
 }
 
 const styles = {
-  wrap:    { padding: "36px 40px", maxWidth: 1100 },
+  wrap:    { padding: "36px clamp(16px, 5vw, 40px)", maxWidth: 1100 },
   heading: { fontSize: 32, fontWeight: 800, letterSpacing: "-0.04em", marginBottom: 24, color: "var(--text)" },
 
   stats: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10, marginBottom: 20 },

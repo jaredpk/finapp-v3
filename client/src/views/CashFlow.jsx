@@ -2059,7 +2059,7 @@ export default function CashFlow({ transactions = [], categories = [], assignmen
 
 // ── Styles ────────────────────────────────────────────────────────────────────
 const styles = {
-  wrap: { padding: "36px 40px", maxWidth: 1100 },
+  wrap: { padding: "36px clamp(16px, 5vw, 40px)", maxWidth: 1100 },
   topRow: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 22, flexWrap: "wrap", gap: 16 },
   heading: { fontSize: 32, fontWeight: 800, letterSpacing: "-0.04em", color: "var(--text)", marginBottom: 4 },
   sub: { fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-mono)" },

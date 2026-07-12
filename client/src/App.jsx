@@ -254,7 +254,7 @@ function AuthenticatedApp({ supabase, session }) {
 
 const styles = {
   app: { display: "flex", minHeight: "100vh", background: "var(--bg)" },
-  main: { flex: 1, overflowY: "auto", minHeight: "100vh" },
+  main: { flex: 1, minWidth: 0, overflowY: "auto", minHeight: "100vh" },
   loader: { display: "flex", alignItems: "center", justifyContent: "center", height: "100vh" },
 };
 

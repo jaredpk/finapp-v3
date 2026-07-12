@@ -196,7 +196,7 @@ function Empty() {
 }
 
 const styles = {
-  wrap: { padding: "36px 40px", maxWidth: 960 },
+  wrap: { padding: "36px clamp(16px, 5vw, 40px)", maxWidth: 960 },
   heading: { fontSize: 32, fontWeight: 800, letterSpacing: "-0.04em", marginBottom: 28, color: "var(--text)" },
   stats: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 14, marginBottom: 24 },
   accountsCard: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", padding: "22px 24px", marginBottom: 16 },

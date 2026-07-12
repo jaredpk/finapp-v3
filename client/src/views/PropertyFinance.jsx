@@ -230,9 +230,9 @@ export default function PropertyFinance() {
 }
 
 const styles = {
-  wrap: { padding: "32px 40px", maxWidth: 1200 },
+  wrap: { padding: "32px clamp(16px, 5vw, 40px)", maxWidth: 1200 },
   heading: { fontSize: 28, fontWeight: 800, letterSpacing: "-0.03em", marginBottom: 12 },
   muted: { color: "var(--muted)", fontSize: 14, marginBottom: 16 },
   seedBtn: { padding: "10px 18px", background: "var(--accent)", color: "#fff", border: "none", borderRadius: "var(--radius)", fontSize: 14, fontWeight: 600, cursor: "pointer" },
-  twoCol: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 },
+  twoCol: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 20 },
 };

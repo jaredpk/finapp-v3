@@ -256,7 +256,7 @@ export default function Categories({ categories, setCategories }) {
 }
 
 const styles = {
-  wrap: { padding: "36px 40px", maxWidth: 720 },
+  wrap: { padding: "36px clamp(16px, 5vw, 40px)", maxWidth: 720 },
   heading: { fontSize: 32, fontWeight: 800, letterSpacing: "-0.04em", marginBottom: 24, color: "var(--text)" },
   card: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", padding: "22px 24px", marginBottom: 24 },
   sectionLabel: { fontSize: 11, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--muted)", fontFamily: "var(--font-mono)", marginBottom: 14 },
