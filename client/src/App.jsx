@@ -10,6 +10,7 @@ import CashFlow from "./views/CashFlow.jsx";
 import PropertyFinance from "./views/PropertyFinance.jsx";
 import Settings from "./views/Settings.jsx";
 import { usePlaidConnect, usePlaidUpdateLink } from "./hooks/usePlaid.js";
+import useIsMobile from "./hooks/useIsMobile.js";
 import {
   fetchAccounts, fetchTransactions, setTokenGetter,
   fetchCategories, fetchAssignments, fetchMerchantOverrides,
@@ -96,6 +97,7 @@ function LoginScreen({ supabase }) {
 }
 
 function AuthenticatedApp({ supabase, session }) {
+  const isMobile = useIsMobile();
   const [view, setView] = useState("dashboard");
   const [accounts, setAccounts] = useState([]);
   const [itemErrors, setItemErrors] = useState([]);
@@ -216,7 +218,7 @@ function AuthenticatedApp({ supabase, session }) {
   const ActiveView = VIEWS[view] || Dashboard;
 
   return (
-    <div style={styles.app}>
+    <div style={{ ...styles.app, flexDirection: isMobile ? "column" : "row" }}>
       {reviewAccounts && (
         <AccountReviewModal
           newAccounts={reviewAccounts}
@@ -233,8 +235,9 @@ function AuthenticatedApp({ supabase, session }) {
         user={session.user}
         onSignOut={() => supabase.auth.signOut()}
         auditOverdue={auditOverdue}
+        isMobile={isMobile}
       />
-      <main style={styles.main}>
+      <main style={{ ...styles.main, paddingBottom: isMobile ? 64 : 0 }}>
         {loading && accounts.length === 0 && transactions.length === 0 ? (
           <div style={styles.loader}>
             <span className="pulse" style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 13 }}>

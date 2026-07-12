@@ -11,9 +11,35 @@ const NAV = [
   { id: "settings",     label: "Settings",      icon: "⚙" },
 ];
 
-export default function Sidebar({ active, setActive, onConnect, connecting, user, onSignOut, auditOverdue }) {
+export default function Sidebar({ active, setActive, onConnect, connecting, user, onSignOut, auditOverdue, isMobile }) {
   const displayName = user?.user_metadata?.full_name || user?.email || "Account";
   const avatarUrl = user?.user_metadata?.avatar_url;
+
+  if (isMobile) {
+    return (
+      <nav style={styles.mobileNav}>
+        {NAV.map((item) => (
+          <button
+            key={item.id}
+            onClick={() => setActive(item.id)}
+            style={{
+              ...styles.mobileNavItem,
+              color: active === item.id ? "var(--text)" : "var(--muted)",
+            }}
+          >
+            <span style={styles.mobileNavIcon}>{item.icon}</span>
+            {item.id === "settings" && auditOverdue && active !== "settings" && (
+              <span style={styles.mobileAuditDot} title="Audit needed" />
+            )}
+            {active === item.id && <span style={styles.mobileActiveDot} />}
+          </button>
+        ))}
+        <button onClick={onConnect} disabled={connecting} style={{ ...styles.mobileNavItem, color: "var(--accent)" }}>
+          <span style={styles.mobileNavIcon}>+</span>
+        </button>
+      </nav>
+    );
+  }
 
   return (
     <aside style={styles.aside}>
@@ -74,6 +100,20 @@ const styles = {
     padding: "28px 16px 24px",
     flexShrink: 0,
   },
+  mobileNav: {
+    position: "fixed", bottom: 0, left: 0, right: 0, height: 64,
+    background: "rgba(255,255,255,0.85)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
+    borderTop: "1px solid var(--border)", display: "flex", alignItems: "center",
+    padding: "0 8px", zIndex: 100, overflowX: "auto", gap: 4,
+  },
+  mobileNavItem: {
+    display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+    background: "none", border: "none", padding: "8px 16px", position: "relative",
+    cursor: "pointer", flexShrink: 0, height: "100%", transition: "color 0.2s",
+  },
+  mobileNavIcon: { fontSize: 22 },
+  mobileActiveDot: { position: "absolute", bottom: 6, width: 4, height: 4, borderRadius: "50%", background: "var(--accent)" },
+  mobileAuditDot: { position: "absolute", top: 12, right: 12, width: 6, height: 6, borderRadius: "50%", background: "var(--red)", border: "1px solid var(--surface)" },
   wordmark: { fontSize: 26, fontWeight: 800, letterSpacing: "-0.04em", marginBottom: 36, paddingLeft: 8 },
   logo: { color: "var(--text)" },
   logoAccent: { color: "var(--accent)" },
