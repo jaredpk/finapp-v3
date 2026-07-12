@@ -2060,7 +2060,7 @@ export default function CashFlow({ transactions = [], categories = [], assignmen
 // ── Styles ────────────────────────────────────────────────────────────────────
 const styles = {
   wrap: { padding: "36px 40px", maxWidth: 1100 },
-  topRow: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 22 },
+  topRow: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 22, flexWrap: "wrap", gap: 16 },
   heading: { fontSize: 32, fontWeight: 800, letterSpacing: "-0.04em", color: "var(--text)", marginBottom: 4 },
   sub: { fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-mono)" },
 
@@ -2069,17 +2069,17 @@ const styles = {
   monthLabel: { fontSize: 13, fontWeight: 600, fontFamily: "var(--font-mono)", color: "var(--text)" },
   navBtn: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius)", color: "var(--text)", fontSize: 18, width: 32, height: 32, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" },
 
-  tabBar: { display: "flex", gap: 2, marginBottom: 24, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: 4 },
-  tabBtn: { flex: 1, padding: "8px 16px", borderRadius: "calc(var(--radius) - 2px)", border: "none", cursor: "pointer", fontSize: 13, fontWeight: 500, fontFamily: "var(--font-display)", background: "transparent", color: "var(--muted)", transition: "all 0.15s" },
-  tabBtnActive: { flex: 1, padding: "8px 16px", borderRadius: "calc(var(--radius) - 2px)", border: "none", cursor: "pointer", fontSize: 13, fontWeight: 700, fontFamily: "var(--font-display)", background: "var(--accent)", color: "#fff", transition: "all 0.15s" },
+  tabBar: { display: "flex", overflowX: "auto", gap: 2, marginBottom: 24, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: 4 },
+  tabBtn: { flex: 1, padding: "8px 16px", borderRadius: "calc(var(--radius) - 2px)", border: "none", cursor: "pointer", fontSize: 13, fontWeight: 500, fontFamily: "var(--font-display)", background: "transparent", color: "var(--muted)", transition: "all 0.15s", whiteSpace: "nowrap" },
+  tabBtnActive: { flex: 1, padding: "8px 16px", borderRadius: "calc(var(--radius) - 2px)", border: "none", cursor: "pointer", fontSize: 13, fontWeight: 700, fontFamily: "var(--font-display)", background: "var(--accent)", color: "#fff", transition: "all 0.15s", whiteSpace: "nowrap" },
 
   monthSection: { marginTop: 40, paddingTop: 32, borderTop: "1px solid var(--border)" },
   monthHeader: { display: "flex", alignItems: "center", gap: 12, marginBottom: 16 },
   threePaycheckBadge: { fontSize: 10, fontWeight: 700, fontFamily: "var(--font-mono)", color: "var(--accent)", background: "rgba(240,180,41,0.12)", border: "1px solid rgba(240,180,41,0.3)", borderRadius: "var(--radius)", padding: "3px 8px", textTransform: "uppercase", letterSpacing: "0.08em" },
 
-  summaryBar: { display: "flex", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", padding: "18px 28px", marginBottom: 24, gap: 0 },
-  summaryItem: { flex: 1, display: "flex", flexDirection: "column", gap: 4 },
-  summaryDivider: { width: 1, background: "var(--border)", margin: "0 28px" },
+  summaryBar: { display: "flex", overflowX: "auto", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", padding: "18px 28px", marginBottom: 24, gap: 0 },
+  summaryItem: { flex: 1, display: "flex", flexDirection: "column", gap: 4, minWidth: 140 },
+  summaryDivider: { width: 1, flexShrink: 0, background: "var(--border)", margin: "0 28px" },
   summaryLabel: { fontSize: 10, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--muted)", fontFamily: "var(--font-mono)" },
   summaryVal: { fontSize: 24, fontWeight: 700, fontFamily: "var(--font-mono)", letterSpacing: "-0.03em" },
 
