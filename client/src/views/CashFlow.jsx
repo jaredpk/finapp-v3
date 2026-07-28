@@ -24,6 +24,37 @@ const fmtShort = (n) => {
   return n < 0 ? `($${abs})` : `$${abs}`;
 };
 
+// Excel accounting-style format: $4,009 / ($1,900) — cents shown only when present.
+const fmtAccounting = (n) => {
+  if (n == null) return "—";
+  const abs = Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+  return n < 0 ? `($${abs})` : `$${abs}`;
+};
+
+// Parses spreadsheet-style amount input: "-1900", "1900", "(1900)", "$1,900".
+// Unsigned input inherits the sign of the previous amount (typing "250" into a
+// cell showing ($250) keeps it an expense); explicit "-", "+" or parens win.
+// Returns null for input that can't be parsed.
+function parseAmountInput(raw, prevAmount) {
+  let s = String(raw).trim();
+  if (!s) return null;
+  let sign = null;
+  if (/^\(.*\)$/.test(s)) { sign = -1; s = s.slice(1, -1); }
+  s = s.replace(/[$,\s]/g, "");
+  if (s.startsWith("-")) { sign = -1; s = s.slice(1); }
+  else if (s.startsWith("+")) { sign = 1; s = s.slice(1); }
+  if (!s || /[^0-9.]/.test(s)) return null;
+  const n = parseFloat(s);
+  if (isNaN(n) || !isFinite(n)) return null;
+  if (sign === null) sign = prevAmount < 0 ? -1 : 1;
+  return sign * Math.abs(n);
+}
+
+// Column order for Excel-style cell navigation in AccountTable (drag handle and
+// delete column are intentionally excluded from keyboard navigation).
+const NAV_COLS = ["day", "name", "freq", "amount", "running", "pending", "confirmed"];
+const EDITABLE_COLS = new Set(["day", "amount"]);
+
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const FREQS = ["Monthly","Bi-Monthly","Bi-Weekly","Weekly","One Time","As Needed","Quarterly"];
 
@@ -379,36 +410,41 @@ function MonthBadge({ label }) {
 
 function SummaryBar({ takeHome, expenses, freeCashflow, labels }) {
   const [inLabel, outLabel, netLabel] = labels ?? ["Take-Home Income", "Est. Expenses", "Free Cashflow"];
+  const rows = [
+    { label: inLabel,  value: takeHome,     color: "var(--green)" },
+    { label: outLabel, value: expenses,     color: "var(--red)" },
+    { label: netLabel, value: freeCashflow, color: freeCashflow >= 0 ? "var(--accent)" : "var(--red)" },
+  ];
   return (
-    <div style={styles.summaryBar}>
-      <div style={styles.summaryItem}>
-        <span style={styles.summaryLabel}>{inLabel}</span>
-        <span style={{ ...styles.summaryVal, color: "var(--green)" }}>{fmt(takeHome)}</span>
-      </div>
-      <div style={styles.summaryDivider} />
-      <div style={styles.summaryItem}>
-        <span style={styles.summaryLabel}>{outLabel}</span>
-        <span style={{ ...styles.summaryVal, color: "var(--red)" }}>{fmt(expenses)}</span>
-      </div>
-      <div style={styles.summaryDivider} />
-      <div style={styles.summaryItem}>
-        <span style={styles.summaryLabel}>{netLabel}</span>
-        <span style={{ ...styles.summaryVal, color: freeCashflow >= 0 ? "var(--accent)" : "var(--red)" }}>
-          {fmt(freeCashflow, true)}
-        </span>
-      </div>
-    </div>
+    <table className="cf-grid" style={styles.summaryTable}>
+      <thead>
+        <tr><th colSpan={2} style={styles.summaryHeadCell}>Monthly Cashflow</th></tr>
+      </thead>
+      <tbody>
+        {rows.map((row) => (
+          <tr key={row.label} style={{ background: "var(--surface)" }}>
+            <td style={styles.summaryLabelCell}>{row.label}</td>
+            <td style={{ ...styles.summaryValCell, color: row.color }}>{fmtAccounting(row.value)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 
 // `compact` is accepted (used in the "All Accounts" tab, which shows every account
 // side by side) but currently has no visual effect — the original compact styling
 // couldn't be reliably reconstructed from minified code, so this renders full-size.
-function AccountTable({ account, startingBalance, allowEditStart, isLinked, presetsMap, monthStates, monthAmounts, dynamicAmounts, isThreePaycheckMonth, onTogglePending, onEditNote, onEditAmount, onUpdateDay, onEditStart, onLinkAccount, onAddRow, onDeleteRow, txnOrder, onReorder, compact }) {
+function AccountTable({ account, startingBalance, allowEditStart, isLinked, presetsMap, monthStates, monthAmounts, dynamicAmounts, isThreePaycheckMonth, onTogglePending, onEditNote, onEditAmount, onCommitMonthAmount, onUpdateDay, onEditStart, onLinkAccount, onAddRow, onDeleteRow, txnOrder, onReorder, compact }) {
   const [dragOverId, setDragOverId] = useState(null);
   const [noteEditId, setNoteEditId] = useState(null);
   const [noteEditVal, setNoteEditVal] = useState("");
   const dragItemId = useRef(null);
+  // Excel-style active cell + in-cell edit state
+  const [sel, setSel] = useState(null);   // { row, col }
+  const [edit, setEdit] = useState(null); // { row, col, value }
+  const containerRef = useRef(null);
+  const skipBlurRef = useRef(false);
 
   // Use custom drag order if set, otherwise sort by day
   let filtered;
@@ -500,6 +536,118 @@ function AccountTable({ account, startingBalance, allowEditStart, isLinked, pres
 
   const minColor = minBal < 0 ? "var(--red)" : minBal < 500 ? "var(--accent)" : "var(--muted)";
 
+  // ── Excel-style cell selection + in-cell editing ────────────────────────────
+  const moveSel = (dr, dc) => {
+    setSel(s => {
+      if (!s) return s;
+      const r = Math.max(0, Math.min(rows.length - 1, s.row + dr));
+      const ci = Math.max(0, Math.min(NAV_COLS.length - 1, NAV_COLS.indexOf(s.col) + dc));
+      return { row: r, col: NAV_COLS[ci] };
+    });
+  };
+
+  const selectCell = (r, colKey) => {
+    setSel({ row: r, col: colKey });
+    containerRef.current?.focus();
+  };
+
+  // F2 / double-click / Enter: start editing with the current content preserved
+  const startEditPreserve = (r, colKey) => {
+    const row = rows[r];
+    if (!row || !EDITABLE_COLS.has(colKey)) return;
+    setSel({ row: r, col: colKey });
+    setEdit({ row: r, col: colKey, value: colKey === "day" ? String(row.displayDay) : String(row.effectiveAmt) });
+  };
+
+  const commitEdit = (dr = 0, dc = 0, refocus = true) => {
+    if (!edit) return;
+    const row = rows[edit.row];
+    if (row) {
+      if (edit.col === "day") {
+        const n = parseInt(String(edit.value).trim(), 10);
+        if (!isNaN(n)) onUpdateDay(account.id, row.id, Math.max(1, Math.min(31, n)));
+        // invalid input → revert (no commit)
+      } else if (edit.col === "amount") {
+        const parsed = parseAmountInput(edit.value, row.effectiveAmt);
+        if (parsed != null && onCommitMonthAmount) onCommitMonthAmount(account.id, row.id, parsed);
+        // invalid input → revert (no commit)
+      }
+    }
+    setEdit(null);
+    if (dr || dc) moveSel(dr, dc);
+    if (refocus) containerRef.current?.focus();
+  };
+
+  const cancelEdit = () => { setEdit(null); containerRef.current?.focus(); };
+
+  const handleEditKeyDown = (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter")      { e.preventDefault(); skipBlurRef.current = true; commitEdit(e.shiftKey ? -1 : 1, 0); }
+    else if (e.key === "Tab")   { e.preventDefault(); skipBlurRef.current = true; commitEdit(0, e.shiftKey ? -1 : 1); }
+    else if (e.key === "Escape") { e.preventDefault(); skipBlurRef.current = true; cancelEdit(); }
+  };
+
+  const handleEditBlur = () => {
+    if (skipBlurRef.current) { skipBlurRef.current = false; return; }
+    commitEdit(0, 0, false);
+  };
+
+  const handleGridKeyDown = (e) => {
+    if (edit) return;
+    const tag = e.target.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return; // e.g. note editing
+    if (!sel) return;
+    const row = rows[sel.row];
+    if (!row) return;
+    const k = e.key;
+    if (k === "ArrowUp")         { e.preventDefault(); moveSel(-1, 0); }
+    else if (k === "ArrowDown")  { e.preventDefault(); moveSel(1, 0); }
+    else if (k === "ArrowLeft")  { e.preventDefault(); moveSel(0, -1); }
+    else if (k === "ArrowRight") { e.preventDefault(); moveSel(0, 1); }
+    else if (k === "Tab")        { e.preventDefault(); moveSel(0, e.shiftKey ? -1 : 1); }
+    else if (k === "F2")         { e.preventDefault(); startEditPreserve(sel.row, sel.col); }
+    else if (k === "Enter") {
+      e.preventDefault();
+      if (sel.col === "pending") onTogglePending(account.id, row.id);
+      else if (EDITABLE_COLS.has(sel.col)) startEditPreserve(sel.row, sel.col);
+      else moveSel(e.shiftKey ? -1 : 1, 0);
+    }
+    else if (sel.col === "pending" && (k === " " || k.toLowerCase() === "y" || k.toLowerCase() === "n")) {
+      e.preventDefault();
+      const want = k === " " ? !row.isPending : k.toLowerCase() === "y";
+      if (row.isPending !== want) onTogglePending(account.id, row.id);
+    }
+    else if (k === "Delete" || k === "Backspace") { e.preventDefault(); } // no destructive clearing
+    else if (k.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey && EDITABLE_COLS.has(sel.col)) {
+      // Excel type-to-overwrite: typed character replaces the content
+      e.preventDefault();
+      setEdit({ row: sel.row, col: sel.col, value: k });
+    }
+  };
+
+  const isSel = (r, colKey) => sel && sel.row === r && sel.col === colKey;
+  const isEditingCell = (r, colKey) => edit && edit.row === r && edit.col === colKey;
+  const selStyle = (r, colKey) => (isSel(r, colKey) ? { boxShadow: "inset 0 0 0 2px var(--accent)" } : null);
+
+  const cellClick = (r, colKey) => {
+    if (isEditingCell(r, colKey)) return;
+    if (colKey === "pending" && isSel(r, colKey)) { onTogglePending(account.id, rows[r].id); return; }
+    selectCell(r, colKey);
+  };
+
+  const editInput = (colKey) => (
+    <input
+      autoFocus
+      value={edit.value}
+      onChange={(e) => setEdit(ed => ({ ...ed, value: e.target.value }))}
+      onFocus={(e) => { const v = e.target.value; e.target.setSelectionRange(v.length, v.length); }}
+      onClick={(e) => e.stopPropagation()}
+      onKeyDown={handleEditKeyDown}
+      onBlur={handleEditBlur}
+      style={{ ...styles.cellInput, textAlign: colKey === "day" ? "center" : "right" }}
+    />
+  );
+
   return (
     <div style={styles.accountBlock}>
       <div style={styles.accountHeader}>
@@ -560,93 +708,119 @@ function AccountTable({ account, startingBalance, allowEditStart, isLinked, pres
         </div>
       )}
 
-      <div style={styles.tableWrap}>
-        <div style={styles.txnHeader}>
-          <span style={{ width: 20 }} />
-          <span style={{ width: 30 }}>Day</span>
-          <span style={{ flex: 1 }}>Transaction</span>
-          <span style={{ width: 80 }}>Freq</span>
-          <span style={{ width: 80, textAlign: "right" }}>Amount</span>
-          <span style={{ width: 90, textAlign: "right" }}>Running Bal</span>
-          <span style={{ width: 50, textAlign: "center" }}>Done</span>
-          <span style={{ width: 90, textAlign: "right" }}>Conf. Bal</span>
-          <span style={{ width: 28 }} />
-        </div>
-
-        {rows.map((t) => (
-          <div
-            key={t.id}
-            draggable
-            onDragStart={(e) => handleDragStart(e, t.id)}
-            onDragEnter={() => handleDragEnter(t.id)}
-            onDragEnd={handleDragEnd}
-            onDragOver={(e) => e.preventDefault()}
-            onDrop={(e) => handleDrop(e, t.id)}
-            style={{
-              ...styles.txnRow,
-              background: dragOverId === t.id ? "rgba(240,180,41,0.1)" : t.isPending ? "rgba(240,180,41,0.04)" : "transparent",
-              borderLeft: t.isPending ? "2px solid var(--accent)" : "2px solid transparent",
-            }}
-          >
-            <span style={styles.dragHandle} title="Drag to reorder">⠿</span>
-            <span style={{ ...styles.txnDay, color: t.displayDay !== t.day ? "var(--accent)" : "var(--muted)" }}
-              title={t.displayDay !== t.day ? `Template day: ${t.day}` : undefined}>
-              {t.displayDay}
-            </span>
-            <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", paddingRight: 8, gap: 2 }}>
-              <span style={{ fontSize: 12, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {t.name}
-                {monthAmounts?.[`${account.id}_${t.id}`] != null
-                  ? <span style={{ fontSize: 9, color: "var(--green)", fontFamily: "var(--font-mono)", marginLeft: 5, opacity: 0.7 }}>custom</span>
-                  : (dynamicAmounts && dynamicAmounts[t.name] != null)
-                  ? <span style={{ fontSize: 9, color: "var(--accent)", fontFamily: "var(--font-mono)", marginLeft: 5, opacity: 0.6 }}>auto</span>
-                  : presetsMap[t.name] !== undefined && <span style={{ fontSize: 9, color: "var(--accent)", fontFamily: "var(--font-mono)", marginLeft: 5, opacity: 0.6 }}>preset</span>
-                }
-              </span>
-              {noteEditId === t.id ? (
-                <input
-                  autoFocus
-                  value={noteEditVal}
-                  onChange={e => setNoteEditVal(e.target.value)}
-                  onBlur={() => { onEditNote(account.id, t.id, noteEditVal); setNoteEditId(null); }}
-                  onKeyDown={e => { if (e.key === "Enter" || e.key === "Escape") { onEditNote(account.id, t.id, noteEditVal); setNoteEditId(null); } }}
-                  style={styles.noteInput}
-                  placeholder="Add a note…"
-                />
-              ) : (
-                <span
-                  onClick={() => { setNoteEditId(t.id); setNoteEditVal(t.note ?? ""); }}
-                  style={t.note ? styles.noteText : styles.noteAdd}
-                >
-                  {t.note || "+ note"}
-                </span>
-              )}
-            </div>
-            <span style={{ width: 80, fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-mono)" }}>{t.freq}</span>
-            <span
-              style={{ width: 80, textAlign: "right", fontSize: 12, fontFamily: "var(--font-mono)", color: t.effectiveAmt >= 0 ? "var(--green)" : "var(--red)", cursor: "pointer" }}
-              onClick={() => onEditAmount(account.id, t.id, t.name)}
-              title="Click to edit preset"
-            >
-              {fmt(t.effectiveAmt)}
-            </span>
-            <span style={{ width: 90, textAlign: "right", fontSize: 12, fontFamily: "var(--font-mono)", color: t.runningBalance >= 0 ? "var(--text)" : "var(--red)" }}>
-              {fmtShort(t.runningBalance)}
-            </span>
-            <span style={{ width: 50, textAlign: "center" }}>
-              <button
-                onClick={() => onTogglePending(account.id, t.id)}
-                style={{ ...styles.pendingBtn, background: t.isPending ? "var(--accent)" : "var(--border2)", color: t.isPending ? "#fff" : "var(--muted)" }}
+      <div ref={containerRef} tabIndex={0} onKeyDown={handleGridKeyDown} style={styles.tableWrap}>
+        <table className="cf-grid" style={styles.grid}>
+          <colgroup>
+            <col style={{ width: 18 }} />
+            <col style={{ width: 34 }} />
+            <col />
+            <col style={{ width: 72 }} />
+            <col style={{ width: 88 }} />
+            <col style={{ width: 92 }} />
+            <col style={{ width: 40 }} />
+            <col style={{ width: 92 }} />
+            <col style={{ width: 24 }} />
+          </colgroup>
+          <thead>
+            <tr>
+              <th style={styles.gridHeadCell} />
+              <th style={{ ...styles.gridHeadCell, textAlign: "center" }}>Day</th>
+              <th style={styles.gridHeadCell}>Transaction</th>
+              <th style={styles.gridHeadCell}>Freq</th>
+              <th style={{ ...styles.gridHeadCell, textAlign: "right" }}>Amount</th>
+              <th style={{ ...styles.gridHeadCell, textAlign: "right" }}>Running Bal</th>
+              <th style={{ ...styles.gridHeadCell, textAlign: "center" }}>Done</th>
+              <th style={{ ...styles.gridHeadCell, textAlign: "right" }}>Conf. Bal</th>
+              <th style={styles.gridHeadCell} />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((t, r) => (
+              <tr
+                key={t.id}
+                onDragEnter={() => handleDragEnter(t.id)}
+                onDragEnd={handleDragEnd}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => handleDrop(e, t.id)}
+                style={{ background: dragOverId === t.id ? "rgba(240,180,41,0.1)" : t.isPending ? "rgba(240,180,41,0.04)" : "var(--surface)" }}
               >
-                {t.isPending ? "Y" : "N"}
-              </button>
-            </span>
-            <span style={{ width: 90, textAlign: "right", fontSize: 12, fontFamily: "var(--font-mono)", color: t.isPending ? "var(--accent)" : "var(--muted)", opacity: t.isPending ? 1 : 0.45 }}>
-              {fmtShort(t.confirmedBalance)}
-            </span>
-            <button onClick={() => onDeleteRow(account.id, t.id)} style={styles.deleteBtn} title="Remove">×</button>
-          </div>
-        ))}
+                <td style={{ ...styles.gridCell, padding: 0, textAlign: "center" }}>
+                  <span
+                    className="cf-hover-show"
+                    draggable
+                    onDragStart={(e) => handleDragStart(e, t.id)}
+                    style={styles.dragHandle}
+                    title="Drag to reorder"
+                  >⠿</span>
+                </td>
+                <td
+                  onClick={() => cellClick(r, "day")}
+                  onDoubleClick={() => startEditPreserve(r, "day")}
+                  style={{ ...styles.gridNumCell, textAlign: "center", color: t.displayDay !== t.day ? "var(--accent)" : "var(--muted)", ...selStyle(r, "day") }}
+                  title={t.displayDay !== t.day ? `Template day: ${t.day}` : undefined}
+                >
+                  {isEditingCell(r, "day") ? editInput("day") : t.displayDay}
+                </td>
+                <td onClick={() => cellClick(r, "name")} style={{ ...styles.gridCell, ...selStyle(r, "name") }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, overflow: "hidden" }}>
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.name}</span>
+                    {monthAmounts?.[`${account.id}_${t.id}`] != null
+                      ? <span style={{ fontSize: 9, color: "var(--green)", fontFamily: "var(--font-mono)", opacity: 0.7, flexShrink: 0 }}>custom</span>
+                      : (dynamicAmounts && dynamicAmounts[t.name] != null)
+                      ? <span style={{ fontSize: 9, color: "var(--accent)", fontFamily: "var(--font-mono)", opacity: 0.6, flexShrink: 0 }}>auto</span>
+                      : presetsMap[t.name] !== undefined && <span style={{ fontSize: 9, color: "var(--accent)", fontFamily: "var(--font-mono)", opacity: 0.6, flexShrink: 0 }}>preset</span>
+                    }
+                    {noteEditId === t.id ? (
+                      <input
+                        autoFocus
+                        value={noteEditVal}
+                        onClick={e => e.stopPropagation()}
+                        onChange={e => setNoteEditVal(e.target.value)}
+                        onBlur={() => { onEditNote(account.id, t.id, noteEditVal); setNoteEditId(null); }}
+                        onKeyDown={e => { e.stopPropagation(); if (e.key === "Enter" || e.key === "Escape") { onEditNote(account.id, t.id, noteEditVal); setNoteEditId(null); } }}
+                        style={{ ...styles.noteInput, width: 130, flexShrink: 0 }}
+                        placeholder="Add a note…"
+                      />
+                    ) : (
+                      <span
+                        className={t.note ? undefined : "cf-hover-show"}
+                        onClick={(e) => { e.stopPropagation(); setNoteEditId(t.id); setNoteEditVal(t.note ?? ""); }}
+                        style={{ ...(t.note ? styles.noteText : styles.noteAdd), flexShrink: t.note ? 1 : 0 }}
+                      >
+                        {t.note || "+ note"}
+                      </span>
+                    )}
+                  </div>
+                </td>
+                <td onClick={() => cellClick(r, "freq")} style={{ ...styles.gridCell, fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-mono)", ...selStyle(r, "freq") }}>
+                  {t.freq}
+                </td>
+                <td
+                  onClick={() => cellClick(r, "amount")}
+                  onDoubleClick={() => startEditPreserve(r, "amount")}
+                  style={{ ...styles.gridNumCell, color: t.effectiveAmt >= 0 ? "var(--green)" : "var(--red)", ...selStyle(r, "amount") }}
+                >
+                  {isEditingCell(r, "amount") ? editInput("amount") : fmtAccounting(t.effectiveAmt)}
+                </td>
+                <td onClick={() => cellClick(r, "running")} style={{ ...styles.gridNumCell, color: t.runningBalance >= 0 ? "var(--text)" : "var(--red)", ...selStyle(r, "running") }}>
+                  {fmtAccounting(t.runningBalance)}
+                </td>
+                <td
+                  onClick={() => cellClick(r, "pending")}
+                  style={{ ...styles.gridCell, textAlign: "center", fontFamily: "var(--font-mono)", fontWeight: 700, fontSize: 11, cursor: "pointer", color: t.isPending ? "var(--accent)" : "var(--muted)", ...selStyle(r, "pending") }}
+                >
+                  {t.isPending ? "Y" : "N"}
+                </td>
+                <td onClick={() => cellClick(r, "confirmed")} style={{ ...styles.gridNumCell, color: t.isPending ? "var(--accent)" : "var(--muted)", opacity: t.isPending ? 1 : 0.45, ...selStyle(r, "confirmed") }}>
+                  {fmtAccounting(t.confirmedBalance)}
+                </td>
+                <td style={{ ...styles.gridCell, padding: 0, textAlign: "center" }}>
+                  <button className="cf-hover-show" onClick={() => onDeleteRow(account.id, t.id)} style={styles.gridDeleteBtn} title="Remove">×</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
 
         <button onClick={() => onAddRow(account.id)} style={styles.addRowBtn}>+ Add Transaction</button>
       </div>
@@ -2052,6 +2226,7 @@ export default function CashFlow({ transactions = [], categories = [], assignmen
                     onTogglePending={(aId, tId) => togglePending(monthKey, aId, tId)}
                     onEditNote={(aId, tId, note) => editNote(monthKey, aId, tId, note)}
                     onEditAmount={(aId, tId, tName) => editAmount(monthKey, aId, tId, tName)}
+                    onCommitMonthAmount={(aId, tId, amt) => saveMonthAmount(monthKey, aId, tId, amt)}
                     onUpdateDay={(aId, tId, day) => updateDay(monthKey, aId, tId, day)}
                     onEditStart={() => editStartingBalance(acct.id)}
                     onLinkAccount={() => setModal({ type: "linkAccount", accountId: acct.id })}
@@ -2166,6 +2341,9 @@ export default function CashFlow({ transactions = [], categories = [], assignmen
 }
 
 // ── Styles ────────────────────────────────────────────────────────────────────
+// Shared spreadsheet cell base — every grid cell gets a 1px shared gridline border.
+const gridCellBase = { border: "1px solid var(--grid-line)", padding: "2px 6px", height: 25, fontSize: 12, color: "var(--text)", verticalAlign: "middle", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", cursor: "default" };
+
 const styles = {
   wrap: { padding: "36px clamp(16px, 5vw, 40px)", maxWidth: 1100 },
   topRow: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 22, flexWrap: "wrap", gap: 16 },
@@ -2185,11 +2363,10 @@ const styles = {
   monthHeader: { display: "flex", alignItems: "center", gap: 12, marginBottom: 16 },
   threePaycheckBadge: { fontSize: 10, fontWeight: 700, fontFamily: "var(--font-mono)", color: "var(--accent)", background: "rgba(240,180,41,0.12)", border: "1px solid rgba(240,180,41,0.3)", borderRadius: "var(--radius)", padding: "3px 8px", textTransform: "uppercase", letterSpacing: "0.08em" },
 
-  summaryBar: { display: "flex", overflowX: "auto", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", padding: "18px 28px", marginBottom: 24, gap: 0 },
-  summaryItem: { flex: 1, display: "flex", flexDirection: "column", gap: 4, minWidth: 140 },
-  summaryDivider: { width: 1, flexShrink: 0, background: "var(--border)", margin: "0 28px" },
-  summaryLabel: { fontSize: 10, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--muted)", fontFamily: "var(--font-mono)" },
-  summaryVal: { fontSize: 24, fontWeight: 700, fontFamily: "var(--font-mono)", letterSpacing: "-0.03em" },
+  summaryTable: { borderCollapse: "collapse", tableLayout: "fixed", width: 320, maxWidth: "100%", marginBottom: 24, background: "var(--surface)" },
+  summaryHeadCell: { background: "#1a1a1a", color: "#fff", fontWeight: 700, fontSize: 11, fontFamily: "var(--font-display)", padding: "3px 8px", border: "1px solid var(--grid-line)", textAlign: "left", height: 24 },
+  summaryLabelCell: { border: "1px solid var(--grid-line)", padding: "2px 8px", height: 25, fontSize: 12, color: "var(--text)" },
+  summaryValCell: { border: "1px solid var(--grid-line)", padding: "2px 8px", height: 25, fontSize: 12, textAlign: "right", fontVariantNumeric: "tabular-nums", fontFamily: "var(--font-mono)", fontWeight: 600 },
 
   accountsGrid: { display: "flex", flexDirection: "column", gap: 20, marginBottom: 24 },
   accountsGridAll: { display: "flex", overflowX: "auto", gap: 14, marginBottom: 24, alignItems: "start", paddingBottom: 8 },
@@ -2234,13 +2411,15 @@ const styles = {
   pendingBar: { display: "flex", alignItems: "center", gap: 8, padding: "7px 20px", background: "rgba(240,180,41,0.06)", borderBottom: "1px solid var(--border)" },
   pendingDot: { width: 6, height: 6, borderRadius: "50%", background: "var(--accent)", flexShrink: 0 },
 
-  tableWrap: { padding: "0 0 8px" },
-  txnHeader: { display: "flex", alignItems: "center", gap: 8, padding: "8px 20px", fontSize: 9, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--muted)", fontFamily: "var(--font-mono)", background: "var(--surface2)", borderBottom: "1px solid var(--border)" },
-  txnRow: { display: "flex", alignItems: "center", gap: 8, padding: "8px 20px", borderBottom: "1px solid var(--border)", transition: "background 0.1s" },
-  txnDay: { width: 30, fontSize: 12, fontFamily: "var(--font-mono)", color: "var(--muted)", textAlign: "center" },
+  tableWrap: { padding: "0 0 8px", outline: "none" },
+  grid: { width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: 12 },
+  gridHeadCell: { background: "#1a1a1a", color: "#fff", fontWeight: 700, fontSize: 11, fontFamily: "var(--font-display)", padding: "3px 6px", border: "1px solid var(--grid-line)", textAlign: "left", whiteSpace: "nowrap", height: 24 },
+  gridCell: gridCellBase,
+  gridNumCell: { ...gridCellBase, textAlign: "right", fontVariantNumeric: "tabular-nums", fontFamily: "var(--font-mono)" },
+  cellInput: { width: "100%", height: 21, border: "none", outline: "none", background: "var(--surface)", color: "var(--text)", fontSize: 12, fontFamily: "var(--font-mono)", padding: "0 2px", boxSizing: "border-box" },
 
-  pendingBtn: { border: "none", borderRadius: 4, fontSize: 10, fontWeight: 700, fontFamily: "var(--font-mono)", padding: "2px 7px", cursor: "pointer", transition: "background 0.15s" },
-  dragHandle: { width: 20, textAlign: "center", fontSize: 13, color: "var(--border2)", cursor: "grab", userSelect: "none", flexShrink: 0 },
+  dragHandle: { display: "inline-block", width: "100%", fontSize: 12, color: "var(--border2)", cursor: "grab", userSelect: "none", lineHeight: "23px" },
+  gridDeleteBtn: { background: "none", border: "none", color: "var(--muted)", fontSize: 13, cursor: "pointer", width: "100%", padding: 0, lineHeight: 1 },
   deleteBtn: { background: "none", border: "none", color: "var(--muted)", fontSize: 14, cursor: "pointer", width: 28, padding: 0, textAlign: "center", lineHeight: 1, opacity: 0.5 },
   addRowBtn: { display: "block", width: "calc(100% - 40px)", margin: "8px 20px 4px", padding: "7px 0", background: "none", border: "1px dashed var(--border2)", borderRadius: "var(--radius)", color: "var(--muted)", fontSize: 11, fontFamily: "var(--font-mono)", cursor: "pointer" },
 
