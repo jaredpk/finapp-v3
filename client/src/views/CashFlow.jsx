@@ -50,8 +50,8 @@ function parseAmountInput(raw, prevAmount) {
   return sign * Math.abs(n);
 }
 
-// Column order for Excel-style cell navigation in AccountTable (drag handle and
-// delete column are intentionally excluded from keyboard navigation).
+// Column order for Excel-style cell navigation in AccountTable (the drag-handle
+// column is intentionally excluded from keyboard navigation).
 const NAV_COLS = ["day", "name", "freq", "amount", "running", "pending", "confirmed"];
 const EDITABLE_COLS = new Set(["day", "amount"]);
 
@@ -432,10 +432,10 @@ function SummaryBar({ takeHome, expenses, freeCashflow, labels }) {
   );
 }
 
-// `compact` is accepted (used in the "All Accounts" tab, which shows every account
-// side by side) but currently has no visual effect — the original compact styling
-// couldn't be reliably reconstructed from minified code, so this renders full-size.
-function AccountTable({ account, startingBalance, allowEditStart, isLinked, presetsMap, monthStates, monthAmounts, dynamicAmounts, isThreePaycheckMonth, onTogglePending, onEditNote, onEditAmount, onCommitMonthAmount, onUpdateDay, onEditStart, onLinkAccount, onAddRow, onDeleteRow, txnOrder, onReorder, compact }) {
+// `compact` (used in the "All Accounts" tab, which shows every account side by
+// side) renders a read-only overview: only Day / Transaction / Amount / Running Bal
+// columns, no drag-and-drop, no cell selection/editing, and no add-row button.
+function AccountTable({ account, startingBalance, allowEditStart, isLinked, presetsMap, monthStates, monthAmounts, dynamicAmounts, isThreePaycheckMonth, onTogglePending, onEditNote, onEditAmount, onCommitMonthAmount, onUpdateDay, onEditStart, onLinkAccount, onAddRow, txnOrder, onReorder, compact }) {
   const [dragOverId, setDragOverId] = useState(null);
   const [noteEditId, setNoteEditId] = useState(null);
   const [noteEditVal, setNoteEditVal] = useState("");
@@ -649,7 +649,7 @@ function AccountTable({ account, startingBalance, allowEditStart, isLinked, pres
   );
 
   return (
-    <div style={styles.accountBlock}>
+    <div style={compact ? { ...styles.accountBlock, flex: "1 1 0", minWidth: 340, flexShrink: 1 } : styles.accountBlock}>
       <div style={styles.accountHeader}>
         <div>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
@@ -708,60 +708,69 @@ function AccountTable({ account, startingBalance, allowEditStart, isLinked, pres
         </div>
       )}
 
-      <div ref={containerRef} tabIndex={0} onKeyDown={handleGridKeyDown} style={styles.tableWrap}>
+      <div ref={containerRef} tabIndex={compact ? undefined : 0} onKeyDown={compact ? undefined : handleGridKeyDown} style={styles.tableWrap}>
         <table className="cf-grid" style={styles.grid}>
-          <colgroup>
-            <col style={{ width: 18 }} />
-            <col style={{ width: 34 }} />
-            <col />
-            <col style={{ width: 72 }} />
-            <col style={{ width: 88 }} />
-            <col style={{ width: 92 }} />
-            <col style={{ width: 40 }} />
-            <col style={{ width: 92 }} />
-            <col style={{ width: 24 }} />
-          </colgroup>
+          {compact ? (
+            <colgroup>
+              <col style={{ width: 34 }} />
+              <col />
+              <col style={{ width: 88 }} />
+              <col style={{ width: 92 }} />
+            </colgroup>
+          ) : (
+            <colgroup>
+              <col style={{ width: 18 }} />
+              <col style={{ width: 34 }} />
+              <col />
+              <col style={{ width: 72 }} />
+              <col style={{ width: 88 }} />
+              <col style={{ width: 92 }} />
+              <col style={{ width: 40 }} />
+              <col style={{ width: 92 }} />
+            </colgroup>
+          )}
           <thead>
             <tr>
-              <th style={styles.gridHeadCell} />
+              {!compact && <th style={styles.gridHeadCell} />}
               <th style={{ ...styles.gridHeadCell, textAlign: "center" }}>Day</th>
               <th style={styles.gridHeadCell}>Transaction</th>
-              <th style={styles.gridHeadCell}>Freq</th>
+              {!compact && <th style={styles.gridHeadCell}>Freq</th>}
               <th style={{ ...styles.gridHeadCell, textAlign: "right" }}>Amount</th>
               <th style={{ ...styles.gridHeadCell, textAlign: "right" }}>Running Bal</th>
-              <th style={{ ...styles.gridHeadCell, textAlign: "center" }}>Done</th>
-              <th style={{ ...styles.gridHeadCell, textAlign: "right" }}>Conf. Bal</th>
-              <th style={styles.gridHeadCell} />
+              {!compact && <th style={{ ...styles.gridHeadCell, textAlign: "center" }}>Done</th>}
+              {!compact && <th style={{ ...styles.gridHeadCell, textAlign: "right" }}>Conf. Bal</th>}
             </tr>
           </thead>
           <tbody>
             {rows.map((t, r) => (
               <tr
                 key={t.id}
-                onDragEnter={() => handleDragEnter(t.id)}
-                onDragEnd={handleDragEnd}
-                onDragOver={(e) => e.preventDefault()}
-                onDrop={(e) => handleDrop(e, t.id)}
+                onDragEnter={compact ? undefined : () => handleDragEnter(t.id)}
+                onDragEnd={compact ? undefined : handleDragEnd}
+                onDragOver={compact ? undefined : (e) => e.preventDefault()}
+                onDrop={compact ? undefined : (e) => handleDrop(e, t.id)}
                 style={{ background: dragOverId === t.id ? "rgba(240,180,41,0.1)" : t.isPending ? "rgba(240,180,41,0.04)" : "var(--surface)" }}
               >
-                <td style={{ ...styles.gridCell, padding: 0, textAlign: "center" }}>
-                  <span
-                    className="cf-hover-show"
-                    draggable
-                    onDragStart={(e) => handleDragStart(e, t.id)}
-                    style={styles.dragHandle}
-                    title="Drag to reorder"
-                  >⠿</span>
-                </td>
+                {!compact && (
+                  <td style={{ ...styles.gridCell, padding: 0, textAlign: "center" }}>
+                    <span
+                      className="cf-hover-show"
+                      draggable
+                      onDragStart={(e) => handleDragStart(e, t.id)}
+                      style={styles.dragHandle}
+                      title="Drag to reorder"
+                    >⠿</span>
+                  </td>
+                )}
                 <td
-                  onClick={() => cellClick(r, "day")}
-                  onDoubleClick={() => startEditPreserve(r, "day")}
+                  onClick={compact ? undefined : () => cellClick(r, "day")}
+                  onDoubleClick={compact ? undefined : () => startEditPreserve(r, "day")}
                   style={{ ...styles.gridNumCell, textAlign: "center", color: t.displayDay !== t.day ? "var(--accent)" : "var(--muted)", ...selStyle(r, "day") }}
                   title={t.displayDay !== t.day ? `Template day: ${t.day}` : undefined}
                 >
                   {isEditingCell(r, "day") ? editInput("day") : t.displayDay}
                 </td>
-                <td onClick={() => cellClick(r, "name")} style={{ ...styles.gridCell, ...selStyle(r, "name") }}>
+                <td onClick={compact ? undefined : () => cellClick(r, "name")} style={{ ...styles.gridCell, ...selStyle(r, "name") }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 6, overflow: "hidden" }}>
                     <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.name}</span>
                     {monthAmounts?.[`${account.id}_${t.id}`] != null
@@ -770,7 +779,9 @@ function AccountTable({ account, startingBalance, allowEditStart, isLinked, pres
                       ? <span style={{ fontSize: 9, color: "var(--accent)", fontFamily: "var(--font-mono)", opacity: 0.6, flexShrink: 0 }}>auto</span>
                       : presetsMap[t.name] !== undefined && <span style={{ fontSize: 9, color: "var(--accent)", fontFamily: "var(--font-mono)", opacity: 0.6, flexShrink: 0 }}>preset</span>
                     }
-                    {noteEditId === t.id ? (
+                    {compact ? (
+                      t.note && <span style={{ ...styles.noteText, flexShrink: 1 }}>{t.note}</span>
+                    ) : noteEditId === t.id ? (
                       <input
                         autoFocus
                         value={noteEditVal}
@@ -792,37 +803,40 @@ function AccountTable({ account, startingBalance, allowEditStart, isLinked, pres
                     )}
                   </div>
                 </td>
-                <td onClick={() => cellClick(r, "freq")} style={{ ...styles.gridCell, fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-mono)", ...selStyle(r, "freq") }}>
-                  {t.freq}
-                </td>
+                {!compact && (
+                  <td onClick={() => cellClick(r, "freq")} style={{ ...styles.gridCell, fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-mono)", ...selStyle(r, "freq") }}>
+                    {t.freq}
+                  </td>
+                )}
                 <td
-                  onClick={() => cellClick(r, "amount")}
-                  onDoubleClick={() => startEditPreserve(r, "amount")}
+                  onClick={compact ? undefined : () => cellClick(r, "amount")}
+                  onDoubleClick={compact ? undefined : () => startEditPreserve(r, "amount")}
                   style={{ ...styles.gridNumCell, color: t.effectiveAmt >= 0 ? "var(--green)" : "var(--red)", ...selStyle(r, "amount") }}
                 >
                   {isEditingCell(r, "amount") ? editInput("amount") : fmtAccounting(t.effectiveAmt)}
                 </td>
-                <td onClick={() => cellClick(r, "running")} style={{ ...styles.gridNumCell, color: t.runningBalance >= 0 ? "var(--text)" : "var(--red)", ...selStyle(r, "running") }}>
+                <td onClick={compact ? undefined : () => cellClick(r, "running")} style={{ ...styles.gridNumCell, color: t.runningBalance >= 0 ? "var(--text)" : "var(--red)", ...selStyle(r, "running") }}>
                   {fmtAccounting(t.runningBalance)}
                 </td>
-                <td
-                  onClick={() => cellClick(r, "pending")}
-                  style={{ ...styles.gridCell, textAlign: "center", fontFamily: "var(--font-mono)", fontWeight: 700, fontSize: 11, cursor: "pointer", color: t.isPending ? "var(--accent)" : "var(--muted)", ...selStyle(r, "pending") }}
-                >
-                  {t.isPending ? "Y" : "N"}
-                </td>
-                <td onClick={() => cellClick(r, "confirmed")} style={{ ...styles.gridNumCell, color: t.isPending ? "var(--accent)" : "var(--muted)", opacity: t.isPending ? 1 : 0.45, ...selStyle(r, "confirmed") }}>
-                  {fmtAccounting(t.confirmedBalance)}
-                </td>
-                <td style={{ ...styles.gridCell, padding: 0, textAlign: "center" }}>
-                  <button className="cf-hover-show" onClick={() => onDeleteRow(account.id, t.id)} style={styles.gridDeleteBtn} title="Remove">×</button>
-                </td>
+                {!compact && (
+                  <td
+                    onClick={() => cellClick(r, "pending")}
+                    style={{ ...styles.gridCell, textAlign: "center", fontFamily: "var(--font-mono)", fontWeight: 700, fontSize: 11, cursor: "pointer", color: t.isPending ? "var(--accent)" : "var(--muted)", ...selStyle(r, "pending") }}
+                  >
+                    {t.isPending ? "Y" : "N"}
+                  </td>
+                )}
+                {!compact && (
+                  <td onClick={() => cellClick(r, "confirmed")} style={{ ...styles.gridNumCell, color: t.isPending ? "var(--accent)" : "var(--muted)", opacity: t.isPending ? 1 : 0.45, ...selStyle(r, "confirmed") }}>
+                    {fmtAccounting(t.confirmedBalance)}
+                  </td>
+                )}
               </tr>
             ))}
           </tbody>
         </table>
 
-        <button onClick={() => onAddRow(account.id)} style={styles.addRowBtn}>+ Add Transaction</button>
+        {!compact && <button onClick={() => onAddRow(account.id)} style={styles.addRowBtn}>+ Add Transaction</button>}
       </div>
     </div>
   );
@@ -2098,12 +2112,6 @@ export default function CashFlow({ transactions = [], categories = [], assignmen
     setModal(null);
   };
 
-  const deleteRow = (accountId, txnId) => {
-    setAccounts(prev => prev.map(a =>
-      a.id !== accountId ? a : { ...a, transactions: a.transactions.filter(t => t.id !== txnId) }
-    ));
-  };
-
   // Label for the 3-month window in the navigator
   const windowLabel = (() => {
     const first = months[0];
@@ -2231,7 +2239,6 @@ export default function CashFlow({ transactions = [], categories = [], assignmen
                     onEditStart={() => editStartingBalance(acct.id)}
                     onLinkAccount={() => setModal({ type: "linkAccount", accountId: acct.id })}
                     onAddRow={addRow}
-                    onDeleteRow={deleteRow}
                     txnOrder={txnOrders[acct.id]}
                     onReorder={reorderAccount}
                   />
@@ -2419,7 +2426,6 @@ const styles = {
   cellInput: { width: "100%", height: 21, border: "none", outline: "none", background: "var(--surface)", color: "var(--text)", fontSize: 12, fontFamily: "var(--font-mono)", padding: "0 2px", boxSizing: "border-box" },
 
   dragHandle: { display: "inline-block", width: "100%", fontSize: 12, color: "var(--border2)", cursor: "grab", userSelect: "none", lineHeight: "23px" },
-  gridDeleteBtn: { background: "none", border: "none", color: "var(--muted)", fontSize: 13, cursor: "pointer", width: "100%", padding: 0, lineHeight: 1 },
   deleteBtn: { background: "none", border: "none", color: "var(--muted)", fontSize: 14, cursor: "pointer", width: 28, padding: 0, textAlign: "center", lineHeight: 1, opacity: 0.5 },
   addRowBtn: { display: "block", width: "calc(100% - 40px)", margin: "8px 20px 4px", padding: "7px 0", background: "none", border: "1px dashed var(--border2)", borderRadius: "var(--radius)", color: "var(--muted)", fontSize: 11, fontFamily: "var(--font-mono)", cursor: "pointer" },
 
