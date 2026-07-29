@@ -1210,23 +1210,33 @@ export async function getBalanceRowCounts() {
   return rows;
 }
 
-// Delete all balance snapshot rows for one imported account. The accountId is the
-// synthetic key built by GET /api/accounts: balance_<institution>_<account>_<type>
-// (optionally suffixed _N for duplicates). Returns the number of deleted rows.
-export async function deleteImportedAccountBalances(accountId) {
-  const { rows } = await pool.query(
-    `SELECT DISTINCT account, institution, type FROM account_balances`
-  );
-  const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = rows.find((r) => {
+// Builds the synthetic account_id for each balance row, in row order:
+// balance_<institution>_<account>_<type>, suffixed _N for duplicate keys.
+// GET /api/accounts and deleteImportedAccountBalances both use this over the
+// getLatestBalances() rows so their ids stay identical-by-construction.
+export function buildImportedAccountIds(balRows) {
+  const balKeySeen = {};
+  return balRows.map((r) => {
     const baseKey = `balance_${r.institution || ""}_${r.account}_${r.type || ""}`;
-    return accountId === baseKey || new RegExp(`^${escapeRe(baseKey)}_\\d+$`).test(accountId);
+    const count = (balKeySeen[baseKey] = (balKeySeen[baseKey] || 0) + 1);
+    return count === 1 ? baseKey : `${baseKey}_${count}`;
   });
-  if (!match) return 0;
+}
+
+// Delete all balance snapshot rows for one imported account. The accountId is the
+// synthetic key built by GET /api/accounts (see buildImportedAccountIds). Resolution
+// replays the exact id-construction loop over the same rows, in the same order, as
+// the GET handler and requires a strict id match — no prefix or pattern matching.
+// Returns the number of deleted rows (0 if no id matched).
+export async function deleteImportedAccountBalances(accountId) {
+  const rows = await getLatestBalances();
+  const idx = buildImportedAccountIds(rows).indexOf(accountId);
+  if (idx === -1) return 0;
+  const match = rows[idx];
   const { rowCount } = await pool.query(
     `DELETE FROM account_balances
-     WHERE account = $1 AND COALESCE(institution, '') = $2 AND COALESCE(type, '') = $3`,
-    [match.account, match.institution || "", match.type || ""]
+     WHERE account = $1 AND institution IS NOT DISTINCT FROM $2 AND type IS NOT DISTINCT FROM $3`,
+    [match.account, match.institution, match.type]
   );
   return rowCount;
 }

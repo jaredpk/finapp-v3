@@ -32,7 +32,7 @@ import {
   parseCsvText, upsertCsvTransaction,
   parseXlsxBase64, upsertPlaidTransactions,
   upsertImportedTransaction, deleteImportedTransactions, getImportedTransactionAccounts,
-  upsertAccountBalances, getLatestBalances, getBalanceRowCounts, deleteImportedAccountBalances,
+  upsertAccountBalances, getLatestBalances, getBalanceRowCounts, deleteImportedAccountBalances, buildImportedAccountIds,
   upsertInvestmentHoldings, getLatestHoldings,
   getProperties, upsertProperty, deleteProperty, updatePropertyValue, setPropertyBaseline,
   getVehicles, upsertVehicle, deleteVehicle, setVehicleBaseline, applyVehicleDepreciation,
@@ -518,15 +518,13 @@ app.get("/api/accounts", requireAuth, async (req, res) => {
   // Imported balance snapshot accounts
   const balCounts = {};
   for (const c of balCountRows) balCounts[`${c.institution || ""}|${c.account}|${c.type || ""}`] = c.count;
-  const balKeySeen = {};
-  const importedAccounts = balRows.map((r) => {
+  const importedAccountIds = buildImportedAccountIds(balRows);
+  const importedAccounts = balRows.map((r, i) => {
     const type = normalizePlaidType(r.type);
     const isLiability = type === "credit" || type === "loan";
     const current = isLiability ? Math.abs(parseFloat(r.balance)) : parseFloat(r.balance);
     const available = r.available != null ? Math.abs(parseFloat(r.available)) : null;
-    const baseKey = `balance_${r.institution || ""}_${r.account}_${r.type || ""}`;
-    const count = (balKeySeen[baseKey] = (balKeySeen[baseKey] || 0) + 1);
-    const account_id = count === 1 ? baseKey : `${baseKey}_${count}`;
+    const account_id = importedAccountIds[i];
     return { account_id, name: r.account, official_name: r.account, type, subtype: r.type || type, balances: { current, available }, institutionName: r.institution, mask: null, source: "imported", snapshot_count: balCounts[`${r.institution || ""}|${r.account}|${r.type || ""}`] ?? null };
   });
 
@@ -755,7 +753,8 @@ app.delete("/api/hidden-accounts/:accountId", requireAuth, async (req, res) => {
 
 // ── Imported accounts (balance snapshots) ─────────────────────────────────────
 app.delete("/api/imported-accounts/:account", requireAuth, async (req, res) => {
-  const accountId = decodeURIComponent(req.params.account);
+  const accountId = req.params.account; // already percent-decoded by Express
+
   if (!accountId?.trim()) return res.status(400).json({ error: "account required" });
   const deleted = await deleteImportedAccountBalances(accountId);
   if (deleted === 0) return res.status(404).json({ error: "Imported account not found" });
