@@ -32,7 +32,7 @@ import {
   parseCsvText, upsertCsvTransaction,
   parseXlsxBase64, upsertPlaidTransactions,
   upsertImportedTransaction, deleteImportedTransactions, getImportedTransactionAccounts,
-  upsertAccountBalances, getLatestBalances,
+  upsertAccountBalances, getLatestBalances, getBalanceRowCounts, deleteImportedAccountBalances,
   upsertInvestmentHoldings, getLatestHoldings,
   getProperties, upsertProperty, deleteProperty, updatePropertyValue, setPropertyBaseline,
   getVehicles, upsertVehicle, deleteVehicle, setVehicleBaseline, applyVehicleDepreciation,
@@ -487,9 +487,9 @@ function normalizePlaidType(rawType) {
 }
 
 app.get("/api/accounts", requireAuth, async (req, res) => {
-  const [items, nicknames, balRows, holdingRows, propRows, manualRows, vehicleRows] = await Promise.all([
+  const [items, nicknames, balRows, holdingRows, propRows, manualRows, vehicleRows, balCountRows] = await Promise.all([
     getUserItems(), getAccountNicknames(), getLatestBalances(), getLatestHoldings(),
-    getProperties(), getManualAccounts(), getVehicles(),
+    getProperties(), getManualAccounts(), getVehicles(), getBalanceRowCounts(),
   ]);
   const applyNicknames = (accts) =>
     accts.map((a) => nicknames[a.account_id] ? { ...a, name: nicknames[a.account_id], official_name: a.official_name || a.name } : a);
@@ -516,6 +516,8 @@ app.get("/api/accounts", requireAuth, async (req, res) => {
   }
 
   // Imported balance snapshot accounts
+  const balCounts = {};
+  for (const c of balCountRows) balCounts[`${c.institution || ""}|${c.account}|${c.type || ""}`] = c.count;
   const balKeySeen = {};
   const importedAccounts = balRows.map((r) => {
     const type = normalizePlaidType(r.type);
@@ -525,7 +527,7 @@ app.get("/api/accounts", requireAuth, async (req, res) => {
     const baseKey = `balance_${r.institution || ""}_${r.account}_${r.type || ""}`;
     const count = (balKeySeen[baseKey] = (balKeySeen[baseKey] || 0) + 1);
     const account_id = count === 1 ? baseKey : `${baseKey}_${count}`;
-    return { account_id, name: r.account, official_name: r.account, type, subtype: r.type || type, balances: { current, available }, institutionName: r.institution, mask: null, source: "imported" };
+    return { account_id, name: r.account, official_name: r.account, type, subtype: r.type || type, balances: { current, available }, institutionName: r.institution, mask: null, source: "imported", snapshot_count: balCounts[`${r.institution || ""}|${r.account}|${r.type || ""}`] ?? null };
   });
 
   // Deduplicate imported accounts against live Plaid accounts (same institution + last-4 mask)
@@ -749,6 +751,17 @@ app.post("/api/hidden-accounts", requireAuth, async (req, res) => {
 app.delete("/api/hidden-accounts/:accountId", requireAuth, async (req, res) => {
   await removeHiddenAccount(decodeURIComponent(req.params.accountId));
   res.json({ ok: true });
+});
+
+// ── Imported accounts (balance snapshots) ─────────────────────────────────────
+app.delete("/api/imported-accounts/:account", requireAuth, async (req, res) => {
+  const accountId = decodeURIComponent(req.params.account);
+  if (!accountId?.trim()) return res.status(400).json({ error: "account required" });
+  const deleted = await deleteImportedAccountBalances(accountId);
+  if (deleted === 0) return res.status(404).json({ error: "Imported account not found" });
+  await removeHiddenAccount(accountId);
+  await deleteAccountNickname(accountId);
+  res.json({ ok: true, deleted });
 });
 
 // ── CSV Import ────────────────────────────────────────────────────────────────

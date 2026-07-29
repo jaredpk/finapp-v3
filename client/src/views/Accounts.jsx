@@ -1,5 +1,8 @@
 import React, { useState } from "react";
-import { addHiddenAccountApi, removeHiddenAccountApi } from "../api.js";
+import {
+  addHiddenAccountApi, removeHiddenAccountApi,
+  deleteManualAccountApi, removeLinkedInstitution, deleteImportedAccountApi,
+} from "../api.js";
 
 const TYPE_COLORS = {
   depository: "var(--green)",
@@ -12,9 +15,22 @@ const TYPE_COLORS = {
 const fmt = (n) =>
   n == null ? "—" : "$" + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2 });
 
-export default function Accounts({ accounts, itemErrors, hiddenAccounts, setHiddenAccounts, openUpdate, updating }) {
+// How a delete is handled for each account source
+function deleteKind(a) {
+  if (a.source === "manual") return "manual";
+  if (a.source === "plaid") return "plaid";
+  if (a.source === "imported" && a.account_id?.startsWith("balance_")) return "imported";
+  if (a.source === "property") return "property";
+  if (a.source === "vehicle") return "vehicle";
+  return "holdings"; // investment-holdings-derived (source "imported", holdings_* id)
+}
+
+export default function Accounts({ accounts, itemErrors, hiddenAccounts, setHiddenAccounts, openUpdate, updating, reloadData }) {
   const [showHidden, setShowHidden] = useState(false);
   const [toggling, setToggling] = useState({});
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState(null);
 
   const visibleAccounts = accounts.filter(a => !hiddenAccounts?.has(a.account_id));
   const hiddenAccountsList = accounts.filter(a => hiddenAccounts?.has(a.account_id));
@@ -35,6 +51,42 @@ export default function Accounts({ accounts, itemErrors, hiddenAccounts, setHidd
       console.error("Toggle hide failed:", err);
     } finally {
       setToggling(p => ({ ...p, [id]: false }));
+    }
+  }
+
+  async function confirmDelete() {
+    const a = deleteTarget;
+    if (!a) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      let removedIds = [a.account_id];
+      let res;
+      const kind = deleteKind(a);
+      if (kind === "manual") {
+        res = await deleteManualAccountApi(a.account_id.replace(/^manual_/, ""));
+      } else if (kind === "plaid") {
+        removedIds = accounts.filter((x) => x.source === "plaid" && x.itemId === a.itemId).map((x) => x.account_id);
+        res = await removeLinkedInstitution(a.itemId);
+      } else {
+        res = await deleteImportedAccountApi(a.account_id);
+      }
+      if (res?.error) throw new Error(res.error);
+      // Clean up hidden-account entries for accounts that no longer exist
+      for (const id of removedIds) {
+        if (hiddenAccounts?.has(id)) await removeHiddenAccountApi(id).catch(() => {});
+      }
+      setHiddenAccounts?.((prev) => {
+        const next = new Set(prev);
+        removedIds.forEach((id) => next.delete(id));
+        return next;
+      });
+      setDeleteTarget(null);
+      reloadData?.();
+    } catch (err) {
+      setDeleteError(err.message || "Delete failed");
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -116,6 +168,13 @@ export default function Accounts({ accounts, itemErrors, hiddenAccounts, setHidd
                       >
                         {isHidden ? "👁" : "🚫"}
                       </button>
+                      <button
+                        onClick={() => { setDeleteError(null); setDeleteTarget(a); }}
+                        title="Delete account"
+                        style={styles.deleteBtn}
+                      >
+                        🗑
+                      </button>
                     </div>
                   </div>
 
@@ -153,6 +212,87 @@ export default function Accounts({ accounts, itemErrors, hiddenAccounts, setHidd
           </div>
         </div>
       ))}
+
+      {deleteTarget && (
+        <DeleteAccountModal
+          account={deleteTarget}
+          kind={deleteKind(deleteTarget)}
+          siblings={
+            deleteTarget.source === "plaid"
+              ? accounts.filter((x) => x.source === "plaid" && x.itemId === deleteTarget.itemId).map((x) => x.name)
+              : []
+          }
+          isHidden={hiddenAccounts?.has(deleteTarget.account_id)}
+          deleting={deleting}
+          error={deleteError}
+          onConfirm={confirmDelete}
+          onHideInstead={() => { toggleHide(deleteTarget); setDeleteTarget(null); }}
+          onClose={() => { if (!deleting) { setDeleteTarget(null); setDeleteError(null); } }}
+        />
+      )}
+    </div>
+  );
+}
+
+function DeleteAccountModal({ account, kind, siblings, isHidden, deleting, error, onConfirm, onHideInstead, onClose }) {
+  const destructive = kind === "manual" || kind === "plaid" || kind === "imported";
+
+  let title = "Delete Account";
+  let body;
+  if (kind === "manual") {
+    body = <>Delete manual account <b>{account.name}</b>? This removes it permanently.</>;
+  } else if (kind === "plaid") {
+    title = "Unlink Institution";
+    body = (
+      <>
+        This is a linked <b>{account.institutionName || "institution"}</b> account. Deleting it will unlink
+        the entire institution and remove <b>ALL</b> of its accounts{siblings.length > 1 ? ":" : "."}
+        {siblings.length > 1 && (
+          <ul style={styles.modalList}>
+            {siblings.map((n, i) => <li key={i}>{n}</li>)}
+          </ul>
+        )}
+        {" "}Transactions already synced are kept.
+      </>
+    );
+  } else if (kind === "imported") {
+    body = (
+      <>
+        Delete imported account <b>{account.name}</b>? This permanently deletes its{" "}
+        {account.snapshot_count != null ? account.snapshot_count : "stored"} balance snapshot rows.
+      </>
+    );
+  } else {
+    title = "Managed Account";
+    const managedBy =
+      kind === "property" ? "your Properties data — remove the property there to remove this account" :
+      kind === "vehicle" ? "your Vehicles data — remove the vehicle there to remove this account" :
+      "your imported investment holdings data";
+    body = (
+      <>
+        <b>{account.name}</b> is managed by {managedBy}. It can't be deleted from this screen, but you can
+        hide it so it doesn't appear in your totals.
+      </>
+    );
+  }
+
+  return (
+    <div style={styles.modalOverlay} onClick={onClose}>
+      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+        <p style={styles.modalTitle}>{title}</p>
+        <p style={styles.modalBody}>{body}</p>
+        {error && <p style={styles.modalError}>{error}</p>}
+        <div style={styles.modalActions}>
+          <button onClick={onClose} disabled={deleting} style={styles.cancelBtn}>Cancel</button>
+          {destructive ? (
+            <button onClick={onConfirm} disabled={deleting} style={{ ...styles.dangerBtn, opacity: deleting ? 0.6 : 1 }}>
+              {deleting ? "Deleting…" : kind === "plaid" ? "Unlink institution" : "Delete"}
+            </button>
+          ) : (
+            !isHidden && <button onClick={onHideInstead} style={styles.hideInsteadBtn}>Hide instead</button>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -198,6 +338,10 @@ const styles = {
     background: "none", border: "none", cursor: "pointer", fontSize: 14, padding: "0 2px",
     opacity: 0.5, lineHeight: 1, flexShrink: 0,
   },
+  deleteBtn: {
+    background: "none", border: "none", cursor: "pointer", fontSize: 14, padding: "0 2px",
+    opacity: 0.35, lineHeight: 1, flexShrink: 0,
+  },
   hiddenBadge: {
     display: "inline-block", fontSize: 9, fontWeight: 700, letterSpacing: "0.1em",
     textTransform: "uppercase", color: "var(--muted)", fontFamily: "var(--font-mono)",
@@ -208,4 +352,15 @@ const styles = {
   balLabel: { fontSize: 10, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontFamily: "var(--font-mono)", marginBottom: 4 },
   balAmt: { fontSize: 22, fontWeight: 700, fontFamily: "var(--font-mono)", letterSpacing: "-0.02em", color: "var(--text)" },
   mask: { marginTop: 14, fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)" },
+
+  modalOverlay: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 },
+  modal: { background: "var(--surface2)", border: "1px solid var(--border2)", borderRadius: "var(--radius2)", padding: 28, width: 380, display: "flex", flexDirection: "column", gap: 14 },
+  modalTitle: { fontSize: 16, fontWeight: 700, color: "var(--text)", marginBottom: 4 },
+  modalBody: { fontSize: 13, color: "var(--text)", lineHeight: 1.5 },
+  modalList: { margin: "8px 0", paddingLeft: 20, fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-mono)" },
+  modalError: { fontSize: 12, color: "var(--red)", fontFamily: "var(--font-mono)" },
+  modalActions: { display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 6 },
+  cancelBtn: { padding: "8px 18px", background: "none", border: "1px solid var(--border)", borderRadius: "var(--radius)", color: "var(--muted)", fontSize: 13, fontFamily: "var(--font-display)", cursor: "pointer" },
+  dangerBtn: { padding: "8px 18px", background: "var(--red)", border: "none", borderRadius: "var(--radius)", color: "#fff", fontSize: 13, fontWeight: 700, fontFamily: "var(--font-display)", cursor: "pointer" },
+  hideInsteadBtn: { padding: "8px 18px", background: "var(--accent)", border: "none", borderRadius: "var(--radius)", color: "#fff", fontSize: 13, fontWeight: 700, fontFamily: "var(--font-display)", cursor: "pointer" },
 };

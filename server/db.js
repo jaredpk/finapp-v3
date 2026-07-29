@@ -1200,6 +1200,37 @@ export async function getLatestBalances() {
   return rows;
 }
 
+// Total snapshot rows per imported account, keyed by (account, institution, type)
+export async function getBalanceRowCounts() {
+  const { rows } = await pool.query(`
+    SELECT account, institution, type, COUNT(*)::int AS count
+    FROM account_balances
+    GROUP BY account, institution, type
+  `);
+  return rows;
+}
+
+// Delete all balance snapshot rows for one imported account. The accountId is the
+// synthetic key built by GET /api/accounts: balance_<institution>_<account>_<type>
+// (optionally suffixed _N for duplicates). Returns the number of deleted rows.
+export async function deleteImportedAccountBalances(accountId) {
+  const { rows } = await pool.query(
+    `SELECT DISTINCT account, institution, type FROM account_balances`
+  );
+  const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = rows.find((r) => {
+    const baseKey = `balance_${r.institution || ""}_${r.account}_${r.type || ""}`;
+    return accountId === baseKey || new RegExp(`^${escapeRe(baseKey)}_\\d+$`).test(accountId);
+  });
+  if (!match) return 0;
+  const { rowCount } = await pool.query(
+    `DELETE FROM account_balances
+     WHERE account = $1 AND COALESCE(institution, '') = $2 AND COALESCE(type, '') = $3`,
+    [match.account, match.institution || "", match.type || ""]
+  );
+  return rowCount;
+}
+
 export async function upsertInvestmentHoldings(snapshotDate, holdings) {
   if (!holdings.length) return;
   const client = await pool.connect();

@@ -12,14 +12,20 @@ const fmtSigned = (n) =>
 
 const COLORS = ["var(--accent)", "var(--accent2)", "var(--blue)", "var(--green)"];
 
-export default function Dashboard({ accounts, transactions, categories, assignments }) {
+export default function Dashboard({ accounts, transactions, categories, assignments, hiddenAccounts }) {
+  const visibleAccounts = useMemo(
+    () => accounts.filter((a) => !hiddenAccounts?.has(a.account_id)),
+    [accounts, hiddenAccounts]
+  );
+  const hiddenCount = accounts.length - visibleAccounts.length;
+
   const netWorth = useMemo(() => {
-    if (!accounts.length) return null;
-    return accounts.reduce((sum, a) => {
+    if (!visibleAccounts.length) return null;
+    return visibleAccounts.reduce((sum, a) => {
       const bal = a.balances?.current ?? 0;
       return a.type === "credit" || a.type === "loan" ? sum - bal : sum + bal;
     }, 0);
-  }, [accounts]);
+  }, [visibleAccounts]);
 
   // Build category id → name lookup
   const categoryMap = useMemo(() => {
@@ -101,7 +107,13 @@ export default function Dashboard({ accounts, transactions, categories, assignme
 
       {/* Stats */}
       <div style={styles.stats}>
-        <StatCard label="Net Worth" value={netWorth != null ? fmtSigned(netWorth) : "—"} sub="across all accounts" accent="var(--accent)" delay={0} />
+        <StatCard
+          label="Net Worth"
+          value={netWorth != null ? fmtSigned(netWorth) : "—"}
+          sub={hiddenCount > 0 ? `across ${visibleAccounts.length} accounts (${hiddenCount} hidden excluded)` : "across all accounts"}
+          accent="var(--accent)"
+          delay={0}
+        />
         <StatCard label="This Month" value={monthSpend ? fmt(-monthSpend) : "—"} sub="total spending" accent="var(--red)" delay={0.06} />
         <StatCard label="Accounts" value={accounts.length || "—"} sub="connected" delay={0.12} />
         <StatCard label="Transactions" value={transactions.length || "—"} sub="last 90 days" delay={0.18} />
@@ -120,7 +132,10 @@ export default function Dashboard({ accounts, transactions, categories, assignme
               return (
                 <div key={a.account_id} style={styles.accountRow}>
                   <div style={styles.accountLeft}>
-                    <span style={styles.accountName}>{a.name || a.official_name}</span>
+                    <span style={styles.accountName}>
+                      {a.name || a.official_name}
+                      {hiddenAccounts?.has(a.account_id) && <span style={styles.hiddenTag}>Hidden</span>}
+                    </span>
                     <span style={styles.accountSub}>
                       {a.institutionName && `${a.institutionName} · `}{a.subtype || a.type}
                     </span>
@@ -207,6 +222,11 @@ const styles = {
   },
   accountLeft: { display: "flex", flexDirection: "column", gap: 3 },
   accountName: { fontSize: 13, fontWeight: 600, color: "var(--text)" },
+  hiddenTag: {
+    display: "inline-block", marginLeft: 8, padding: "1px 6px", borderRadius: 99,
+    border: "1px solid var(--border)", fontSize: 9, fontWeight: 700, letterSpacing: "0.08em",
+    textTransform: "uppercase", color: "var(--muted)", fontFamily: "var(--font-mono)",
+  },
   accountSub: { fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", textTransform: "capitalize" },
   accountRight: { display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 },
   accountBal: { fontSize: 14, fontWeight: 700, fontFamily: "var(--font-mono)" },

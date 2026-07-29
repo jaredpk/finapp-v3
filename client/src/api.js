@@ -224,6 +224,14 @@ export async function fetchImportedAccounts() {
   return r.json();
 }
 
+export async function deleteImportedAccountApi(account_id) {
+  const r = await fetch(`${BASE}/imported-accounts/${encodeURIComponent(account_id)}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+  });
+  return r.json();
+}
+
 export async function clearImportedTransactions(accounts = null) {
   const r = await fetch(`${BASE}/import`, {
     method: "DELETE",
