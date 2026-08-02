@@ -2,6 +2,7 @@ import pg from "pg";
 import { randomBytes, createHash } from "crypto";
 import xlsxLib from "xlsx";
 import { initPropertyFinanceSchema } from "./property/schema.js";
+import { groupDuplicates } from "./transactionMatching.js";
 
 const { Pool } = pg;
 
@@ -352,6 +353,18 @@ export async function initDb() {
       txn_name TEXT NOT NULL,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS suppressed_transactions (
+      id SERIAL PRIMARY KEY,
+      source TEXT NOT NULL,
+      txn_id TEXT,
+      date DATE,
+      merchant TEXT,
+      amount NUMERIC(12,2),
+      account TEXT,
+      reason TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
   `);
 
   await pool.query(`
@@ -366,39 +379,17 @@ export async function initDb() {
     ALTER TABLE cashflow_txn_states ADD COLUMN IF NOT EXISTS note TEXT;
   `);
 
-  // Trigger to silently block duplicate transaction inserts from any source.
-  // csv_ rows are deduplicated by occurrence-index hash before insert, so skip the check for them.
+  // Drop the old BEFORE INSERT duplicate guard. Plaid's transaction_id is the
+  // primary key and every sync path upserts with ON CONFLICT (id), so ingestion
+  // is already idempotent without a trigger. What the trigger actually did was
+  // key on (date, ABS(amount), account): stripping the sign collapsed a charge
+  // with its refund and a card payment with its funding leg, and `RETURN NULL`
+  // discarded the row with no error and no trace. csv_ rows were exempt, so the
+  // only rows it ever destroyed were Plaid-native and imported ones. Idempotent —
+  // safe to run on every boot, including databases that never had the trigger.
   await pool.query(`
-    CREATE OR REPLACE FUNCTION prevent_duplicate_transactions()
-    RETURNS TRIGGER AS $$
-    BEGIN
-      IF NEW.id LIKE 'csv_%' THEN
-        RETURN NEW;
-      END IF;
-      IF EXISTS (
-        SELECT 1 FROM transactions
-        WHERE date = NEW.date
-          AND ROUND(ABS(amount)::numeric, 2) = ROUND(ABS(NEW.amount)::numeric, 2)
-          AND account = NEW.account
-          AND id != NEW.id
-          AND id NOT LIKE 'csv_%'
-      ) THEN
-        RETURN NULL;
-      END IF;
-      RETURN NEW;
-    END;
-    $$ LANGUAGE plpgsql;
-  `);
-  await pool.query(`
-    DO $$ BEGIN
-      IF NOT EXISTS (
-        SELECT 1 FROM pg_trigger WHERE tgname = 'check_duplicate_transactions'
-      ) THEN
-        CREATE TRIGGER check_duplicate_transactions
-        BEFORE INSERT ON transactions
-        FOR EACH ROW EXECUTE FUNCTION prevent_duplicate_transactions();
-      END IF;
-    END $$;
+    DROP TRIGGER IF EXISTS check_duplicate_transactions ON transactions;
+    DROP FUNCTION IF EXISTS prevent_duplicate_transactions();
   `);
 
   // Migrate assignments: drop clerk_user_id and fix primary key if needed
@@ -413,6 +404,45 @@ export async function initDb() {
   `);
 
   await initPropertyFinanceSchema(pool);
+}
+
+// ── Advisory locks ────────────────────────────────────────────────────────────
+// Session-level Postgres locks, used to keep concurrent syncs (webhook, startup,
+// daily timer, manual) from interleaving upserts and cursor writes for the same
+// item. Non-blocking on purpose: a sync that can't get the lock is redundant
+// with the one already running, so skipping is the correct outcome.
+//
+// pg_try_advisory_lock is scoped to the *session*, and pool.query() hands out an
+// arbitrary connection each call — so the lock is held on a dedicated client
+// that stays checked out until it is released, otherwise the unlock would run on
+// a different session and the lock would linger until the pool recycled it.
+const advisoryLockClients = new Map();
+
+export async function tryAdvisoryLock(key) {
+  const client = await pool.connect();
+  try {
+    const { rows } = await client.query("SELECT pg_try_advisory_lock($1) AS locked", [key]);
+    if (rows[0]?.locked !== true) {
+      client.release();
+      return false;
+    }
+    advisoryLockClients.set(key, client);
+    return true;
+  } catch (e) {
+    client.release();
+    throw e;
+  }
+}
+
+export async function releaseAdvisoryLock(key) {
+  const client = advisoryLockClients.get(key);
+  if (!client) return;
+  advisoryLockClients.delete(key);
+  try {
+    await client.query("SELECT pg_advisory_unlock($1)", [key]);
+  } finally {
+    client.release();
+  }
 }
 
 // ── API Keys ──────────────────────────────────────────────────────────────────
@@ -1149,21 +1179,61 @@ export async function saveSimplifiAccountMappings(mappings) {
 }
 
 export async function upsertCsvTransaction(t) {
-  // Skip if a Plaid-native row already covers this date+amount; avoids needing manual dedup after import.
+  // Skip if a Plaid-native row already covers this exact date+account+signed
+  // amount; avoids needing manual dedup after import. The guard is deliberately
+  // narrow: matching on ABS(amount) with no account clause used to drop an
+  // import because some unrelated account happened to move the same sum that
+  // day, and an inflow was treated as covered by an outflow of equal size.
   const { rowCount } = await pool.query(
     `INSERT INTO transactions (id, date, merchant, amount, account, plaid_category, status, currency)
      SELECT $1, $2, $3, $4, $5, $6, 'reviewed', 'USD'
      WHERE NOT EXISTS (
        SELECT 1 FROM transactions
        WHERE date = $2::date
-         AND ROUND(ABS(amount)::numeric, 2) = ROUND(ABS($4::numeric), 2)
+         AND ROUND(amount::numeric, 2) = ROUND($4::numeric, 2)
+         AND account = $5
          AND id NOT LIKE 'csv_%'
          AND id NOT LIKE 'simplifi_%'
      )
      ON CONFLICT (id) DO UPDATE SET merchant = $3, amount = $4, plaid_category = $6`,
     [t.id, t.date, t.merchant, t.amount, t.account, t.category]
   );
+  // A skip is a row the user handed us that never landed. Record it so the
+  // suppression is visible in /api/suppressed instead of vanishing silently.
+  if (rowCount === 0) {
+    await recordSuppression({
+      source: 'upsertCsvTransaction',
+      txnId: t.id,
+      date: t.date,
+      merchant: t.merchant,
+      amount: t.amount,
+      account: t.account,
+      reason: 'a Plaid-native row already covers this date/account/amount',
+    });
+  }
   return rowCount > 0;
+}
+
+// ── Suppressions ──────────────────────────────────────────────────────────────
+// Every code path that declines to store a transaction writes here first. Silent
+// discards are what let three real July credits disappear without a trace.
+export async function recordSuppression({ source, txnId, date, merchant, amount, account, reason }) {
+  await pool.query(
+    `INSERT INTO suppressed_transactions (source, txn_id, date, merchant, amount, account, reason)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [source, txnId ?? null, date ?? null, merchant ?? null, amount ?? null, account ?? null, reason]
+  );
+}
+
+export async function getSuppressions(limit = 200) {
+  const { rows } = await pool.query(
+    `SELECT id, source, txn_id, TO_CHAR(date, 'YYYY-MM-DD') AS date, merchant, amount::float, account, reason, created_at
+     FROM suppressed_transactions
+     ORDER BY created_at DESC
+     LIMIT $1`,
+    [limit]
+  );
+  return rows;
 }
 
 // Replaces the entire balance snapshot for a given date (delete + insert in one transaction).
@@ -1286,28 +1356,18 @@ export async function upsertImportedTransaction(t) {
 }
 
 export async function findDuplicateTransactions() {
-  // Same-date duplicates: group by (date, amount)
-  const { rows: sameDateRows } = await pool.query(`
-    SELECT
-      date,
-      ROUND(ABS(amount)::numeric, 2) AS abs_amount,
-      COUNT(*) AS cnt,
-      array_agg(id ORDER BY
-        CASE WHEN id LIKE 'simplifi_%' THEN 1 ELSE 0 END ASC,
-        created_at ASC
-      ) AS ids,
-      array_agg(merchant ORDER BY
-        CASE WHEN id LIKE 'simplifi_%' THEN 1 ELSE 0 END ASC,
-        created_at ASC
-      ) AS merchants
-    FROM transactions
-    GROUP BY date, ROUND(ABS(amount)::numeric, 2)
-    HAVING COUNT(*) > 1
-    ORDER BY date DESC
-  `);
+  // Same-date duplicates: the grouping rules live in transactionMatching.js as
+  // pure functions so they can be unit-tested. SQL only supplies the rows.
+  const { rows } = await pool.query(
+    `SELECT id, date, merchant, amount, account, created_at FROM transactions
+     ORDER BY date DESC, created_at ASC`
+  );
+  const sameDateGroups = groupDuplicates(rows);
 
-  // Cross-date duplicates: simplifi vs non-simplifi, same merchant+amount, dates 1 day apart.
+  // Cross-date duplicates: simplifi/csv vs Plaid-native, same merchant+amount+account, dates 1 day apart.
   // Targets the specific case where Simplifi recorded the pending date and Plaid recorded the posted date.
+  // t1 (the removal candidate) is constrained to imported ids and t2 to Plaid-native ones, so this pass
+  // can never propose deleting a Plaid row; the account equality keeps it from merging across accounts.
   const { rows: crossDateRows } = await pool.query(`
     SELECT
       t2.id AS keep_id,
@@ -1323,18 +1383,20 @@ export async function findDuplicateTransactions() {
       AND t2.id NOT LIKE 'csv_%'
       AND ROUND(ABS(t1.amount)::numeric, 2) = ROUND(ABS(t2.amount)::numeric, 2)
       AND LOWER(TRIM(t1.merchant)) = LOWER(TRIM(t2.merchant))
+      AND t1.account = t2.account
       AND ABS(t1.date - t2.date) = 1
     ORDER BY t2.date DESC
   `);
 
-  const sameDateIds = new Set(sameDateRows.flatMap(r => r.ids));
-  const sameDateResults = sameDateRows.map(r => ({
-    date: r.date,
-    amount: parseFloat(r.abs_amount),
-    count: parseInt(r.cnt),
-    keep: r.ids[0],
-    remove: r.ids.slice(1),
-    merchants: r.merchants,
+  const sameDateIds = new Set(sameDateGroups.flatMap(g => [g.keep, ...g.remove]));
+  const sameDateResults = sameDateGroups.map(g => ({
+    date: g.date,
+    amount: g.amount,
+    count: 1 + g.remove.length,
+    keep: g.keep,
+    remove: g.remove,
+    merchants: g.merchants,
+    account: g.account,
   }));
 
   // Exclude any IDs already covered by the same-date pass to avoid double-counting

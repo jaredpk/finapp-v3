@@ -22,6 +22,7 @@ import {
   getTransactions, getSpendingByCategory,
   deleteRemovedTransactions, populateSuggestedCategories, applySuggestedCategories,
   findDuplicateTransactions, deduplicateTransactions,
+  getSuppressions, tryAdvisoryLock, releaseAdvisoryLock,
   saveOAuthState, getOAuthState, deleteOAuthState,
   saveOAuthCode, getOAuthCode, deleteOAuthCode,
   seedCategories,
@@ -47,6 +48,7 @@ import {
   getTransactionDateAmountSet, parseAuditXlsx,
 } from "./db.js";
 import pool from "./db.js";
+import { findUnmatchedPaymentLegs } from "./transactionMatching.js";
 import { registerPropertyFinanceRoutes } from "./property/routes.js";
 
 dotenv.config();
@@ -109,47 +111,61 @@ const plaidConfig = new Configuration({
 const plaidClient = new PlaidApi(plaidConfig);
 
 // ── Sync transactions for a user ──────────────────────────────────────────────
+// Four callers can fire this: the Plaid webhook, machine startup, the daily
+// timer and the manual button. Overlapping runs advance the same cursor twice
+// and race each other's upserts, so the whole body is serialized behind one
+// advisory lock — a second sync is redundant with the one already running.
+const SYNC_LOCK_KEY = 4820147;
+
 async function syncTransactions() {
-  const items = await getUserItems();
-  const today = new Date().toISOString().slice(0, 10);
-  const allBalances = [];
-  for (const { accessToken, itemId, institutionName } of items) {
-    let cursor = await getCursor(itemId);
-    let hasMore = true;
-    let lastAccounts = [];
-    while (hasMore) {
-      const r = await plaidClient.transactionsSync({ access_token: accessToken, cursor });
-
-      // 1. Delete transactions Plaid says are removed
-      const removedIds = (r.data.removed || []).map((t) => t.transaction_id).filter(Boolean);
-      if (removedIds.length > 0) await deleteRemovedTransactions(removedIds);
-
-      // 2. Delete stale pending rows that have now posted (avoid duplicates)
-      const stalePendingIds = [...(r.data.added || []), ...(r.data.modified || [])]
-        .map((t) => t.pending_transaction_id)
-        .filter(Boolean);
-      if (stalePendingIds.length > 0) await deleteRemovedTransactions(stalePendingIds);
-
-      // 3. Upsert added and modified
-      await upsertTransactions(r.data.added || []);
-      await upsertTransactions(r.data.modified || []);
-
-      if (r.data.accounts?.length) lastAccounts = r.data.accounts;
-      cursor = r.data.next_cursor;
-      hasMore = r.data.has_more;
-    }
-    await saveCursor(itemId, cursor);
-    for (const a of lastAccounts) {
-      allBalances.push({
-        account: a.name,
-        institution: institutionName,
-        type: a.subtype || a.type,
-        balance: a.balances.current,
-        available: a.balances.available ?? null,
-      });
-    }
+  if (!(await tryAdvisoryLock(SYNC_LOCK_KEY))) {
+    console.log("sync already in progress, skipping");
+    return;
   }
-  if (allBalances.length) await upsertAccountBalances(today, allBalances);
+  try {
+    const items = await getUserItems();
+    const today = new Date().toISOString().slice(0, 10);
+    const allBalances = [];
+    for (const { accessToken, itemId, institutionName } of items) {
+      let cursor = await getCursor(itemId);
+      let hasMore = true;
+      let lastAccounts = [];
+      while (hasMore) {
+        const r = await plaidClient.transactionsSync({ access_token: accessToken, cursor });
+
+        // 1. Delete transactions Plaid says are removed
+        const removedIds = (r.data.removed || []).map((t) => t.transaction_id).filter(Boolean);
+        if (removedIds.length > 0) await deleteRemovedTransactions(removedIds);
+
+        // 2. Delete stale pending rows that have now posted (avoid duplicates)
+        const stalePendingIds = [...(r.data.added || []), ...(r.data.modified || [])]
+          .map((t) => t.pending_transaction_id)
+          .filter(Boolean);
+        if (stalePendingIds.length > 0) await deleteRemovedTransactions(stalePendingIds);
+
+        // 3. Upsert added and modified
+        await upsertTransactions(r.data.added || []);
+        await upsertTransactions(r.data.modified || []);
+
+        if (r.data.accounts?.length) lastAccounts = r.data.accounts;
+        cursor = r.data.next_cursor;
+        hasMore = r.data.has_more;
+      }
+      await saveCursor(itemId, cursor);
+      for (const a of lastAccounts) {
+        allBalances.push({
+          account: a.name,
+          institution: institutionName,
+          type: a.subtype || a.type,
+          balance: a.balances.current,
+          available: a.balances.available ?? null,
+        });
+      }
+    }
+    if (allBalances.length) await upsertAccountBalances(today, allBalances);
+  } finally {
+    await releaseAdvisoryLock(SYNC_LOCK_KEY);
+  }
 }
 
 // ── FHFA property value drift ─────────────────────────────────────────────────
@@ -1189,6 +1205,58 @@ app.post("/api/deduplicate", requireAuth, async (req, res) => {
   res.json({ deleted });
 });
 
+// Every row some code path declined to store, newest first. If a transaction
+// you expected is missing, this is the first place to look.
+app.get("/api/suppressed", requireAuth, async (req, res) => {
+  const suppressed = await getSuppressions();
+  res.json({ suppressed });
+});
+
+// ── Reconciliation ────────────────────────────────────────────────────────────
+// A card payment leaves a depository account and lands on the card. A funding
+// leg with no card-side credit means a credit went missing — the exact symptom
+// the old ABS()-keyed dedup produced. This is the regression check for it.
+app.get("/api/reconcile/payment-pairs", requireAuth, async (req, res) => {
+  try {
+    const { start, end } = req.query;
+    const [txns, balRows, items] = await Promise.all([
+      getTransactions({ limit: 10000, startDate: start, endDate: end }),
+      getLatestBalances(),
+      getUserItems(),
+    ]);
+
+    // transactions.account holds a Plaid account_id for live rows and an account
+    // name for imported ones, so the depository set has to carry both forms.
+    const depositoryAccounts = new Set(
+      balRows
+        .filter((r) => !["credit", "loan"].includes(normalizePlaidType(r.type)))
+        .map((r) => r.account)
+    );
+    const results = await Promise.allSettled(
+      items.map(({ accessToken }) => plaidClient.accountsGet({ access_token: accessToken }))
+    );
+    for (const r of results) {
+      if (r.status !== "fulfilled") continue;
+      for (const a of r.value.data.accounts) {
+        if (normalizePlaidType(a.subtype || a.type) === "depository") depositoryAccounts.add(a.account_id);
+      }
+    }
+
+    const rows = txns.map((t) => ({
+      id: t.transaction_id,
+      date: t.date,
+      merchant: t.merchant_name,
+      name: t.name,
+      amount: t.amount,
+      account: t.account_id,
+    }));
+    const unmatched = findUnmatchedPaymentLegs(rows, { depositoryAccounts });
+    res.json({ unmatched, count: unmatched.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── Merchant overrides ────────────────────────────────────────────────────────
 app.get("/api/merchant-overrides", requireAuth, async (req, res) => {
   const rows = await getMerchantOverrides();
@@ -1719,12 +1787,9 @@ if (isProd) {
 
 const PORT = process.env.PORT || 3001;
 initDb().then(async () => {
-  try {
-    const removed = await deduplicateTransactions();
-    if (removed > 0) console.log(`Startup dedup: removed ${removed} duplicate transactions`);
-  } catch (e) {
-    console.error("Startup dedup failed (non-fatal):", e.message);
-  }
+  // No dedup sweep on startup. fly.toml auto-stops the machine, so this ran on
+  // every wake — many times a day — hard-DELETEing rows with no review step.
+  // Deduplication is manual and preview-first now: GET /api/deduplicate.
   // Sync transactions on startup so data is fresh whenever the machine wakes up
   syncTransactions()
     .then(() => console.log("Startup: transaction sync complete"))
