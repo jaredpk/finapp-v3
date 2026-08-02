@@ -46,6 +46,18 @@ export function duplicateKey(row) {
   ].join("|");
 }
 
+// The cross-date duplicate pass (db.js findDuplicateTransactions) compares
+// amounts in SQL; the predicate lives here so it is testable. Amounts only match
+// if they match INCLUDING sign — an imported +500 credit and a Plaid -500 charge
+// a day apart on the same account and merchant are a charge and its next-day
+// refund, which is the shape ABS() used to call a duplicate.
+export function sameSignedAmount(a, b) {
+  const x = normalizeAmount(a);
+  const y = normalizeAmount(b);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+  return x === y;
+}
+
 function createdAtMs(row) {
   const t = new Date(row.created_at ?? NaN).getTime();
   return Number.isFinite(t) ? t : Number.POSITIVE_INFINITY;
@@ -102,22 +114,37 @@ export function groupDuplicates(rows) {
 // card (negative amount, different account). When only the funding leg exists,
 // a credit went missing — which is exactly the symptom the ABS()-keyed dedup
 // produced. Extend this list as new payment descriptors show up.
+//
+// Card-payment descriptors ONLY. An ordinary ACH or bill-pay outflow (utilities,
+// a mortgage, a bank transfer) can never have a card-side credit, so a pattern
+// loose enough to catch one flags it forever and the whole check gets ignored.
+// That is why bare "discover" (matched Discovery Plus), "online payment" (matched
+// XCEL ENERGY ONLINE PAYMENT) and "bill pay" (matched BILL PAY - ROCKET MORTGAGE)
+// are gone. "ONLINE PAYMENT - THANK YOU" is a card-side *credit* descriptor, not
+// a funding leg, so dropping it costs this check nothing.
 export const CARD_PAYMENT_PATTERNS = [
   "capital one",
   "amex epayment",
   "american express",
+  "discover card",
   "chase card",
-  "discover",
+  "cardmember serv",
   "card payment",
-  "online payment",
-  "cardmember",
-  "bill pay",
+  "online pmt",
+  "epayment",
+  "autopay",
 ];
+
+// Matched on word boundaries, never as bare substrings: includes("discover") is
+// what let "Discovery Plus" register as a card payment.
+const CARD_PAYMENT_REGEXES = CARD_PAYMENT_PATTERNS.map(
+  (p) => new RegExp(`\\b${p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i")
+);
 
 function isCardPaymentDescriptor(row) {
   const text = normalizeMerchant(row.merchant ?? row.name);
   if (!text) return false;
-  return CARD_PAYMENT_PATTERNS.some((p) => text.includes(p));
+  return CARD_PAYMENT_REGEXES.some((re) => re.test(text));
 }
 
 function dayDiff(a, b) {
@@ -127,14 +154,43 @@ function dayDiff(a, b) {
   return Math.abs(ta - tb) / 86400000;
 }
 
+// Deterministic order for the greedy match below: date ascending, then amount,
+// then id. Without it the leg that gets flagged depends on the order the caller
+// happened to hand us the rows in.
+function byDateAmountId(a, b) {
+  const da = normalizeDate(a.date);
+  const db = normalizeDate(b.date);
+  if (da !== db) return da < db ? -1 : 1;
+  const aa = normalizeAmount(a.amount);
+  const ab = normalizeAmount(b.amount);
+  if (aa !== ab) return aa - ab;
+  const ia = String(a.id ?? "");
+  const ib = String(b.id ?? "");
+  return ia < ib ? -1 : ia > ib ? 1 : 0;
+}
+
 // Returns one entry per funding leg with no card-side credit to pair with.
 // Each card leg can only settle one funding leg, so two identical payments in
 // the same window still need two credits.
-export function findUnmatchedPaymentLegs(rows, { depositoryAccounts = new Set(), windowDays = 3 } = {}) {
-  const fundingLegs = rows.filter(
-    (r) => normalizeAmount(r.amount) > 0 && depositoryAccounts.has(r.account) && isCardPaymentDescriptor(r)
-  );
-  const cardLegs = rows.filter((r) => normalizeAmount(r.amount) < 0);
+//
+// A card leg has to be a credit-account row. Accepting any negative amount
+// anywhere meant an unrelated outflow on a savings account could "settle" a
+// genuinely missing card credit — the false negative this check exists to catch.
+// With no creditAccounts set supplied we fall back to "not a depository
+// account", which still keeps savings and checking rows out.
+export function findUnmatchedPaymentLegs(
+  rows,
+  { depositoryAccounts = new Set(), creditAccounts = new Set(), windowDays = 3 } = {}
+) {
+  const isCreditAccount = (account) =>
+    creditAccounts.size > 0 ? creditAccounts.has(account) : !depositoryAccounts.has(account);
+
+  const fundingLegs = rows
+    .filter((r) => normalizeAmount(r.amount) > 0 && depositoryAccounts.has(r.account) && isCardPaymentDescriptor(r))
+    .sort(byDateAmountId);
+  const cardLegs = rows
+    .filter((r) => normalizeAmount(r.amount) < 0 && isCreditAccount(r.account))
+    .sort(byDateAmountId);
   const claimed = new Set();
 
   const unmatched = [];

@@ -2,7 +2,7 @@ import pg from "pg";
 import { randomBytes, createHash } from "crypto";
 import xlsxLib from "xlsx";
 import { initPropertyFinanceSchema } from "./property/schema.js";
-import { groupDuplicates } from "./transactionMatching.js";
+import { groupDuplicates, isImportedId, sameSignedAmount } from "./transactionMatching.js";
 
 const { Pool } = pg;
 
@@ -440,8 +440,15 @@ export async function releaseAdvisoryLock(key) {
   advisoryLockClients.delete(key);
   try {
     await client.query("SELECT pg_advisory_unlock($1)", [key]);
-  } finally {
     client.release();
+  } catch (e) {
+    // The unlock did not complete, so this session may still hold the lock.
+    // Returning the connection to the pool would leave it held for as long as
+    // the pool keeps the connection alive, and every later sync would log
+    // "sync already in progress, skipping" forever with no other symptom.
+    // release(true) destroys the connection so Postgres ends the session.
+    client.release(true);
+    throw e;
   }
 }
 
@@ -605,10 +612,26 @@ export async function getSpendingByCategory({ startDate, endDate } = {}) {
 }
 
 // Full-fidelity upsert for Quadratic imports — uses real Plaid transaction_ids and all extended columns.
+// Returns the number of rows actually written, so callers report what landed
+// rather than what they handed us.
 export async function upsertPlaidTransactions(transactions) {
+  let written = 0;
   for (const t of transactions) {
-    if (!t.id || t.amount == null) continue;
-    await pool.query(
+    if (!t.id || t.amount == null) {
+      // A Plaid row we were given and did not store. Record it — dropping rows
+      // with no trace is what let real credits disappear.
+      await recordSuppression({
+        source: 'upsertPlaidTransactions',
+        txnId: t.id,
+        date: t.date,
+        merchant: t.merchant,
+        amount: t.amount,
+        account: t.account,
+        reason: 'missing id or amount',
+      });
+      continue;
+    }
+    const { rowCount } = await pool.query(
       `INSERT INTO transactions
          (id, date, merchant, amount, account, plaid_category, status, currency,
           pending_transaction_id, authorized_date, name, primary_category,
@@ -634,7 +657,9 @@ export async function upsertPlaidTransactions(transactions) {
         t.city, t.state, t.website, t.logo_url, t.original_description,
       ]
     );
+    if (rowCount > 0) written++;
   }
+  return written;
 }
 
 export async function deleteRemovedTransactions(ids) {
@@ -1355,12 +1380,22 @@ export async function upsertImportedTransaction(t) {
   );
 }
 
-export async function findDuplicateTransactions() {
+// startDate/endDate bound how far back the scan reaches. Both passes used to
+// read the entire transactions table into Node memory on every call; the default
+// window is the last 24 months, which is well past anything worth reconciling.
+export async function findDuplicateTransactions({ startDate, endDate } = {}) {
+  const windowParams = [startDate ?? null, endDate ?? null];
+  const windowClause = (col) =>
+    `${col} >= COALESCE($1::date, CURRENT_DATE - INTERVAL '24 months')
+       AND ($2::date IS NULL OR ${col} <= $2::date)`;
+
   // Same-date duplicates: the grouping rules live in transactionMatching.js as
   // pure functions so they can be unit-tested. SQL only supplies the rows.
   const { rows } = await pool.query(
     `SELECT id, date, merchant, amount, account, created_at FROM transactions
-     ORDER BY date DESC, created_at ASC`
+     WHERE ${windowClause('date')}
+     ORDER BY date DESC, created_at ASC`,
+    windowParams
   );
   const sameDateGroups = groupDuplicates(rows);
 
@@ -1368,12 +1403,17 @@ export async function findDuplicateTransactions() {
   // Targets the specific case where Simplifi recorded the pending date and Plaid recorded the posted date.
   // t1 (the removal candidate) is constrained to imported ids and t2 to Plaid-native ones, so this pass
   // can never propose deleting a Plaid row; the account equality keeps it from merging across accounts.
+  // Amounts are compared WITH their sign: on ABS() an imported $500 credit and a
+  // Plaid $500 charge a day apart on the same account and merchant matched, and
+  // a charge with its next-day refund is exactly that shape.
   const { rows: crossDateRows } = await pool.query(`
     SELECT
       t2.id AS keep_id,
       t1.id AS remove_id,
-      t2.date AS date,
-      ROUND(ABS(t1.amount)::numeric, 2) AS abs_amount,
+      TO_CHAR(t2.date, 'YYYY-MM-DD') AS date,
+      ROUND(t2.amount::numeric, 2) AS keep_amount,
+      ROUND(t1.amount::numeric, 2) AS remove_amount,
+      t2.account AS account,
       t2.merchant AS keep_merchant,
       t1.merchant AS remove_merchant
     FROM transactions t1
@@ -1381,12 +1421,13 @@ export async function findDuplicateTransactions() {
       ON (t1.id LIKE 'simplifi_%' OR t1.id LIKE 'csv_%')
       AND t2.id NOT LIKE 'simplifi_%'
       AND t2.id NOT LIKE 'csv_%'
-      AND ROUND(ABS(t1.amount)::numeric, 2) = ROUND(ABS(t2.amount)::numeric, 2)
+      AND ROUND(t1.amount::numeric, 2) = ROUND(t2.amount::numeric, 2)
       AND LOWER(TRIM(t1.merchant)) = LOWER(TRIM(t2.merchant))
       AND t1.account = t2.account
       AND ABS(t1.date - t2.date) = 1
+    WHERE ${windowClause('t1.date')}
     ORDER BY t2.date DESC
-  `);
+  `, windowParams);
 
   const sameDateIds = new Set(sameDateGroups.flatMap(g => [g.keep, ...g.remove]));
   const sameDateResults = sameDateGroups.map(g => ({
@@ -1399,31 +1440,54 @@ export async function findDuplicateTransactions() {
     account: g.account,
   }));
 
-  // Exclude any IDs already covered by the same-date pass to avoid double-counting
+  // Exclude any IDs already covered by the same-date pass to avoid double-counting.
+  // sameSignedAmount re-checks the SQL predicate in JS, where it is unit-testable.
   const crossDateResults = crossDateRows
     .filter(r => !sameDateIds.has(r.keep_id) && !sameDateIds.has(r.remove_id))
+    .filter(r => sameSignedAmount(r.remove_amount, r.keep_amount))
     .map(r => ({
       date: r.date,
-      amount: parseFloat(r.abs_amount),
+      amount: parseFloat(r.keep_amount),
       count: 2,
       keep: r.keep_id,
       remove: [r.remove_id],
       merchants: [r.keep_merchant, r.remove_merchant],
+      account: r.account ?? null,
     }));
 
   return [...sameDateResults, ...crossDateResults];
 }
 
 // selectedGroups: optional array of { keep, remove[] } — if omitted, removes all found duplicates
+// Returns { deleted, rejected }: rejected holds ids the safety rule refused.
 export async function deduplicateTransactions(selectedGroups) {
   const dupes = selectedGroups ?? await findDuplicateTransactions();
-  if (dupes.length === 0) return 0;
+  if (dupes.length === 0) return { deleted: 0, rejected: [] };
 
-  const toRemove = dupes.flatMap(d => d.remove);
+  // "Never delete a Plaid-native row" has to be enforced here, at the DELETE,
+  // not only in the preview: selectedGroups comes straight off the request body,
+  // so a caller could otherwise name any id it liked.
+  const toRemove = [];
+  const rejected = [];
+  for (const dupe of dupes) {
+    for (const removeId of dupe.remove ?? []) {
+      if (isImportedId(removeId)) toRemove.push(removeId);
+      else rejected.push(removeId);
+    }
+  }
+  for (const id of rejected) {
+    await recordSuppression({
+      source: 'deduplicateTransactions',
+      txnId: id,
+      reason: 'refused to delete plaid-native row',
+    });
+  }
+  if (toRemove.length === 0) return { deleted: 0, rejected };
+  const accepted = new Set(toRemove);
 
   // Migrate assignments from duplicate rows to the keeper before deleting
   for (const dupe of dupes) {
-    for (const removeId of dupe.remove) {
+    for (const removeId of (dupe.remove ?? []).filter(id => accepted.has(id))) {
       await pool.query(`
         INSERT INTO assignments (transaction_id, category_id, updated_at)
         SELECT $2, category_id, NOW() FROM assignments WHERE transaction_id = $1
@@ -1441,7 +1505,7 @@ export async function deduplicateTransactions(selectedGroups) {
     `DELETE FROM transactions WHERE id = ANY($1)`,
     [toRemove]
   );
-  return rowCount;
+  return { deleted: rowCount, rejected };
 }
 
 export async function getImportedTransactionAccounts() {
@@ -1832,13 +1896,29 @@ export async function updateAuditInsertedCount(id, insertedCount) {
   await pool.query(`UPDATE audit_log SET inserted_count = $2 WHERE id = $1`, [id, insertedCount]);
 }
 
+// Keys for the audit's "missing transactions" comparison: date + account +
+// SIGNED amount. The old key was ABS(amount) with no account, so a missing
+// $6,054.25 card credit read as "present" because the funding leg of the same
+// magnitude posted that day on another account — the audit would have hidden
+// the very incident it exists to find.
+//
+// Each row also gets an account-blind key, because the audit sheet's account_id
+// column is not always populated. Callers use the account-qualified key whenever
+// the sheet row has an account and fall back to date + signed amount otherwise;
+// the sign is the part that is never dropped.
 export async function getTransactionDateAmountSet(startDate, endDate) {
   const { rows } = await pool.query(
-    `SELECT date::text, ABS(amount)::numeric(12,2)::text AS abs_amount
+    `SELECT date::text, COALESCE(account, '') AS account,
+            amount::numeric(12,2)::text AS amount
      FROM transactions WHERE date >= $1::date AND date <= $2::date`,
     [startDate, endDate]
   );
-  return new Set(rows.map(r => `${r.date}|${r.abs_amount}`));
+  const keys = new Set();
+  for (const r of rows) {
+    keys.add(`${r.date}|${r.account}|${r.amount}`);
+    keys.add(`${r.date}|${r.amount}`);
+  }
+  return keys;
 }
 
 export function parseAuditXlsx(base64) {

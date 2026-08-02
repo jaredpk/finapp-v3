@@ -22,7 +22,7 @@ import {
   getTransactions, getSpendingByCategory,
   deleteRemovedTransactions, populateSuggestedCategories, applySuggestedCategories,
   findDuplicateTransactions, deduplicateTransactions,
-  getSuppressions, tryAdvisoryLock, releaseAdvisoryLock,
+  getSuppressions, recordSuppression, tryAdvisoryLock, releaseAdvisoryLock,
   saveOAuthState, getOAuthState, deleteOAuthState,
   saveOAuthCode, getOAuthCode, deleteOAuthCode,
   seedCategories,
@@ -523,6 +523,9 @@ app.post("/api/exchange_public_token", async (req, res) => {
 const ACCOUNT_TYPE_MAP = {
   checking:     "depository",
   savings:      "depository",
+  "money market":"depository",
+  hsa:          "depository",
+  cd:           "depository",
   brokerage:    "investment",
   investment:   "investment",
   ira:          "investment",
@@ -941,27 +944,45 @@ app.post("/api/simplifi/import", requireAuth, async (req, res) => {
     let inserted = 0, categorized = 0, skipped = 0;
     for (const row of rows) {
       const resolvedAccount = allAccountMappings[row.account] ?? row.account;
+      // Same account, SIGNED amount, and the payee where Simplifi gave us one.
+      // On (date, ABS(amount)) alone this matched any row on any account that
+      // moved the same magnitude that day in either direction, and then stamped
+      // the Simplifi category onto up to five of them.
       const { rows: matches } = await pool.query(
         `SELECT id FROM transactions
          WHERE date = $1::date
-           AND ROUND(ABS(amount)::numeric, 2) = ROUND(ABS($2::numeric), 2)
+           AND ROUND(amount::numeric, 2) = ROUND($2::numeric, 2)
+           AND account = $3
            AND id NOT LIKE 'simplifi_%'
-         LIMIT 5`,
-        [row.date, row.dbAmount]
+           AND ($4::text IS NULL OR LOWER(TRIM(merchant)) = LOWER(TRIM($4::text)))`,
+        [row.date, row.dbAmount, resolvedAccount, row.payee || null]
       );
       const catId = isJunkSimplifiCategory(row.category) ? null : (allMappings[row.category] || null);
-      if (matches.length > 0) {
+      const suppress = (reason) => recordSuppression({
+        source: 'simplifiImport',
+        date: row.date,
+        merchant: row.payee,
+        amount: row.dbAmount,
+        account: resolvedAccount,
+        reason,
+      });
+      if (matches.length > 1) {
+        // More than one candidate means we cannot tell which row this Simplifi
+        // line describes. Categorizing all of them is how unrelated rows got
+        // someone else's category — categorize none and leave a record instead.
+        skipped++;
+        await suppress('ambiguous simplifi match');
+      } else if (matches.length === 1) {
         if (catId) {
-          for (const m of matches) {
-            const { rowCount } = await pool.query(
-              `INSERT INTO assignments (transaction_id, category_id)
-               VALUES ($1, $2) ON CONFLICT (transaction_id) DO NOTHING`,
-              [m.id, catId]
-            );
-            if (rowCount > 0) categorized++;
-          }
+          const { rowCount } = await pool.query(
+            `INSERT INTO assignments (transaction_id, category_id)
+             VALUES ($1, $2) ON CONFLICT (transaction_id) DO NOTHING`,
+            [matches[0].id, catId]
+          );
+          if (rowCount > 0) categorized++;
         } else {
           skipped++;
+          await suppress('an existing row already covers this date/account/amount');
         }
       } else {
         const id = 'simplifi_' + createHash('sha256')
@@ -981,6 +1002,7 @@ app.post("/api/simplifi/import", requireAuth, async (req, res) => {
           inserted++;
         } else {
           skipped++;
+          await suppress('a simplifi row with this id was already imported');
         }
       }
     }
@@ -1170,7 +1192,7 @@ app.post("/api/vehicles/:id/baseline", requireAuth, async (req, res) => {
 
 // ── Deduplication ─────────────────────────────────────────────────────────────
 app.get("/api/deduplicate/debug", requireAuth, async (req, res) => {
-  const [sample, idStats, dupeRows] = await Promise.all([
+  const [sample, idStats, dupeRows, legacyKeyRows] = await Promise.all([
     pool.query(`SELECT id, date, amount::float, merchant, account, created_at FROM transactions ORDER BY date DESC, created_at DESC LIMIT 20`),
     pool.query(`
       SELECT
@@ -1179,6 +1201,20 @@ app.get("/api/deduplicate/debug", requireAuth, async (req, res) => {
         COUNT(*) FILTER (WHERE id NOT LIKE 'simplifi_%' AND id !~ '^[0-9a-f-]{36}$') AS plaid,
         COUNT(*) AS total
       FROM transactions`),
+    // Grouped on the real dedup key (date + account + SIGNED amount), so this
+    // view agrees with what /api/deduplicate would actually propose.
+    pool.query(`
+      SELECT date, account, ROUND(amount::numeric,2) AS amount, COUNT(*) AS cnt,
+             array_agg(id ORDER BY created_at) AS ids,
+             array_agg(merchant ORDER BY created_at) AS merchants
+      FROM transactions
+      GROUP BY date, account, ROUND(amount::numeric,2)
+      HAVING COUNT(*) > 1
+      ORDER BY date DESC LIMIT 20`),
+    // Deliberately still keyed on (date, ABS(amount)) with no account: this is
+    // the key the old dedup used, so it lists the pairs that logic would have
+    // collapsed — a card payment against its funding leg, a charge against its
+    // refund. Useful for finding historical damage; never a delete candidate.
     pool.query(`
       SELECT date, ROUND(ABS(amount)::numeric,2) AS abs_amount, COUNT(*) AS cnt,
              array_agg(id ORDER BY created_at) AS ids,
@@ -1190,19 +1226,30 @@ app.get("/api/deduplicate/debug", requireAuth, async (req, res) => {
       HAVING COUNT(*) > 1
       ORDER BY date DESC LIMIT 20`),
   ]);
-  res.json({ sample: sample.rows, idStats: idStats.rows[0], dupeRows: dupeRows.rows });
+  res.json({
+    sample: sample.rows,
+    idStats: idStats.rows[0],
+    dupeRows: dupeRows.rows,
+    atRiskUnderOldKey: legacyKeyRows.rows,
+  });
 });
 
+// start/end bound the scan; it defaults to the last 24 months rather than
+// reading every transaction ever into memory.
 app.get("/api/deduplicate", requireAuth, async (req, res) => {
-  const dupes = await findDuplicateTransactions();
+  const { start, end } = req.query;
+  const dupes = await findDuplicateTransactions({ startDate: start, endDate: end });
   const toRemove = dupes.reduce((n, d) => n + d.remove.length, 0);
   res.json({ groups: dupes.length, toRemove, preview: dupes });
 });
 
 app.post("/api/deduplicate", requireAuth, async (req, res) => {
   const { groups } = req.body || {};
-  const deleted = await deduplicateTransactions(groups ?? undefined);
-  res.json({ deleted });
+  if (groups !== undefined && !Array.isArray(groups)) return res.status(400).json({ error: "groups must be an array" });
+  // rejected: ids the caller asked us to delete that are Plaid-native, which
+  // deduplicateTransactions refuses on principle.
+  const { deleted, rejected } = await deduplicateTransactions(groups ?? undefined);
+  res.json({ deleted, rejected });
 });
 
 // Every row some code path declined to store, newest first. If a transaction
@@ -1218,7 +1265,9 @@ app.get("/api/suppressed", requireAuth, async (req, res) => {
 // the old ABS()-keyed dedup produced. This is the regression check for it.
 app.get("/api/reconcile/payment-pairs", requireAuth, async (req, res) => {
   try {
-    const { start, end } = req.query;
+    const { start, end, windowDays } = req.query;
+    const days = Number(windowDays);
+    const searchWindow = Number.isFinite(days) && days >= 0 ? days : 3;
     const [txns, balRows, items] = await Promise.all([
       getTransactions({ limit: 10000, startDate: start, endDate: end }),
       getLatestBalances(),
@@ -1226,11 +1275,14 @@ app.get("/api/reconcile/payment-pairs", requireAuth, async (req, res) => {
     ]);
 
     // transactions.account holds a Plaid account_id for live rows and an account
-    // name for imported ones, so the depository set has to carry both forms.
+    // name for imported ones, so both sets have to carry both forms. Membership
+    // is by allowlist on both sides: the balances side used to blocklist
+    // credit/loan, which quietly counted `investment` and `other` as depository.
     const depositoryAccounts = new Set(
-      balRows
-        .filter((r) => !["credit", "loan"].includes(normalizePlaidType(r.type)))
-        .map((r) => r.account)
+      balRows.filter((r) => normalizePlaidType(r.type) === "depository").map((r) => r.account)
+    );
+    const creditAccounts = new Set(
+      balRows.filter((r) => normalizePlaidType(r.type) === "credit").map((r) => r.account)
     );
     const results = await Promise.allSettled(
       items.map(({ accessToken }) => plaidClient.accountsGet({ access_token: accessToken }))
@@ -1238,7 +1290,9 @@ app.get("/api/reconcile/payment-pairs", requireAuth, async (req, res) => {
     for (const r of results) {
       if (r.status !== "fulfilled") continue;
       for (const a of r.value.data.accounts) {
-        if (normalizePlaidType(a.subtype || a.type) === "depository") depositoryAccounts.add(a.account_id);
+        const type = normalizePlaidType(a.subtype || a.type);
+        if (type === "depository") depositoryAccounts.add(a.account_id);
+        if (type === "credit") creditAccounts.add(a.account_id);
       }
     }
 
@@ -1250,7 +1304,7 @@ app.get("/api/reconcile/payment-pairs", requireAuth, async (req, res) => {
       amount: t.amount,
       account: t.account_id,
     }));
-    const unmatched = findUnmatchedPaymentLegs(rows, { depositoryAccounts });
+    const unmatched = findUnmatchedPaymentLegs(rows, { depositoryAccounts, creditAccounts, windowDays: searchWindow });
     res.json({ unmatched, count: unmatched.length });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1555,8 +1609,9 @@ function buildMcpServer() {
     const { transactions, balances, holdings, snapshotDate, isPlaidNative } = parseXlsxBase64(xlsx, snapshot_date);
     let imported = 0;
     if (isPlaidNative) {
-      await upsertPlaidTransactions(transactions);
-      imported = transactions.length;
+      // Count what actually landed — rows with no id or amount are dropped (and
+      // recorded in /api/suppressed), so the input length overstated it.
+      imported = await upsertPlaidTransactions(transactions);
     } else {
       for (const row of transactions) {
         if (await upsertCsvTransaction(row)) imported++;
@@ -1564,9 +1619,11 @@ function buildMcpServer() {
     }
     if (balances.length) await upsertAccountBalances(snapshotDate, balances);
     if (holdings.length) await upsertInvestmentHoldings(snapshotDate, holdings);
-    const skipped = isPlaidNative ? 0 : transactions.length - imported;
+    const skipped = transactions.length - imported;
     const parts = [`Imported ${imported} transaction${imported !== 1 ? 's' : ''}`];
-    if (skipped) parts.push(`skipped ${skipped} already covered by Plaid`);
+    if (skipped) parts.push(isPlaidNative
+      ? `skipped ${skipped} missing an id or amount (see /api/suppressed)`
+      : `skipped ${skipped} already covered by Plaid`);
     if (balances.length) parts.push(`saved ${balances.length} account balances as of ${snapshotDate}`);
     if (holdings.length) parts.push(`saved ${holdings.length} investment holdings as of ${snapshotDate}`);
     return { content: [{ type: "text", text: parts.join(' · ') + '. Re-running is safe.' }] };
@@ -1736,7 +1793,19 @@ app.post("/api/audit/upload", requireAuth, async (req, res) => {
       d.setUTCDate(d.getUTCDate() + days);
       return d.toISOString().slice(0, 10);
     }
-    const toKey = (date, t) => `${date}|${Math.abs(t.amount).toFixed(2)}`;
+    // date + account + SIGNED amount, matching getTransactionDateAmountSet. The
+    // old key was ABS(amount) with no account, so a missing card credit read as
+    // present whenever a funding leg of the same magnitude posted that day on
+    // some other account — this detector would have hidden the whole incident.
+    // Sheet rows with no account_id fall back to date + signed amount: the
+    // account column is not always populated, but the sign never comes off.
+    const signedAmount = (amount) => {
+      const s = Number(amount).toFixed(2);
+      return s === "-0.00" ? "0.00" : s;
+    };
+    const toKey = (date, t) => t.account_id
+      ? `${date}|${t.account_id}|${signedAmount(t.amount)}`
+      : `${date}|${signedAmount(t.amount)}`;
     const auditTxns = sheetTxns.filter(t => t.date >= auditStart);
     const missing = auditTxns.filter(t =>
       !dbKeys.has(toKey(t.date, t)) &&
@@ -1832,4 +1901,11 @@ initDb().then(async () => {
       }, next - now);
     })();
   });
+}).catch((e) => {
+  // Without this the failure is an unhandled rejection and app.listen never
+  // runs, so the machine sits there answering nothing. initDb now drops the old
+  // duplicate trigger, which needs table ownership — a DB role that lacks it
+  // fails here, and that has to be loud enough for the health check to catch.
+  console.error("FATAL: database initialization failed, server not starting:", e);
+  process.exit(1);
 });
