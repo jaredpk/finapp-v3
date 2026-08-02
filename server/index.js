@@ -19,6 +19,7 @@ import {
   createLinkSession, getLinkSession, deleteLinkSession,
   getUserItems, upsertUserItem, removeUserItem,
   getCursor, saveCursor, upsertTransactions,
+  clearCursors, listTransactionIds, getTransactionsByIds,
   getTransactions, getSpendingByCategory,
   deleteRemovedTransactions, populateSuggestedCategories, applySuggestedCategories,
   findDuplicateTransactions, deduplicateTransactions,
@@ -117,10 +118,14 @@ const plaidClient = new PlaidApi(plaidConfig);
 // advisory lock — a second sync is redundant with the one already running.
 const SYNC_LOCK_KEY = 4820147;
 
+// Returns { ran: false } when another sync holds the lock. Callers that need to
+// know the sync actually happened — the backfill replay — must check it rather
+// than assume, or they will report "nothing recovered" when the truth is
+// "nothing ran".
 async function syncTransactions() {
   if (!(await tryAdvisoryLock(SYNC_LOCK_KEY))) {
     console.log("sync already in progress, skipping");
-    return;
+    return { ran: false };
   }
   try {
     const items = await getUserItems();
@@ -163,6 +168,7 @@ async function syncTransactions() {
       }
     }
     if (allBalances.length) await upsertAccountBalances(today, allBalances);
+    return { ran: true, items: items.length };
   } finally {
     await releaseAdvisoryLock(SYNC_LOCK_KEY);
   }
@@ -1204,6 +1210,65 @@ app.post("/api/vehicles/:id/baseline", requireAuth, async (req, res) => {
     res.json({ vehicle: vehicles.find((v) => v.id === parseInt(req.params.id)) });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Backfill ──────────────────────────────────────────────────────────────────
+// Recovers transactions the old (date, ABS(amount)) dedup destroyed. Clearing
+// the cursors makes Plaid replay every item's full history; rows that survived
+// upsert onto themselves via ON CONFLICT (id), and rows that were deleted come
+// back. Idempotent — running it twice recovers the same set and changes nothing
+// the second time.
+//
+// This only became safe once the insert trigger and the startup sweep were both
+// gone. Against the old code a replay would have re-deleted the same rows, so
+// the guard below refuses to run if the trigger is somehow still attached
+// (a database whose role could not drop it — see initDb).
+app.post("/api/backfill/replay", requireAuth, async (req, res) => {
+  try {
+    const start = parseDateParam(req.query.start ?? req.body?.start);
+    const end = parseDateParam(req.query.end ?? req.body?.end);
+    if (start === null || end === null) {
+      return res.status(400).json({ error: "start and end must be single YYYY-MM-DD dates" });
+    }
+
+    const { rows: guard } = await pool.query(
+      `SELECT 1 FROM pg_trigger WHERE tgname = 'check_duplicate_transactions'`
+    );
+    if (guard.length > 0) {
+      return res.status(409).json({
+        error:
+          "Refusing to replay: the old duplicate trigger is still attached, so a replay " +
+          "would silently discard the same rows again. Drop it as the table owner first: " +
+          "DROP TRIGGER IF EXISTS check_duplicate_transactions ON transactions; " +
+          "DROP FUNCTION IF EXISTS prevent_duplicate_transactions();",
+      });
+    }
+
+    const before = new Set(await listTransactionIds({ startDate: start, endDate: end }));
+    const cursorsCleared = await clearCursors();
+    const sync = await syncTransactions();
+    if (!sync.ran) {
+      return res.status(409).json({
+        error: "A sync was already running, so the replay did not execute. Try again shortly.",
+        cursorsCleared,
+      });
+    }
+
+    const after = await listTransactionIds({ startDate: start, endDate: end });
+    const recoveredIds = after.filter((id) => !before.has(id));
+    res.json({
+      cursorsCleared,
+      itemsSynced: sync.items,
+      countBefore: before.size,
+      countAfter: after.length,
+      recoveredCount: recoveredIds.length,
+      recovered: await getTransactionsByIds(recoveredIds),
+      range: { start: start ?? null, end: end ?? null },
+    });
+  } catch (e) {
+    console.error("Backfill replay failed:", e);
+    res.status(500).json({ error: e.message });
   }
 });
 

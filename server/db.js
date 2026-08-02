@@ -557,6 +557,45 @@ export async function saveCursor(itemId, cursor) {
   );
 }
 
+// Clearing an item's cursor makes the next /transactions/sync replay that
+// item's full history as `added` instead of resuming where it left off. That is
+// the recovery path for rows the old ABS()-keyed dedup destroyed: Plaid resends
+// them, and ON CONFLICT (id) turns every row that survived into a no-op.
+//
+// Safe only because the two mechanisms that dropped rows on the way in are both
+// gone. Replaying while either was live would just delete the same rows again.
+// Cursors are trivially reproducible — the next sync writes a fresh one.
+export async function clearCursors(itemIds) {
+  const { rowCount } = itemIds?.length
+    ? await pool.query("DELETE FROM transaction_cursors WHERE item_id = ANY($1)", [itemIds])
+    : await pool.query("DELETE FROM transaction_cursors");
+  return rowCount;
+}
+
+// Id snapshot for the replay diff, so the caller can report exactly which rows
+// came back rather than just a count.
+export async function listTransactionIds({ startDate, endDate } = {}) {
+  const conditions = [];
+  const params = [];
+  let i = 1;
+  if (startDate) { conditions.push(`date >= $${i++}::date`); params.push(startDate); }
+  if (endDate) { conditions.push(`date <= $${i++}::date`); params.push(endDate); }
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const { rows } = await pool.query(`SELECT id FROM transactions ${where}`, params);
+  return rows.map((r) => r.id);
+}
+
+export async function getTransactionsByIds(ids) {
+  if (!ids?.length) return [];
+  const { rows } = await pool.query(
+    `SELECT id, TO_CHAR(date,'YYYY-MM-DD') AS date, merchant, amount::float AS amount,
+            account, plaid_category, status
+     FROM transactions WHERE id = ANY($1) ORDER BY date, amount`,
+    [ids]
+  );
+  return rows;
+}
+
 // ── Transactions (Perplexity schema) ──────────────────────────────────────────
 // Perplexity columns: id, date, merchant, amount, currency, account, payment_channel, plaid_category, status, created_at
 

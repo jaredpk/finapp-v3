@@ -324,6 +324,18 @@ export async function runDeduplication(groups) {
   return r.json();
 }
 
+// Asks Plaid to resend every item's full history, recovering transactions the
+// old duplicate logic deleted. Safe to run more than once — rows that are
+// already present upsert onto themselves.
+export async function replayBackfill(range) {
+  const r = await fetch(`${BASE}/backfill/replay`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify(range ?? {}),
+  });
+  return r.json();
+}
+
 // ── Cashflow ──────────────────────────────────────────────────────────────────
 export async function fetchCashflowPresets() {
   const r = await fetch(`${BASE}/cashflow/presets`, { headers: await authHeaders() });

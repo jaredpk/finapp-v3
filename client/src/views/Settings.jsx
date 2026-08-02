@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { getApiKey, generateApiKey, analyzeSimplifi, importSimplifi, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi, setPropertyBaselineApi, fetchManualAccounts, saveManualAccount, deleteManualAccountApi, downloadXlsx, saveAccountNickname, deleteAccountNicknameApi, getLastAudit, uploadAuditSheet, insertAuditTransactions, completeAudit, fetchImportedAccounts, clearImportedTransactions, fetchVehicles, saveVehicle, deleteVehicleApi, setVehicleBaselineApi, syncVehiclesApi, fetchLinkedInstitutions, removeLinkedInstitution } from "../api.js";
+import { getApiKey, generateApiKey, analyzeSimplifi, importSimplifi, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi, setPropertyBaselineApi, fetchManualAccounts, saveManualAccount, deleteManualAccountApi, downloadXlsx, saveAccountNickname, deleteAccountNicknameApi, getLastAudit, uploadAuditSheet, insertAuditTransactions, completeAudit, fetchImportedAccounts, clearImportedTransactions, fetchVehicles, saveVehicle, deleteVehicleApi, setVehicleBaselineApi, syncVehiclesApi, fetchLinkedInstitutions, removeLinkedInstitution, replayBackfill } from "../api.js";
 
 export default function Settings({ reloadData, user, accounts = [] }) {
   // Connected banks state
@@ -85,6 +85,8 @@ export default function Settings({ reloadData, user, accounts = [] }) {
 
   // Dedup state
   const [deduping, setDeduping]         = useState(false);
+  const [replaying, setReplaying]       = useState(false);
+  const [replayResult, setReplayResult] = useState(null);
   const [dupePreview, setDupePreview]   = useState(null);
   const [dupeResult, setDupeResult]     = useState(null);
   const [previewing, setPreviewing]     = useState(false);
@@ -404,6 +406,34 @@ export default function Settings({ reloadData, user, accounts = [] }) {
       next.has(i) ? next.delete(i) : next.add(i);
       return next;
     });
+  }
+
+  async function handleReplay() {
+    setReplaying(true);
+    setReplayResult(null);
+    try {
+      const res = await replayBackfill();
+      // The server refuses to replay while the old trigger is still attached,
+      // and 409s if a sync was already running. Both come back as `error`, and
+      // both are things the user can act on, so surface the text as-is.
+      if (res.error) {
+        setReplayResult({ message: res.error, rows: [] });
+        return;
+      }
+      const n = res.recoveredCount ?? 0;
+      setReplayResult({
+        message:
+          n === 0
+            ? `Nothing was missing — Plaid resent ${res.countAfter} transactions and all of them were already here.`
+            : `Recovered ${n} transaction${n !== 1 ? "s" : ""} that had been deleted:`,
+        rows: res.recovered ?? [],
+      });
+      if (reloadData) reloadData();
+    } catch (e) {
+      setReplayResult({ message: `Recovery failed: ${e.message}`, rows: [] });
+    } finally {
+      setReplaying(false);
+    }
   }
 
   async function handleDedupe() {
@@ -1287,6 +1317,31 @@ export default function Settings({ reloadData, user, accounts = [] }) {
         )}
         {clearResult && (
           <p style={clearResult.startsWith("Error") ? styles.importError : styles.importSuccess}>{clearResult}</p>
+        )}
+      </section>
+
+      {/* Recover deleted transactions */}
+      <section style={styles.card}>
+        <h2 style={styles.cardTitle}>Recover Missing Transactions</h2>
+        <p style={styles.description}>
+          Earlier versions deleted transactions that shared a date and amount with another
+          row — usually a credit, like a card payment or a refund. This asks Plaid to resend
+          everything and restores whatever is missing. Nothing is deleted, and running it
+          more than once is harmless.
+        </p>
+        <button style={styles.generateBtn} onClick={handleReplay} disabled={replaying}>
+          {replaying ? "Recovering… this can take a minute" : "Recover Missing Transactions"}
+        </button>
+        {replayResult && (
+          <div style={{ ...styles.dupeBox, marginTop: 12 }}>
+            <p style={{ ...styles.muted, marginBottom: 8 }}>{replayResult.message}</p>
+            {(replayResult.rows ?? []).map((t, i) => (
+              <div key={i} style={{ fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--text)", paddingLeft: 4 }}>
+                {t.date} — {t.merchant ?? "(no merchant)"} — {Number(t.amount) < 0 ? "credit" : "debit"}{" "}
+                ${Math.abs(Number(t.amount)).toFixed(2)} — acct: {String(t.account ?? "").slice(0, 10)}
+              </div>
+            ))}
+          </div>
         )}
       </section>
 
