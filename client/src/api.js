@@ -327,12 +327,19 @@ export async function runDeduplication(groups) {
 // Asks Plaid to resend every item's full history, recovering transactions the
 // old duplicate logic deleted. Safe to run more than once — rows that are
 // already present upsert onto themselves.
+// Starts the job and returns immediately — a full replay runs far longer than
+// the proxy will hold a request open. Poll getBackfillStatus for the result.
 export async function replayBackfill(range) {
   const r = await fetch(`${BASE}/backfill/replay`, {
     method: "POST",
     headers: await authHeaders(),
     body: JSON.stringify(range ?? {}),
   });
+  return r.json();
+}
+
+export async function getBackfillStatus() {
+  const r = await fetch(`${BASE}/backfill/status`, { headers: await authHeaders() });
   return r.json();
 }
 

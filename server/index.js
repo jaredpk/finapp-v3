@@ -118,57 +118,64 @@ const plaidClient = new PlaidApi(plaidConfig);
 // advisory lock — a second sync is redundant with the one already running.
 const SYNC_LOCK_KEY = 4820147;
 
-// Returns { ran: false } when another sync holds the lock. Callers that need to
-// know the sync actually happened — the backfill replay — must check it rather
-// than assume, or they will report "nothing recovered" when the truth is
-// "nothing ran".
+// The lock-free core. Only call it while holding SYNC_LOCK_KEY. The backfill
+// replay calls it directly because clearing cursors and syncing has to be one
+// indivisible step — a sync that slipped in between would consume the cleared
+// cursors and perform the replay itself, invisibly.
+async function syncTransactionsCore() {
+  const items = await getUserItems();
+  const today = new Date().toISOString().slice(0, 10);
+  const allBalances = [];
+  for (const { accessToken, itemId, institutionName } of items) {
+    let cursor = await getCursor(itemId);
+    let hasMore = true;
+    let lastAccounts = [];
+    while (hasMore) {
+      const r = await plaidClient.transactionsSync({ access_token: accessToken, cursor });
+
+      // 1. Delete transactions Plaid says are removed
+      const removedIds = (r.data.removed || []).map((t) => t.transaction_id).filter(Boolean);
+      if (removedIds.length > 0) await deleteRemovedTransactions(removedIds);
+
+      // 2. Delete stale pending rows that have now posted (avoid duplicates)
+      const stalePendingIds = [...(r.data.added || []), ...(r.data.modified || [])]
+        .map((t) => t.pending_transaction_id)
+        .filter(Boolean);
+      if (stalePendingIds.length > 0) await deleteRemovedTransactions(stalePendingIds);
+
+      // 3. Upsert added and modified
+      await upsertTransactions(r.data.added || []);
+      await upsertTransactions(r.data.modified || []);
+
+      if (r.data.accounts?.length) lastAccounts = r.data.accounts;
+      cursor = r.data.next_cursor;
+      hasMore = r.data.has_more;
+    }
+    await saveCursor(itemId, cursor);
+    for (const a of lastAccounts) {
+      allBalances.push({
+        account: a.name,
+        institution: institutionName,
+        type: a.subtype || a.type,
+        balance: a.balances.current,
+        available: a.balances.available ?? null,
+      });
+    }
+  }
+  if (allBalances.length) await upsertAccountBalances(today, allBalances);
+  return { ran: true, items: items.length };
+}
+
+// Returns { ran: false } when another sync holds the lock, so callers that need
+// to know the work actually happened can tell that apart from "it ran and found
+// nothing".
 async function syncTransactions() {
   if (!(await tryAdvisoryLock(SYNC_LOCK_KEY))) {
     console.log("sync already in progress, skipping");
     return { ran: false };
   }
   try {
-    const items = await getUserItems();
-    const today = new Date().toISOString().slice(0, 10);
-    const allBalances = [];
-    for (const { accessToken, itemId, institutionName } of items) {
-      let cursor = await getCursor(itemId);
-      let hasMore = true;
-      let lastAccounts = [];
-      while (hasMore) {
-        const r = await plaidClient.transactionsSync({ access_token: accessToken, cursor });
-
-        // 1. Delete transactions Plaid says are removed
-        const removedIds = (r.data.removed || []).map((t) => t.transaction_id).filter(Boolean);
-        if (removedIds.length > 0) await deleteRemovedTransactions(removedIds);
-
-        // 2. Delete stale pending rows that have now posted (avoid duplicates)
-        const stalePendingIds = [...(r.data.added || []), ...(r.data.modified || [])]
-          .map((t) => t.pending_transaction_id)
-          .filter(Boolean);
-        if (stalePendingIds.length > 0) await deleteRemovedTransactions(stalePendingIds);
-
-        // 3. Upsert added and modified
-        await upsertTransactions(r.data.added || []);
-        await upsertTransactions(r.data.modified || []);
-
-        if (r.data.accounts?.length) lastAccounts = r.data.accounts;
-        cursor = r.data.next_cursor;
-        hasMore = r.data.has_more;
-      }
-      await saveCursor(itemId, cursor);
-      for (const a of lastAccounts) {
-        allBalances.push({
-          account: a.name,
-          institution: institutionName,
-          type: a.subtype || a.type,
-          balance: a.balances.current,
-          available: a.balances.available ?? null,
-        });
-      }
-    }
-    if (allBalances.length) await upsertAccountBalances(today, allBalances);
-    return { ran: true, items: items.length };
+    return await syncTransactionsCore();
   } finally {
     await releaseAdvisoryLock(SYNC_LOCK_KEY);
   }
@@ -1224,6 +1231,62 @@ app.post("/api/vehicles/:id/baseline", requireAuth, async (req, res) => {
 // gone. Against the old code a replay would have re-deleted the same rows, so
 // the guard below refuses to run if the trigger is somehow still attached
 // (a database whose role could not drop it — see initDb).
+// A full replay re-pulls every item's history and inserts row by row, which can
+// run well past the proxy's request timeout. Returning the result inline meant a
+// recovery that actually succeeded would surface to the user as a parse error on
+// a gateway HTML page. So the work runs detached and the client polls.
+//
+// Job state is in-memory: a machine restart mid-replay loses it. That is honest
+// rather than harmful — the replay is idempotent, so the status endpoint reports
+// the loss and the user can simply run it again.
+let backfillJob = null;
+
+async function runBackfillJob({ start, end }) {
+  // Hold the sync lock across the whole job. Clearing cursors and syncing has to
+  // be indivisible: a concurrent sync that started between the two would consume
+  // the cleared cursors and do the replay itself, invisibly.
+  if (!(await tryAdvisoryLock(SYNC_LOCK_KEY))) {
+    backfillJob = {
+      ...backfillJob,
+      status: "error",
+      finishedAt: new Date().toISOString(),
+      error:
+        "A transaction sync was already running, so nothing was changed. " +
+        "Wait a few seconds and run it again.",
+    };
+    return;
+  }
+  try {
+    const scope = { startDate: start, endDate: end, plaidNativeOnly: true };
+    const before = new Set(await listTransactionIds(scope));
+    const cursorsCleared = await clearCursors();
+    const sync = await syncTransactionsCore();
+    const after = await listTransactionIds(scope);
+    const addedIds = after.filter((id) => !before.has(id));
+    backfillJob = {
+      ...backfillJob,
+      status: "done",
+      finishedAt: new Date().toISOString(),
+      cursorsCleared,
+      itemsSynced: sync.items,
+      countBefore: before.size,
+      countAfter: after.length,
+      addedCount: addedIds.length,
+      added: await getTransactionsByIds(addedIds),
+    };
+  } catch (e) {
+    console.error("Backfill replay failed:", e);
+    backfillJob = {
+      ...backfillJob,
+      status: "error",
+      finishedAt: new Date().toISOString(),
+      error: e.message,
+    };
+  } finally {
+    await releaseAdvisoryLock(SYNC_LOCK_KEY);
+  }
+}
+
 app.post("/api/backfill/replay", requireAuth, async (req, res) => {
   try {
     const start = parseDateParam(req.query.start ?? req.body?.start);
@@ -1231,45 +1294,50 @@ app.post("/api/backfill/replay", requireAuth, async (req, res) => {
     if (start === null || end === null) {
       return res.status(400).json({ error: "start and end must be single YYYY-MM-DD dates" });
     }
+    if (backfillJob?.status === "running") {
+      return res.status(409).json({ error: "A recovery is already running.", status: "running" });
+    }
 
+    // Checked before anything mutates, so a refusal leaves the database untouched.
     const { rows: guard } = await pool.query(
-      `SELECT 1 FROM pg_trigger WHERE tgname = 'check_duplicate_transactions'`
+      `SELECT 1 FROM pg_trigger t JOIN pg_class c ON t.tgrelid = c.oid
+       WHERE t.tgname = 'check_duplicate_transactions' AND c.relname = 'transactions'`
     );
     if (guard.length > 0) {
       return res.status(409).json({
         error:
-          "Refusing to replay: the old duplicate trigger is still attached, so a replay " +
-          "would silently discard the same rows again. Drop it as the table owner first: " +
+          "Refusing to run: the old duplicate trigger is still attached, so a replay " +
+          "would feed these rows straight back into the logic that deleted them. " +
+          "Drop it as the table owner first: " +
           "DROP TRIGGER IF EXISTS check_duplicate_transactions ON transactions; " +
           "DROP FUNCTION IF EXISTS prevent_duplicate_transactions();",
       });
     }
 
-    const before = new Set(await listTransactionIds({ startDate: start, endDate: end }));
-    const cursorsCleared = await clearCursors();
-    const sync = await syncTransactions();
-    if (!sync.ran) {
-      return res.status(409).json({
-        error: "A sync was already running, so the replay did not execute. Try again shortly.",
-        cursorsCleared,
-      });
-    }
-
-    const after = await listTransactionIds({ startDate: start, endDate: end });
-    const recoveredIds = after.filter((id) => !before.has(id));
-    res.json({
-      cursorsCleared,
-      itemsSynced: sync.items,
-      countBefore: before.size,
-      countAfter: after.length,
-      recoveredCount: recoveredIds.length,
-      recovered: await getTransactionsByIds(recoveredIds),
-      range: { start: start ?? null, end: end ?? null },
+    backfillJob = { status: "running", startedAt: new Date().toISOString(), range: { start: start ?? null, end: end ?? null } };
+    // Detached on purpose, but never unhandled: an escaping rejection would be
+    // fatal on Node 22, and the one call outside the job's own try/catch is the
+    // lock acquisition.
+    runBackfillJob({ start, end }).catch((e) => {
+      console.error("Backfill job crashed:", e);
+      backfillJob = {
+        ...backfillJob,
+        status: "error",
+        finishedAt: new Date().toISOString(),
+        error: e.message,
+      };
     });
+    res.status(202).json({ status: "running", startedAt: backfillJob.startedAt });
   } catch (e) {
-    console.error("Backfill replay failed:", e);
+    console.error("Backfill replay failed to start:", e);
     res.status(500).json({ error: e.message });
   }
+});
+
+app.get("/api/backfill/status", requireAuth, async (_req, res) => {
+  // No job means either nothing has run or the machine restarted mid-run. Both
+  // are reported as idle; the client explains the second case.
+  res.json(backfillJob ?? { status: "idle" });
 });
 
 // ── Deduplication ─────────────────────────────────────────────────────────────

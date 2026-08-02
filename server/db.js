@@ -565,21 +565,34 @@ export async function saveCursor(itemId, cursor) {
 // Safe only because the two mechanisms that dropped rows on the way in are both
 // gone. Replaying while either was live would just delete the same rows again.
 // Cursors are trivially reproducible — the next sync writes a fresh one.
+// Passing an explicit empty array clears nothing. Only omitting the argument
+// entirely means "every item" — an empty list is a caller with nothing to do,
+// not a caller asking to wipe them all.
 export async function clearCursors(itemIds) {
-  const { rowCount } = itemIds?.length
-    ? await pool.query("DELETE FROM transaction_cursors WHERE item_id = ANY($1)", [itemIds])
-    : await pool.query("DELETE FROM transaction_cursors");
+  if (Array.isArray(itemIds)) {
+    if (itemIds.length === 0) return 0;
+    const { rowCount } = await pool.query(
+      "DELETE FROM transaction_cursors WHERE item_id = ANY($1)",
+      [itemIds]
+    );
+    return rowCount;
+  }
+  const { rowCount } = await pool.query("DELETE FROM transaction_cursors");
   return rowCount;
 }
 
 // Id snapshot for the replay diff, so the caller can report exactly which rows
 // came back rather than just a count.
-export async function listTransactionIds({ startDate, endDate } = {}) {
+// plaidNativeOnly excludes csv_/simplifi_ rows. A replay only ever affects rows
+// Plaid manages, so counting imported rows alongside them would report a total
+// that has nothing to do with what the replay did.
+export async function listTransactionIds({ startDate, endDate, plaidNativeOnly = false } = {}) {
   const conditions = [];
   const params = [];
   let i = 1;
   if (startDate) { conditions.push(`date >= $${i++}::date`); params.push(startDate); }
   if (endDate) { conditions.push(`date <= $${i++}::date`); params.push(endDate); }
+  if (plaidNativeOnly) conditions.push(`id NOT LIKE 'csv_%' AND id NOT LIKE 'simplifi_%'`);
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const { rows } = await pool.query(`SELECT id FROM transactions ${where}`, params);
   return rows.map((r) => r.id);

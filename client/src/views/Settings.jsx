@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { getApiKey, generateApiKey, analyzeSimplifi, importSimplifi, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi, setPropertyBaselineApi, fetchManualAccounts, saveManualAccount, deleteManualAccountApi, downloadXlsx, saveAccountNickname, deleteAccountNicknameApi, getLastAudit, uploadAuditSheet, insertAuditTransactions, completeAudit, fetchImportedAccounts, clearImportedTransactions, fetchVehicles, saveVehicle, deleteVehicleApi, setVehicleBaselineApi, syncVehiclesApi, fetchLinkedInstitutions, removeLinkedInstitution, replayBackfill } from "../api.js";
+import { getApiKey, generateApiKey, analyzeSimplifi, importSimplifi, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi, setPropertyBaselineApi, fetchManualAccounts, saveManualAccount, deleteManualAccountApi, downloadXlsx, saveAccountNickname, deleteAccountNicknameApi, getLastAudit, uploadAuditSheet, insertAuditTransactions, completeAudit, fetchImportedAccounts, clearImportedTransactions, fetchVehicles, saveVehicle, deleteVehicleApi, setVehicleBaselineApi, syncVehiclesApi, fetchLinkedInstitutions, removeLinkedInstitution, replayBackfill, getBackfillStatus } from "../api.js";
 
 export default function Settings({ reloadData, user, accounts = [] }) {
   // Connected banks state
@@ -408,27 +408,67 @@ export default function Settings({ reloadData, user, accounts = [] }) {
     });
   }
 
+  function describeReplay(job) {
+    const n = job.addedCount ?? 0;
+    if (n === 0) {
+      return {
+        message:
+          `Nothing was missing. Plaid resent your history and all ${job.countAfter} ` +
+          `of its transactions were already in finapp.`,
+        rows: [],
+      };
+    }
+    // Deliberately "added", not "recovered": this is every row Plaid returned
+    // that finapp did not have. Most will be transactions the old dedup deleted,
+    // but genuinely new activity since the last sync lands here too. The dates
+    // below tell them apart — anything from a past month is a recovery.
+    return {
+      message:
+        `Added ${n} transaction${n !== 1 ? "s" : ""} that Plaid had but finapp did not. ` +
+        `Older dates are rows the previous version deleted; recent ones may just be new activity.`,
+      rows: job.added ?? [],
+    };
+  }
+
   async function handleReplay() {
     setReplaying(true);
-    setReplayResult(null);
+    setReplayResult({ message: "Asking Plaid to resend your history…", rows: [] });
     try {
-      const res = await replayBackfill();
-      // The server refuses to replay while the old trigger is still attached,
-      // and 409s if a sync was already running. Both come back as `error`, and
-      // both are things the user can act on, so surface the text as-is.
-      if (res.error) {
-        setReplayResult({ message: res.error, rows: [] });
+      const started = await replayBackfill();
+      // The server refuses outright if the old trigger is still attached, or if
+      // a recovery is already running. Both are actionable, so show them as-is.
+      if (started.error) {
+        setReplayResult({ message: started.error, rows: [] });
         return;
       }
-      const n = res.recoveredCount ?? 0;
+      // The job outlives the request, so poll rather than waiting on it. A
+      // machine restart mid-run drops the job back to idle; say so plainly
+      // instead of polling forever.
+      for (let i = 0; i < 300; i++) {
+        await new Promise((r) => setTimeout(r, 2000));
+        const job = await getBackfillStatus();
+        if (job.status === "running") continue;
+        if (job.status === "error") {
+          setReplayResult({ message: job.error || "Recovery failed.", rows: [] });
+          return;
+        }
+        if (job.status === "idle") {
+          setReplayResult({
+            message:
+              "The server restarted while recovering, so the result was lost. " +
+              "Nothing was harmed — check your transactions, and run it again if anything is still missing.",
+            rows: [],
+          });
+          return;
+        }
+        setReplayResult(describeReplay(job));
+        if (reloadData) reloadData();
+        return;
+      }
       setReplayResult({
-        message:
-          n === 0
-            ? `Nothing was missing — Plaid resent ${res.countAfter} transactions and all of them were already here.`
-            : `Recovered ${n} transaction${n !== 1 ? "s" : ""} that had been deleted:`,
-        rows: res.recovered ?? [],
+        message: "Still running after 10 minutes. It may still finish — reload this page shortly to see the result.",
+        rows: [],
       });
-      if (reloadData) reloadData();
     } catch (e) {
       setReplayResult({ message: `Recovery failed: ${e.message}`, rows: [] });
     } finally {
@@ -1330,7 +1370,7 @@ export default function Settings({ reloadData, user, accounts = [] }) {
           more than once is harmless.
         </p>
         <button style={styles.generateBtn} onClick={handleReplay} disabled={replaying}>
-          {replaying ? "Recovering… this can take a minute" : "Recover Missing Transactions"}
+          {replaying ? "Recovering… this can take several minutes" : "Recover Missing Transactions"}
         </button>
         {replayResult && (
           <div style={{ ...styles.dupeBox, marginTop: 12 }}>
