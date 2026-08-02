@@ -45,11 +45,15 @@ export default function App() {
   if (!user) {
     return (
       <div style={loginStyles.container}>
-        <div style={{ textAlign: "center" }}>
-          <p style={{ color: "var(--muted)", marginBottom: 16 }}>
-            Session expired. Reload to sign in again through the portal.
-          </p>
-          <button onClick={() => window.location.reload()} style={loginStyles.signOutBtn}>Reload</button>
+        <div style={loginStyles.card}>
+          <div style={loginStyles.wordmark}>fin<span style={{ color: "#6366f1" }}>app</span></div>
+          <p style={loginStyles.subtitle}>Sign in to manage your finances</p>
+          <button
+            onClick={() => { window.location.href = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/auth/login`; }}
+            style={loginStyles.googleBtn}
+          >
+            Sign in with WorkOS
+          </button>
         </div>
       </div>
     );
@@ -191,7 +195,7 @@ function AuthenticatedApp({ user }) {
         onConnect={openPlaid}
         connecting={connecting}
         user={user}
-        onSignOut={() => { window.location.href = "/cdn-cgi/access/logout"; }}
+        onSignOut={() => { window.location.href = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/auth/logout`; }}
         auditOverdue={auditOverdue}
         isMobile={isMobile}
       />
