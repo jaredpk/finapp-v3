@@ -9,6 +9,8 @@ import ws from "ws";
 import { Configuration, PlaidApi, PlaidEnvironments, Products, CountryCode } from "plaid";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { verifyAccess, accessConfigured } from "./auth.js";
+import { WorkOS } from "@workos-inc/node";
+import cookieParser from "cookie-parser";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { z } from "zod";
@@ -56,6 +58,11 @@ const isProd = process.env.NODE_ENV === "production";
 const APP_URL = process.env.APP_URL || "http://localhost:3001";
 const ALLOWED_EMAIL = "jaredpk@gmail.com";
 
+// ── WorkOS AuthKit client ─────────────────────────────────────────────────────
+const workos = new WorkOS(process.env.WORKOS_API_KEY, {
+  clientId: process.env.WORKOS_CLIENT_ID,
+});
+
 // ── Supabase admin client (for JWT verification) ──────────────────────────────
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -91,6 +98,7 @@ app.use(cors({
   credentials: true,
 }));
 app.use(express.json({ limit: "50mb" }));
+app.use(cookieParser());
 
 if (isProd) {
   app.use(express.static(path.join(__dirname, "../client/dist")));
@@ -225,29 +233,59 @@ async function applyFHFADrift() {
 }
 
 // ── Auth helpers ──────────────────────────────────────────────────────────────
-// Browser-facing routes authenticate with Cloudflare Access. The app carries no
-// user model — ALLOWED_EMAIL is hardcoded and req._user is never read
-// downstream — so Access replaces the old Supabase login outright rather than
-// sitting in front of it. One sign-in at the portal covers every module.
-async function requireAuth(req, res, next) {
-  if (!accessConfigured) {
-    // Fail closed in production. This gates real financial data; an
-    // unconfigured deploy silently serving it is the failure worth preventing.
-    if (isProd) {
-      return res.status(403).json({
-        error: "Cloudflare Access is not configured. Set CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD.",
-      });
+// Browser-facing routes authenticate with WorkOS AuthKit. The app carries no
+// user model — ALLOWED_EMAIL is hardcoded — so WorkOS replaces the old
+// Cloudflare Access login. Falls back to Cloudflare Access if configured.
+
+async function verifyWorkOSSession(req) {
+  const sessionCookie = req.cookies["wos-session"];
+  if (!sessionCookie || !process.env.WORKOS_COOKIE_PASSWORD) return null;
+
+  try {
+    const session = workos.userManagement.loadSealedSession({
+      sessionData: sessionCookie,
+      cookiePassword: process.env.WORKOS_COOKIE_PASSWORD,
+    });
+    const { authenticated, user } = await session.authenticate();
+    if (authenticated && user?.email) {
+      return { email: user.email, user };
     }
+  } catch {
+    // Invalid or expired session
+  }
+  return null;
+}
+
+async function requireAuth(req, res, next) {
+  // Try WorkOS session first
+  const workosIdentity = await verifyWorkOSSession(req);
+  if (workosIdentity) {
+    if (workosIdentity.email !== ALLOWED_EMAIL) {
+      return res.status(403).json({ error: "Access denied" });
+    }
+    req._user = workosIdentity;
+    return next();
+  }
+
+  // Fall back to Cloudflare Access
+  if (accessConfigured) {
+    const identity = await verifyAccess(req);
+    if (identity) {
+      if (identity.email !== ALLOWED_EMAIL) {
+        return res.status(403).json({ error: "Access denied" });
+      }
+      req._user = identity;
+      return next();
+    }
+  }
+
+  // Dev mode fallback
+  if (!isProd && !accessConfigured && !process.env.WORKOS_API_KEY) {
     req._user = { email: ALLOWED_EMAIL };
     return next();
   }
 
-  const identity = await verifyAccess(req);
-  if (!identity) return res.status(401).json({ error: "Unauthorized" });
-  if (identity.email !== ALLOWED_EMAIL) return res.status(403).json({ error: "Access denied" });
-
-  req._user = identity;
-  next();
+  return res.status(401).json({ error: "Unauthorized" });
 }
 
 async function requireApiKeyOrAuth(req, res, next) {
@@ -271,7 +309,13 @@ async function requireApiKeyOrAuth(req, res, next) {
       return next();
     }
   }
-  // Finally, a browser arriving through the portal.
+  // Try WorkOS session
+  const workosIdentity = await verifyWorkOSSession(req);
+  if (workosIdentity && workosIdentity.email === ALLOWED_EMAIL) {
+    req._user = workosIdentity;
+    return next();
+  }
+  // Fall back to Cloudflare Access
   const identity = await verifyAccess(req);
   if (identity && identity.email === ALLOWED_EMAIL) {
     req._user = identity;
@@ -306,7 +350,99 @@ app.get("/api/me", requireAuth, (req, res) => res.json({ email: req._user.email 
 // ── Health ────────────────────────────────────────────────────────────────────
 app.get("/api/health", (_, res) => res.json({ ok: true }));
 
+// ── WorkOS AuthKit routes ─────────────────────────────────────────────────────
+app.get("/auth/login", (req, res) => {
+  const authorizationUrl = workos.userManagement.getAuthorizationUrl({
+    provider: "authkit",
+    redirectUri: process.env.WORKOS_REDIRECT_URI || "http://localhost:5173/callback",
+    clientId: process.env.WORKOS_CLIENT_ID,
+  });
+  res.redirect(authorizationUrl);
+});
 
+app.get("/callback", async (req, res) => {
+  const code = req.query.code;
+  if (!code) {
+    return res.status(400).send("No code provided");
+  }
+
+  try {
+    const authenticateResponse = await workos.userManagement.authenticateWithCode({
+      clientId: process.env.WORKOS_CLIENT_ID,
+      code,
+      session: {
+        sealSession: true,
+        cookiePassword: process.env.WORKOS_COOKIE_PASSWORD,
+      },
+    });
+
+    const { user, sealedSession } = authenticateResponse;
+
+    // Verify email matches allowed user
+    if (user.email !== ALLOWED_EMAIL) {
+      return res.status(403).send("Access denied");
+    }
+
+    res.cookie("wos-session", sealedSession, {
+      path: "/",
+      httpOnly: true,
+      secure: isProd,
+      sameSite: "lax",
+    });
+
+    // Redirect to the app (respect URL_PREFIX for production)
+    const redirectPath = URL_PREFIX ? URL_PREFIX : "/";
+    return res.redirect(redirectPath);
+  } catch (error) {
+    console.error("WorkOS callback error:", error.message);
+    return res.redirect("/auth/login");
+  }
+});
+
+app.post("/auth/logout", async (req, res) => {
+  const sessionCookie = req.cookies["wos-session"];
+
+  if (sessionCookie && process.env.WORKOS_COOKIE_PASSWORD) {
+    try {
+      const session = workos.userManagement.loadSealedSession({
+        sessionData: sessionCookie,
+        cookiePassword: process.env.WORKOS_COOKIE_PASSWORD,
+      });
+      const logoutUrl = await session.getLogoutUrl();
+      res.clearCookie("wos-session");
+      return res.redirect(logoutUrl);
+    } catch {
+      // Session invalid, just clear cookie
+    }
+  }
+
+  res.clearCookie("wos-session");
+  const redirectPath = URL_PREFIX ? URL_PREFIX : "/";
+  res.redirect(redirectPath);
+});
+
+// GET version for simple link-based logout
+app.get("/auth/logout", async (req, res) => {
+  const sessionCookie = req.cookies["wos-session"];
+
+  if (sessionCookie && process.env.WORKOS_COOKIE_PASSWORD) {
+    try {
+      const session = workos.userManagement.loadSealedSession({
+        sessionData: sessionCookie,
+        cookiePassword: process.env.WORKOS_COOKIE_PASSWORD,
+      });
+      const logoutUrl = await session.getLogoutUrl();
+      res.clearCookie("wos-session");
+      return res.redirect(logoutUrl);
+    } catch {
+      // Session invalid, just clear cookie
+    }
+  }
+
+  res.clearCookie("wos-session");
+  const redirectPath = URL_PREFIX ? URL_PREFIX : "/";
+  res.redirect(redirectPath);
+});
 
 // ── Plaid Link page ───────────────────────────────────────────────────────────
 app.get("/link", async (req, res) => {
