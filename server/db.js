@@ -387,10 +387,29 @@ export async function initDb() {
   // discarded the row with no error and no trace. csv_ rows were exempt, so the
   // only rows it ever destroyed were Plaid-native and imported ones. Idempotent —
   // safe to run on every boot, including databases that never had the trigger.
-  await pool.query(`
-    DROP TRIGGER IF EXISTS check_duplicate_transactions ON transactions;
-    DROP FUNCTION IF EXISTS prevent_duplicate_transactions();
-  `);
+  //
+  // Isolated from the fail-fast init path on purpose. DROP TRIGGER requires
+  // ownership of the table, so a role that can read and write transactions can
+  // still fail here. That must not take the app down: booting with the old
+  // trigger in place is bad — it keeps discarding credits — but it is strictly
+  // better than not booting at all, and the error below says exactly what to
+  // fix. Every other guard against the ABS() key lives in application code and
+  // is unaffected by this statement failing.
+  try {
+    await pool.query(`
+      DROP TRIGGER IF EXISTS check_duplicate_transactions ON transactions;
+      DROP FUNCTION IF EXISTS prevent_duplicate_transactions();
+    `);
+  } catch (e) {
+    console.error(
+      "MIGRATION FAILED: could not drop check_duplicate_transactions. The old " +
+        "duplicate guard is STILL ACTIVE and will keep silently discarding " +
+        "credits on insert. Drop it manually as the table owner:\n" +
+        "  DROP TRIGGER IF EXISTS check_duplicate_transactions ON transactions;\n" +
+        "  DROP FUNCTION IF EXISTS prevent_duplicate_transactions();\n" +
+        `Cause: ${e.message}`
+    );
+  }
 
   // Migrate assignments: drop clerk_user_id and fix primary key if needed
   await pool.query(`
