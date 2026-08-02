@@ -525,13 +525,15 @@ const ACCOUNT_TYPE_MAP = {
   savings:      "depository",
   "money market":"depository",
   hsa:          "depository",
-  cd:           "depository",
   brokerage:    "investment",
   investment:   "investment",
   ira:          "investment",
   "401k":       "investment",
   "401(k)":     "investment",
   roth:         "investment",
+  // After the investment keys on purpose: imported account types are free text,
+  // and "Roth IRA CD" / "Vanguard Brokerage CD" are investment accounts first.
+  cd:           "depository",
   "credit card":"credit",
   credit:       "credit",
   mortgage:     "loan",
@@ -540,9 +542,15 @@ const ACCOUNT_TYPE_MAP = {
   heloc:        "loan",
 };
 
+// Keys short enough to hide inside unrelated words are matched as whole words
+// only: as a bare substring, "cd" turned "ABCD Fund" into a depository account.
+const WHOLE_WORD_TYPE_KEYS = new Set(["cd"]);
+
 function normalizePlaidType(rawType) {
   const lower = (rawType || "").toLowerCase();
-  const match = Object.keys(ACCOUNT_TYPE_MAP).find((k) => lower.includes(k));
+  const match = Object.keys(ACCOUNT_TYPE_MAP).find((k) =>
+    WHOLE_WORD_TYPE_KEYS.has(k) ? new RegExp(`\\b${k}\\b`).test(lower) : lower.includes(k)
+  );
   return match ? ACCOUNT_TYPE_MAP[match] : "other";
 }
 
@@ -958,14 +966,23 @@ app.post("/api/simplifi/import", requireAuth, async (req, res) => {
         [row.date, row.dbAmount, resolvedAccount, row.payee || null]
       );
       const catId = isJunkSimplifiCategory(row.category) ? null : (allMappings[row.category] || null);
-      const suppress = (reason) => recordSuppression({
-        source: 'simplifiImport',
-        date: row.date,
-        merchant: row.payee,
-        amount: row.dbAmount,
-        account: resolvedAccount,
-        reason,
-      });
+      // Logging a suppression must never abort the import it is logging — an
+      // unparseable date on one row would otherwise leave the rest unimported
+      // with earlier rows already written.
+      const suppress = async (reason) => {
+        try {
+          await recordSuppression({
+            source: 'simplifiImport',
+            date: row.date,
+            merchant: row.payee,
+            amount: row.dbAmount,
+            account: resolvedAccount,
+            reason,
+          });
+        } catch (e) {
+          console.error("Failed to record suppression:", e.message);
+        }
+      };
       if (matches.length > 1) {
         // More than one candidate means we cannot tell which row this Simplifi
         // line describes. Categorizing all of them is how unrelated rows got
@@ -1191,72 +1208,109 @@ app.post("/api/vehicles/:id/baseline", requireAuth, async (req, res) => {
 });
 
 // ── Deduplication ─────────────────────────────────────────────────────────────
+// start/end reach SQL as ::date parameters. Express hands back an array when a
+// query key repeats (?start=a&start=b) and Postgres rejects anything that is not
+// a date, so both have to be caught before the value gets near a query.
+// Returns undefined when absent/blank, the trimmed date when valid, null when not.
+function parseDateParam(value) {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") return null;
+  const s = value.trim();
+  if (s === "") return undefined;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  const d = new Date(`${s}T00:00:00Z`);
+  if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== s) return null;
+  return s;
+}
+
 app.get("/api/deduplicate/debug", requireAuth, async (req, res) => {
-  const [sample, idStats, dupeRows, legacyKeyRows] = await Promise.all([
-    pool.query(`SELECT id, date, amount::float, merchant, account, created_at FROM transactions ORDER BY date DESC, created_at DESC LIMIT 20`),
-    pool.query(`
-      SELECT
-        COUNT(*) FILTER (WHERE id LIKE 'simplifi_%') AS simplifi,
-        COUNT(*) FILTER (WHERE id ~ '^[0-9a-f-]{36}$') AS uuid,
-        COUNT(*) FILTER (WHERE id NOT LIKE 'simplifi_%' AND id !~ '^[0-9a-f-]{36}$') AS plaid,
-        COUNT(*) AS total
-      FROM transactions`),
-    // Grouped on the real dedup key (date + account + SIGNED amount), so this
-    // view agrees with what /api/deduplicate would actually propose.
-    pool.query(`
-      SELECT date, account, ROUND(amount::numeric,2) AS amount, COUNT(*) AS cnt,
-             array_agg(id ORDER BY created_at) AS ids,
-             array_agg(merchant ORDER BY created_at) AS merchants
-      FROM transactions
-      GROUP BY date, account, ROUND(amount::numeric,2)
-      HAVING COUNT(*) > 1
-      ORDER BY date DESC LIMIT 20`),
-    // Deliberately still keyed on (date, ABS(amount)) with no account: this is
-    // the key the old dedup used, so it lists the pairs that logic would have
-    // collapsed — a card payment against its funding leg, a charge against its
-    // refund. Useful for finding historical damage; never a delete candidate.
-    pool.query(`
-      SELECT date, ROUND(ABS(amount)::numeric,2) AS abs_amount, COUNT(*) AS cnt,
-             array_agg(id ORDER BY created_at) AS ids,
-             array_agg(merchant ORDER BY created_at) AS merchants,
-             array_agg(account ORDER BY created_at) AS accounts,
-             array_agg(amount::float ORDER BY created_at) AS amounts
-      FROM transactions
-      GROUP BY date, ROUND(ABS(amount)::numeric,2)
-      HAVING COUNT(*) > 1
-      ORDER BY date DESC LIMIT 20`),
-  ]);
-  res.json({
-    sample: sample.rows,
-    idStats: idStats.rows[0],
-    dupeRows: dupeRows.rows,
-    atRiskUnderOldKey: legacyKeyRows.rows,
-  });
+  try {
+    const [sample, idStats, dupeRows, legacyKeyRows] = await Promise.all([
+      pool.query(`SELECT id, date, amount::float, merchant, account, created_at FROM transactions ORDER BY date DESC, created_at DESC LIMIT 20`),
+      pool.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE id LIKE 'simplifi_%') AS simplifi,
+          COUNT(*) FILTER (WHERE id ~ '^[0-9a-f-]{36}$') AS uuid,
+          COUNT(*) FILTER (WHERE id NOT LIKE 'simplifi_%' AND id !~ '^[0-9a-f-]{36}$') AS plaid,
+          COUNT(*) AS total
+        FROM transactions`),
+      // Grouped on the real dedup key (date + account + SIGNED amount), so this
+      // view agrees with what /api/deduplicate would actually propose. The
+      // per-row accounts/amounts arrays are what the Settings panel renders
+      // beside each id, so they ship with every group.
+      pool.query(`
+        SELECT date, account, ROUND(amount::numeric,2) AS amount, COUNT(*) AS cnt,
+               array_agg(id ORDER BY created_at) AS ids,
+               array_agg(merchant ORDER BY created_at) AS merchants,
+               array_agg(account ORDER BY created_at) AS accounts,
+               array_agg(amount::float ORDER BY created_at) AS amounts
+        FROM transactions
+        GROUP BY date, account, ROUND(amount::numeric,2)
+        HAVING COUNT(*) > 1
+        ORDER BY date DESC LIMIT 20`),
+      // Deliberately still keyed on (date, ABS(amount)) with no account: this is
+      // the key the old dedup used, so it lists the pairs that logic would have
+      // collapsed — a card payment against its funding leg, a charge against its
+      // refund. Useful for finding historical damage; never a delete candidate.
+      pool.query(`
+        SELECT date, ROUND(ABS(amount)::numeric,2) AS abs_amount, COUNT(*) AS cnt,
+               array_agg(id ORDER BY created_at) AS ids,
+               array_agg(merchant ORDER BY created_at) AS merchants,
+               array_agg(account ORDER BY created_at) AS accounts,
+               array_agg(amount::float ORDER BY created_at) AS amounts
+        FROM transactions
+        GROUP BY date, ROUND(ABS(amount)::numeric,2)
+        HAVING COUNT(*) > 1
+        ORDER BY date DESC LIMIT 20`),
+    ]);
+    res.json({
+      sample: sample.rows,
+      idStats: idStats.rows[0],
+      dupeRows: dupeRows.rows,
+      atRiskUnderOldKey: legacyKeyRows.rows,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // start/end bound the scan; it defaults to the last 24 months rather than
 // reading every transaction ever into memory.
 app.get("/api/deduplicate", requireAuth, async (req, res) => {
-  const { start, end } = req.query;
-  const dupes = await findDuplicateTransactions({ startDate: start, endDate: end });
-  const toRemove = dupes.reduce((n, d) => n + d.remove.length, 0);
-  res.json({ groups: dupes.length, toRemove, preview: dupes });
+  try {
+    const start = parseDateParam(req.query.start);
+    const end = parseDateParam(req.query.end);
+    if (start === null || end === null) return res.status(400).json({ error: "start and end must be single YYYY-MM-DD dates" });
+    const dupes = await findDuplicateTransactions({ startDate: start, endDate: end });
+    const toRemove = dupes.reduce((n, d) => n + d.remove.length, 0);
+    res.json({ groups: dupes.length, toRemove, preview: dupes });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post("/api/deduplicate", requireAuth, async (req, res) => {
-  const { groups } = req.body || {};
-  if (groups !== undefined && !Array.isArray(groups)) return res.status(400).json({ error: "groups must be an array" });
-  // rejected: ids the caller asked us to delete that are Plaid-native, which
-  // deduplicateTransactions refuses on principle.
-  const { deleted, rejected } = await deduplicateTransactions(groups ?? undefined);
-  res.json({ deleted, rejected });
+  try {
+    const { groups } = req.body || {};
+    if (groups !== undefined && !Array.isArray(groups)) return res.status(400).json({ error: "groups must be an array" });
+    // rejected: ids the caller asked us to delete that deduplicateTransactions
+    // refused — Plaid-native rows, or rows in a group whose keeper is invalid.
+    const { deleted, rejected } = await deduplicateTransactions(groups ?? undefined);
+    res.json({ deleted, rejected });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Every row some code path declined to store, newest first. If a transaction
 // you expected is missing, this is the first place to look.
 app.get("/api/suppressed", requireAuth, async (req, res) => {
-  const suppressed = await getSuppressions();
-  res.json({ suppressed });
+  try {
+    const suppressed = await getSuppressions();
+    res.json({ suppressed });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ── Reconciliation ────────────────────────────────────────────────────────────
@@ -1266,8 +1320,12 @@ app.get("/api/suppressed", requireAuth, async (req, res) => {
 app.get("/api/reconcile/payment-pairs", requireAuth, async (req, res) => {
   try {
     const { start, end, windowDays } = req.query;
-    const days = Number(windowDays);
-    const searchWindow = Number.isFinite(days) && days >= 0 ? days : 3;
+    // Number("") is 0, not NaN, so a blank ?windowDays= used to narrow the search
+    // to same-day only instead of falling back to the default. A zero-day window
+    // flags every payment whose credit posted the next day, so require >= 1.
+    const raw = typeof windowDays === "string" ? windowDays.trim() : windowDays;
+    const days = raw === undefined || raw === null || raw === "" ? NaN : Number(raw);
+    const searchWindow = Number.isFinite(days) && days >= 1 ? days : 3;
     const [txns, balRows, items] = await Promise.all([
       getTransactions({ limit: 10000, startDate: start, endDate: end }),
       getLatestBalances(),

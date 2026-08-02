@@ -411,7 +411,14 @@ export default function Settings({ reloadData, user, accounts = [] }) {
     try {
       const selected = (dupePreview.preview || []).filter((_, i) => checkedDupes.has(i));
       const res = await runDeduplication(selected);
-      setDupeResult(`Removed ${res.deleted} duplicate transaction${res.deleted !== 1 ? "s" : ""}.`);
+      // rejected: rows the server refused to delete (Plaid-native, or a group
+      // with an invalid keeper). Without it a run where the safety rule caught
+      // everything reads as "Removed 0" with no sign it fired.
+      const rejected = res.rejected?.length ?? 0;
+      setDupeResult(
+        `Removed ${res.deleted} duplicate transaction${res.deleted !== 1 ? "s" : ""}.` +
+          (rejected > 0 ? ` ${rejected} row${rejected !== 1 ? "s were" : " was"} refused by the safety rule and kept.` : "")
+      );
       setDupePreview(null);
       if (reloadData) reloadData();
     } finally {
@@ -1347,10 +1354,32 @@ export default function Settings({ reloadData, user, accounts = [] }) {
               <div style={{ ...styles.dupeBox, marginTop: 8 }}>
                 {debugData.dupeRows.map((r, i) => (
                   <div key={i} style={{ marginBottom: 10, fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--text)" }}>
+                    <strong>{r.date}</strong> ${parseFloat(r.amount).toFixed(2)} ({r.cnt} rows)<br />
+                    {/* Every array is read defensively: a payload missing one must
+                        render a blank cell, never throw out of the whole panel. */}
+                    {(r.ids ?? []).map((id, j) => (
+                      <div key={j} style={{ paddingLeft: 12, color: String(id).startsWith("simplifi") ? "var(--red,#ef4444)" : "var(--green,#22c55e)" }}>
+                        {id} — {(r.merchants ?? [])[j]} — acct: {(r.accounts ?? [])[j]} — amt: {(r.amounts ?? [])[j]}
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            )}
+            <p style={{ ...styles.muted, marginTop: 12 }}>
+              Pairs the old dedup key would have collapsed: <strong>{debugData.atRiskUnderOldKey?.length ?? 0}</strong>
+            </p>
+            <p style={{ ...styles.muted, fontSize: 12 }}>
+              Grouped on date + absolute amount with no account — the key that deleted real credits. These are not delete candidates; this is where historical damage shows up.
+            </p>
+            {debugData.atRiskUnderOldKey?.length > 0 && (
+              <div style={{ ...styles.dupeBox, marginTop: 8 }}>
+                {debugData.atRiskUnderOldKey.map((r, i) => (
+                  <div key={i} style={{ marginBottom: 10, fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--text)" }}>
                     <strong>{r.date}</strong> ${parseFloat(r.abs_amount).toFixed(2)} ({r.cnt} rows)<br />
-                    {r.ids.map((id, j) => (
-                      <div key={j} style={{ paddingLeft: 12, color: id.startsWith("simplifi") ? "var(--red,#ef4444)" : "var(--green,#22c55e)" }}>
-                        {id} — {r.merchants[j]} — acct: {r.accounts[j]} — amt: {r.amounts[j]}
+                    {(r.ids ?? []).map((id, j) => (
+                      <div key={j} style={{ paddingLeft: 12, color: String(id).startsWith("simplifi") ? "var(--red,#ef4444)" : "var(--green,#22c55e)" }}>
+                        {id} — {(r.merchants ?? [])[j]} — acct: {(r.accounts ?? [])[j]} — amt: {(r.amounts ?? [])[j]}
                       </div>
                     ))}
                   </div>

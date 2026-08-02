@@ -122,14 +122,26 @@ export function groupDuplicates(rows) {
 // XCEL ENERGY ONLINE PAYMENT) and "bill pay" (matched BILL PAY - ROCKET MORTGAGE)
 // are gone. "ONLINE PAYMENT - THANK YOU" is a card-side *credit* descriptor, not
 // a funding leg, so dropping it costs this check nothing.
+// "citi" on its own is not here on purpose: it sits inside CITY, CITIZENS and
+// CITIGO, so only the unambiguous "citi card" / "citibank" forms are listed.
 export const CARD_PAYMENT_PATTERNS = [
   "capital one",
   "amex epayment",
   "american express",
   "discover card",
+  "discover e-payment",
   "chase card",
+  "credit crd epay",
   "cardmember serv",
   "card payment",
+  "credit card",
+  "cc pymt",
+  "citi card",
+  "citibank",
+  "barclaycard",
+  "apple card",
+  "applecard",
+  "target card",
   "online pmt",
   "epayment",
   "autopay",
@@ -172,6 +184,16 @@ function byDateAmountId(a, b) {
 // Returns one entry per funding leg with no card-side credit to pair with.
 // Each card leg can only settle one funding leg, so two identical payments in
 // the same window still need two credits.
+//
+// RECALL, STATED PLAINLY: this check is descriptor-based and issuer-specific. A
+// funding leg is only ever considered if its descriptor matches one of the
+// CARD_PAYMENT_PATTERNS above, and that list is a hand-maintained set of the
+// issuer descriptors we have actually seen. A payment from an issuer that is not
+// on the list — or one whose descriptor its bank words differently — is never
+// examined and can never be flagged. "0 unmatched" therefore means "no missing
+// credits among the known issuer descriptors", NOT "no missing credits". Widening
+// the patterns to close that gap is bounded by the opposite failure: a pattern
+// loose enough to catch an ordinary ACH outflow flags it forever.
 //
 // A card leg has to be a credit-account row. Accepting any negative amount
 // anywhere meant an unrelated outflow on a savings account could "settle" a

@@ -154,6 +154,46 @@ test("bill-pay and utility outflows that can never have a card-side credit are n
   assert.deepEqual(findUnmatchedPaymentLegs(rows, { depositoryAccounts }), []);
 });
 
+test("issuer card-payment descriptors we have seen in the wild are flagged", () => {
+  const descriptors = [
+    "CHASE CREDIT CRD EPAY 1234",
+    "BK OF AMER CREDIT CARD 5678",
+    "SYNCHRONY BANK CC PYMT",
+    "BARCLAYCARD US PAYMENT",
+    "APPLECARD GSBANK PAYMENT",
+    "TARGET CARD SRVCS PAYMENT",
+    "DISCOVER E-PAYMENT 9012",
+    "CITI CARD ONLINE PAYMENT",
+    "CITIBANK ONLINE PAYMENT",
+  ];
+  for (const merchant of descriptors) {
+    const rows = [{ id: "plaid_a", date: "2026-07-13", merchant, amount: 500, account: "checking" }];
+    assert.equal(
+      findUnmatchedPaymentLegs(rows, { depositoryAccounts }).length,
+      1,
+      `expected ${merchant} to be recognised as a card payment`
+    );
+  }
+});
+
+test("an issuer descriptor that is not in the pattern list is silently missed", () => {
+  // Not a bug to fix by loosening the patterns — the honest statement of this
+  // check's recall. It only sees the descriptors we have enumerated, so a real
+  // missing credit behind an unlisted wording produces "0 unmatched".
+  const rows = [
+    { id: "plaid_a", date: "2026-07-13", merchant: "BK OF AMER MOBILE PAYMENT", amount: 500, account: "checking" },
+  ];
+  assert.deepEqual(findUnmatchedPaymentLegs(rows, { depositoryAccounts }), []);
+});
+
+test("a city name is not mistaken for a Citi card payment", () => {
+  const rows = [
+    { id: "plaid_a", date: "2026-07-13", merchant: "CITY OF BOZEMAN UTILITIES", amount: 214.5, account: "checking" },
+    { id: "plaid_b", date: "2026-07-14", merchant: "CITIZENS BANK TRANSFER", amount: 1000, account: "checking" },
+  ];
+  assert.deepEqual(findUnmatchedPaymentLegs(rows, { depositoryAccounts }), []);
+});
+
 test("a negative row on a savings account does not settle a funding leg — only a credit account does", () => {
   const creditAccounts = new Set(["venture_x"]);
   const savingsCredit = [

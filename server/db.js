@@ -619,16 +619,23 @@ export async function upsertPlaidTransactions(transactions) {
   for (const t of transactions) {
     if (!t.id || t.amount == null) {
       // A Plaid row we were given and did not store. Record it — dropping rows
-      // with no trace is what let real credits disappear.
-      await recordSuppression({
-        source: 'upsertPlaidTransactions',
-        txnId: t.id,
-        date: t.date,
-        merchant: t.merchant,
-        amount: t.amount,
-        account: t.account,
-        reason: 'missing id or amount',
-      });
+      // with no trace is what let real credits disappear. A row with no id can
+      // also carry an unparseable date, and t.date goes into a DATE column: if
+      // that insert throws it must not abort the rest of the import, which is
+      // already half-written by this point.
+      try {
+        await recordSuppression({
+          source: 'upsertPlaidTransactions',
+          txnId: t.id,
+          date: t.date,
+          merchant: t.merchant,
+          amount: t.amount,
+          account: t.account,
+          reason: 'missing id or amount',
+        });
+      } catch (e) {
+        console.error("Failed to record suppression:", e.message);
+      }
       continue;
     }
     const { rowCount } = await pool.query(
@@ -1226,15 +1233,20 @@ export async function upsertCsvTransaction(t) {
   // A skip is a row the user handed us that never landed. Record it so the
   // suppression is visible in /api/suppressed instead of vanishing silently.
   if (rowCount === 0) {
-    await recordSuppression({
-      source: 'upsertCsvTransaction',
-      txnId: t.id,
-      date: t.date,
-      merchant: t.merchant,
-      amount: t.amount,
-      account: t.account,
-      reason: 'a Plaid-native row already covers this date/account/amount',
-    });
+    // Never let a failed suppression insert abort the import it is logging.
+    try {
+      await recordSuppression({
+        source: 'upsertCsvTransaction',
+        txnId: t.id,
+        date: t.date,
+        merchant: t.merchant,
+        amount: t.amount,
+        account: t.account,
+        reason: 'a Plaid-native row already covers this date/account/amount',
+      });
+    } catch (e) {
+      console.error("Failed to record suppression:", e.message);
+    }
   }
   return rowCount > 0;
 }
@@ -1380,9 +1392,12 @@ export async function upsertImportedTransaction(t) {
   );
 }
 
-// startDate/endDate bound how far back the scan reaches. Both passes used to
-// read the entire transactions table into Node memory on every call; the default
-// window is the last 24 months, which is well past anything worth reconciling.
+// startDate/endDate bound how far back the scan reaches; the default window is
+// the last 24 months, which is well past anything worth reconciling. The bound
+// is needed because the same-date pass now selects every row in the window and
+// groups it in JS (grouping rules live in transactionMatching.js so they can be
+// unit-tested) rather than grouping in SQL with HAVING COUNT(*) > 1 and
+// returning only the groups. Node holds the whole window, so the window is capped.
 export async function findDuplicateTransactions({ startDate, endDate } = {}) {
   const windowParams = [startDate ?? null, endDate ?? null];
   const windowClause = (col) =>
@@ -1459,7 +1474,8 @@ export async function findDuplicateTransactions({ startDate, endDate } = {}) {
 }
 
 // selectedGroups: optional array of { keep, remove[] } — if omitted, removes all found duplicates
-// Returns { deleted, rejected }: rejected holds ids the safety rule refused.
+// Returns { deleted, rejected }: rejected holds ids the safety rule refused —
+// Plaid-native rows, plus every row in a group whose `keep` did not validate.
 export async function deduplicateTransactions(selectedGroups) {
   const dupes = selectedGroups ?? await findDuplicateTransactions();
   if (dupes.length === 0) return { deleted: 0, rejected: [] };
@@ -1469,24 +1485,55 @@ export async function deduplicateTransactions(selectedGroups) {
   // so a caller could otherwise name any id it liked.
   const toRemove = [];
   const rejected = [];
+  const invalidKeeper = [];
+  const validGroups = [];
   for (const dupe of dupes) {
-    for (const removeId of dupe.remove ?? []) {
+    const removeIds = dupe.remove ?? [];
+    // `keep` arrives on the same untrusted request body as `remove` and is the
+    // INSERT target for the assignment/merchant_override migration below: a null
+    // keeper hits a NOT NULL violation, an arbitrary one overwrites some
+    // unrelated transaction's category (a Plaid-native row included) or writes
+    // orphan rows, and a keeper listed in its own remove list migrates onto a row
+    // we are about to delete. Skip the whole group in every case.
+    if (typeof dupe.keep !== 'string' || dupe.keep.trim() === '' || removeIds.includes(dupe.keep)) {
+      invalidKeeper.push(...removeIds);
+      continue;
+    }
+    validGroups.push(dupe);
+    for (const removeId of removeIds) {
       if (isImportedId(removeId)) toRemove.push(removeId);
       else rejected.push(removeId);
     }
   }
+  // A suppression that fails to log must not abort the dedup run it is logging.
   for (const id of rejected) {
-    await recordSuppression({
-      source: 'deduplicateTransactions',
-      txnId: id,
-      reason: 'refused to delete plaid-native row',
-    });
+    try {
+      await recordSuppression({
+        source: 'deduplicateTransactions',
+        txnId: id,
+        reason: 'refused to delete plaid-native row',
+      });
+    } catch (e) {
+      console.error("Failed to record suppression:", e.message);
+    }
   }
+  for (const id of invalidKeeper) {
+    try {
+      await recordSuppression({
+        source: 'deduplicateTransactions',
+        txnId: id,
+        reason: 'invalid dedup keeper',
+      });
+    } catch (e) {
+      console.error("Failed to record suppression:", e.message);
+    }
+  }
+  rejected.push(...invalidKeeper);
   if (toRemove.length === 0) return { deleted: 0, rejected };
   const accepted = new Set(toRemove);
 
   // Migrate assignments from duplicate rows to the keeper before deleting
-  for (const dupe of dupes) {
+  for (const dupe of validGroups) {
     for (const removeId of (dupe.remove ?? []).filter(id => accepted.has(id))) {
       await pool.query(`
         INSERT INTO assignments (transaction_id, category_id, updated_at)
