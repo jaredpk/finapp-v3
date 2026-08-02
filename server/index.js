@@ -8,6 +8,7 @@ import { createClient } from "@supabase/supabase-js";
 import ws from "ws";
 import { Configuration, PlaidApi, PlaidEnvironments, Products, CountryCode } from "plaid";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { verifyAccess, accessConfigured } from "./auth.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { z } from "zod";
@@ -62,7 +63,24 @@ const supabase = createClient(
   { realtime: { transport: ws } }
 );
 
+// Where the browser-facing app is mounted on portal.elevrics.ai. The portal
+// forwards this prefix intact (it does NOT strip it, unlike the Flask and
+// Express modules) so Vite's `base` can generate matching asset URLs and the
+// service worker gets a correct scope. Stripping it here keeps every route
+// below registered at root, which is also what machine callers use:
+// /api/webhooks/plaid, /mcp and /oauth/* are hit unprefixed on the Fly
+// hostname and are unaffected by this.
+const URL_PREFIX = (process.env.URL_PREFIX || "/finance").replace(/\/$/, "");
+
 const app = express();
+
+app.use((req, _res, next) => {
+  if (URL_PREFIX && (req.url === URL_PREFIX || req.url.startsWith(`${URL_PREFIX}/`))) {
+    req.url = req.url.slice(URL_PREFIX.length) || "/";
+  }
+  next();
+});
+
 app.use(cors({
   origin: (origin, cb) => {
     const allowed = !origin || origin.includes("claude.ai") || origin.includes("localhost") || origin.includes("anthropic.com");
@@ -207,16 +225,28 @@ async function applyFHFADrift() {
 }
 
 // ── Auth helpers ──────────────────────────────────────────────────────────────
+// Browser-facing routes authenticate with Cloudflare Access. The app carries no
+// user model — ALLOWED_EMAIL is hardcoded and req._user is never read
+// downstream — so Access replaces the old Supabase login outright rather than
+// sitting in front of it. One sign-in at the portal covers every module.
 async function requireAuth(req, res, next) {
-  const authHeader = req.headers["authorization"];
-  const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
-  if (!token) return res.status(401).json({ error: "Unauthorized" });
+  if (!accessConfigured) {
+    // Fail closed in production. This gates real financial data; an
+    // unconfigured deploy silently serving it is the failure worth preventing.
+    if (isProd) {
+      return res.status(403).json({
+        error: "Cloudflare Access is not configured. Set CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD.",
+      });
+    }
+    req._user = { email: ALLOWED_EMAIL };
+    return next();
+  }
 
-  const { data: { user }, error } = await supabase.auth.getUser(token);
-  if (error || !user) return res.status(401).json({ error: "Unauthorized" });
-  if (user.email !== ALLOWED_EMAIL) return res.status(403).json({ error: "Access denied" });
+  const identity = await verifyAccess(req);
+  if (!identity) return res.status(401).json({ error: "Unauthorized" });
+  if (identity.email !== ALLOWED_EMAIL) return res.status(403).json({ error: "Access denied" });
 
-  req._user = user;
+  req._user = identity;
   next();
 }
 
@@ -233,12 +263,19 @@ async function requireApiKeyOrAuth(req, res, next) {
     // Try as API key first
     const ref = await getClerkUserIdByApiKey(bearerKey);
     if (ref) { req._user = { id: ref, email: ALLOWED_EMAIL }; return next(); }
-    // Try as Supabase JWT
+    // Then as a Supabase JWT — still issued by the /oauth/* flow that external
+    // MCP clients use, so this path stays.
     const { data: { user }, error } = await supabase.auth.getUser(bearerKey);
     if (!error && user && user.email === ALLOWED_EMAIL) {
       req._user = user;
       return next();
     }
+  }
+  // Finally, a browser arriving through the portal.
+  const identity = await verifyAccess(req);
+  if (identity && identity.email === ALLOWED_EMAIL) {
+    req._user = identity;
+    return next();
   }
   return res.status(401).json({ error: "Unauthorized" });
 }
@@ -261,6 +298,10 @@ app.get("/api/config", (_, res) => res.json({
   supabaseUrl: process.env.SUPABASE_URL || "",
   supabaseAnonKey: process.env.SUPABASE_ANON_KEY || "",
 }));
+
+// ── Who am I ──────────────────────────────────────────────────────────────────
+// Replaces the Supabase session the UI used to read its identity from.
+app.get("/api/me", requireAuth, (req, res) => res.json({ email: req._user.email }));
 
 // ── Health ────────────────────────────────────────────────────────────────────
 app.get("/api/health", (_, res) => res.json({ ok: true }));

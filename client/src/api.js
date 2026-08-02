@@ -1,13 +1,13 @@
-const BASE = "/api";
+// Vite's base ("/finance/" in production) so requests carry the portal prefix.
+// The server strips it again, keeping every route registered at root.
+const BASE = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/api`;
 
-let _getToken = async () => null;
-export const setTokenGetter = (fn) => { _getToken = fn; };
+// Retained as a no-op: authentication is now the Cloudflare Access cookie,
+// which the browser attaches automatically. Kept so callers need no changes.
+export const setTokenGetter = () => {};
 
 async function authHeaders(extra = {}) {
-  const token = await _getToken();
-  const h = { "Content-Type": "application/json", ...extra };
-  if (token) h["Authorization"] = `Bearer ${token}`;
-  return h;
+  return { "Content-Type": "application/json", ...extra };
 }
 
 export async function createLinkToken() {
