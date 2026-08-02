@@ -12,7 +12,7 @@ import Settings from "./views/Settings.jsx";
 import { usePlaidConnect, usePlaidUpdateLink } from "./hooks/usePlaid.js";
 import useIsMobile from "./hooks/useIsMobile.js";
 import {
-  fetchAccounts, fetchTransactions, setTokenGetter,
+  fetchAccounts, fetchTransactions,
   fetchCategories, fetchAssignments, fetchMerchantOverrides,
   fetchSplits, fetchHiddenAccounts, addHiddenAccountApi,
   getLastAudit,
@@ -20,20 +20,21 @@ import {
 
 const ALLOWED_EMAIL = "jaredpk@gmail.com";
 
-export default function App({ supabase }) {
-  const [session, setSession] = useState(undefined); // undefined = loading
+export default function App() {
+  // Cloudflare Access authenticates before anything reaches the browser, so
+  // there is no login screen. This only resolves *who* is signed in, which the
+  // sidebar displays; the server verifies the Access token on every request
+  // regardless of what this returns.
+  const [user, setUser] = useState(undefined); // undefined = loading
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-    });
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
-    });
-    return () => subscription.unsubscribe();
-  }, [supabase]);
+    fetch(`${import.meta.env.BASE_URL.replace(/\/$/, "")}/api/me`, { credentials: "same-origin" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => setUser(data ?? null))
+      .catch(() => setUser(null));
+  }, []);
 
-  if (session === undefined) {
+  if (user === undefined) {
     return (
       <div style={loginStyles.container}>
         <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 13 }}>Loading…</span>
@@ -41,62 +42,23 @@ export default function App({ supabase }) {
     );
   }
 
-  if (!session) {
-    return <LoginScreen supabase={supabase} />;
-  }
-
-  if (session.user.email !== ALLOWED_EMAIL) {
+  if (!user) {
     return (
       <div style={loginStyles.container}>
         <div style={{ textAlign: "center" }}>
-          <p style={{ color: "var(--muted)", marginBottom: 16 }}>Access restricted.</p>
-          <button onClick={() => supabase.auth.signOut()} style={loginStyles.signOutBtn}>Sign out</button>
+          <p style={{ color: "var(--muted)", marginBottom: 16 }}>
+            Session expired. Reload to sign in again through the portal.
+          </p>
+          <button onClick={() => window.location.reload()} style={loginStyles.signOutBtn}>Reload</button>
         </div>
       </div>
     );
   }
 
-  return <AuthenticatedApp supabase={supabase} session={session} />;
+  return <AuthenticatedApp user={user} />;
 }
 
-function LoginScreen({ supabase }) {
-  const [loading, setLoading] = useState(false);
-  const [sent, setSent] = useState(false);
-  const [error, setError] = useState(null);
-
-  async function handleMagicLink(e) {
-    e.preventDefault();
-    setLoading(true);
-    setError(null);
-    const { error } = await supabase.auth.signInWithOtp({
-      email: "jaredpk@gmail.com",
-      options: { emailRedirectTo: window.location.origin },
-    });
-    if (error) { setError(error.message); setLoading(false); }
-    else { setSent(true); setLoading(false); }
-  }
-
-  return (
-    <div style={loginStyles.container}>
-      <div style={loginStyles.card}>
-        <div style={loginStyles.wordmark}>
-          fin<span style={{ color: "var(--accent)" }}>app</span>
-        </div>
-        <p style={loginStyles.subtitle}>Personal Finance Dashboard</p>
-        {sent ? (
-          <p style={loginStyles.sent}>Check your email for a magic link.</p>
-        ) : (
-          <button onClick={handleMagicLink} disabled={loading} style={loginStyles.googleBtn}>
-            {loading ? "Sending…" : "Send Magic Link"}
-          </button>
-        )}
-        {error && <p style={loginStyles.error}>{error}</p>}
-      </div>
-    </div>
-  );
-}
-
-function AuthenticatedApp({ supabase, session }) {
+function AuthenticatedApp({ user }) {
   const isMobile = useIsMobile();
   const [view, setView] = useState("dashboard");
   const [accounts, setAccounts] = useState([]);
@@ -109,10 +71,6 @@ function AuthenticatedApp({ supabase, session }) {
   const [hiddenAccounts, setHiddenAccounts] = useState(new Set());
   const [loading, setLoading] = useState(false);
   const [auditOverdue, setAuditOverdue] = useState(false);
-
-  useEffect(() => {
-    setTokenGetter(async () => session.access_token);
-  }, [session]);
 
   useEffect(() => {
     getLastAudit().then(({ log }) => {
@@ -202,7 +160,7 @@ function AuthenticatedApp({ supabase, session }) {
     setAssignments,
     setMerchantOverrides,
     reloadData: loadData,
-    user: session.user,
+    user,
   };
 
   const VIEWS = {
@@ -232,8 +190,8 @@ function AuthenticatedApp({ supabase, session }) {
         setActive={setView}
         onConnect={openPlaid}
         connecting={connecting}
-        user={session.user}
-        onSignOut={() => supabase.auth.signOut()}
+        user={user}
+        onSignOut={() => { window.location.href = "/cdn-cgi/access/logout"; }}
         auditOverdue={auditOverdue}
         isMobile={isMobile}
       />
