@@ -1,53 +1,68 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
 
 /**
- * Cloudflare Access verification.
+ * Portal assertion verification.
  *
- * This app is reached at portal.elevrics.ai/finance, which sits behind an Access
- * application. The Fly hostname stays publicly reachable — deliberately, so
- * Plaid webhooks and MCP clients can still reach it — so browser-facing routes
- * verify the Access token here rather than trusting the portal.
+ * This app is reached at portal.elevrics.ai/finance, and the portal requires a
+ * sign-in before it will proxy anything here. That is not sufficient on its own:
+ * the Fly hostname stays publicly reachable — deliberately, so Plaid webhooks
+ * and MCP clients can still reach it — so browser-facing routes verify here
+ * rather than trusting the portal.
  *
- * Replaces the previous Supabase login for the app UI. Supabase auth is still
- * used by the /oauth/* flow, which is how external MCP clients authorize; that
- * is a different audience and is intentionally left alone.
+ * WHAT CHANGED. This used to verify `Cf-Access-Jwt-Assertion` against a
+ * Cloudflare Zero Trust team domain. The portal has replaced Cloudflare Access
+ * with its own accounts (WorkOS AuthKit) and now mints its own equivalent: an
+ * ES256 JWT in `X-Elevrics-Assertion`, ~2 minutes, one per request, public keys
+ * at /.well-known/portal-jwks.json. Same shape of check, different issuer.
  *
- * CF_ACCESS_TEAM_DOMAIN is the Zero Trust team URL, CF_ACCESS_AUD the Access
- * application's Audience tag.
+ * Unchanged: the Supabase auth used by the /oauth/* flow, which is how external
+ * MCP clients authorize. That is a different audience and is intentionally left
+ * alone — see requireApiKeyOrAuth in index.js.
+ *
+ * `aud` IS THE ROUTING PREFIX. The portal mints a token whose audience is the
+ * path prefix it is forwarding to, so a token minted for /solayard cannot be
+ * replayed here. Checking it is what makes that real.
+ *
+ * NO COOKIE FALLBACK. The old code also accepted a `CF_Authorization` cookie
+ * because Access set one. Nothing sets it now, and the assertion is header-only
+ * by design — minted per request, never stored, so there is no long-lived
+ * credential sitting in a browser.
  */
 
-const TEAM_DOMAIN = (process.env.CF_ACCESS_TEAM_DOMAIN || "").replace(/\/$/, "");
-const AUD = process.env.CF_ACCESS_AUD || "";
+/** Where the portal lives. The assertion's `iss`, and where the JWKS is. */
+const PORTAL_ORIGIN = (process.env.PORTAL_ORIGIN || "https://portal.elevrics.ai").replace(/\/$/, "");
 
-export const accessConfigured = Boolean(TEAM_DOMAIN && AUD);
-
-const jwks = accessConfigured
-  ? createRemoteJWKSet(new URL(`${TEAM_DOMAIN}/cdn-cgi/access/certs`))
-  : null;
-
-function readCookie(req, name) {
-  const raw = req.headers.cookie || "";
-  const match = raw.split(/;\s*/).find((c) => c.startsWith(`${name}=`));
-  return match ? decodeURIComponent(match.slice(name.length + 1)) : null;
-}
+/** This module's routing prefix on the portal — the assertion's `aud`. */
+const AUDIENCE = process.env.PORTAL_AUDIENCE || "/finance";
 
 /**
- * Verify the Access token on a request.
- * @returns {Promise<{email: string} | null>} the identity, or null if absent/invalid
+ * Cached and refreshed by jose, which is what makes the portal's key rotation
+ * survivable: it can publish a second key and switch signing to it without this
+ * app being redeployed.
  */
-export async function verifyAccess(req) {
-  if (!jwks) return null;
+const jwks = createRemoteJWKSet(new URL(`${PORTAL_ORIGIN}/.well-known/portal-jwks.json`));
 
-  const token =
-    req.get("cf-access-jwt-assertion") || readCookie(req, "CF_Authorization");
+/**
+ * Verify the portal assertion on a request.
+ *
+ * @returns {Promise<{email: string, claims: object} | null>} the identity, or
+ *   null if the header is absent, unverifiable, expired, or minted for another
+ *   module. Callers decide what to do about it — this gates financial data, so
+ *   a null is never "carry on".
+ */
+export async function verifyPortalAssertion(req) {
+  const token = req.get("x-elevrics-assertion");
   if (!token) return null;
 
   try {
     const { payload } = await jwtVerify(token, jwks, {
-      audience: AUD,
-      issuer: TEAM_DOMAIN,
+      // Pinned. Without this a verifier accepts whatever algorithm the token
+      // header names that the key material can satisfy.
+      algorithms: ["ES256"],
+      audience: AUDIENCE,
+      issuer: PORTAL_ORIGIN,
     });
-    return payload?.email ? { email: payload.email } : null;
+    return payload?.email ? { email: payload.email, claims: payload } : null;
   } catch {
     return null;
   }

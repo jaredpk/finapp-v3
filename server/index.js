@@ -8,7 +8,7 @@ import { createClient } from "@supabase/supabase-js";
 import ws from "ws";
 import { Configuration, PlaidApi, PlaidEnvironments, Products, CountryCode } from "plaid";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { verifyAccess, accessConfigured } from "./auth.js";
+import { verifyPortalAssertion } from "./auth.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { z } from "zod";
@@ -254,25 +254,27 @@ async function applyFHFADrift() {
 }
 
 // ── Auth helpers ──────────────────────────────────────────────────────────────
-// Browser-facing routes authenticate with Cloudflare Access. The app carries no
-// user model — ALLOWED_EMAIL is hardcoded and req._user is never read
-// downstream — so Access replaces the old Supabase login outright rather than
-// sitting in front of it. One sign-in at the portal covers every module.
+// Browser-facing routes authenticate on the portal's assertion. The app carries
+// no user model — ALLOWED_EMAIL is hardcoded and req._user is never read
+// downstream — so the portal sign-in replaces the old Supabase login outright
+// rather than sitting in front of it. One sign-in covers every module.
 async function requireAuth(req, res, next) {
-  if (!accessConfigured) {
-    // Fail closed in production. This gates real financial data; an
-    // unconfigured deploy silently serving it is the failure worth preventing.
-    if (isProd) {
-      return res.status(403).json({
-        error: "Cloudflare Access is not configured. Set CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD.",
-      });
+  const identity = await verifyPortalAssertion(req);
+
+  if (!identity) {
+    // Local development has no portal in front of it, so nothing mints an
+    // assertion and every request would 401. Production always verifies, and
+    // there is no environment variable that can switch that off on a deployed
+    // instance — this gates real financial data, and the previous version could
+    // be left unconfigured, which is the failure worth designing out rather
+    // than documenting.
+    if (!isProd) {
+      req._user = { email: ALLOWED_EMAIL };
+      return next();
     }
-    req._user = { email: ALLOWED_EMAIL };
-    return next();
+    return res.status(401).json({ error: "Unauthorized" });
   }
 
-  const identity = await verifyAccess(req);
-  if (!identity) return res.status(401).json({ error: "Unauthorized" });
   if (identity.email !== ALLOWED_EMAIL) return res.status(403).json({ error: "Access denied" });
 
   req._user = identity;
@@ -301,7 +303,7 @@ async function requireApiKeyOrAuth(req, res, next) {
     }
   }
   // Finally, a browser arriving through the portal.
-  const identity = await verifyAccess(req);
+  const identity = await verifyPortalAssertion(req);
   if (identity && identity.email === ALLOWED_EMAIL) {
     req._user = identity;
     return next();
