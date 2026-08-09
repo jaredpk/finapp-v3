@@ -20,7 +20,7 @@ import {
   getUserItems, upsertUserItem, removeUserItem,
   getCursor, saveCursor, upsertTransactions,
   clearCursors, listTransactionIds, getTransactionsByIds,
-  getTransactions, getSpendingByCategory,
+  getTransactions, getSpendingByCategory, getReportSummary,
   deleteRemovedTransactions, populateSuggestedCategories, applySuggestedCategories,
   findDuplicateTransactions, deduplicateTransactions,
   getSuppressions, recordSuppression, tryAdvisoryLock, releaseAdvisoryLock,
@@ -710,6 +710,42 @@ app.post("/api/transactions/:id/unhide", requireAuth, async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Reports ───────────────────────────────────────────────────────────────────
+const REPORT_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+app.get("/api/reports/summary", requireApiKeyOrAuth, async (req, res) => {
+  try {
+    let { start_date: startDate, end_date: endDate } = req.query;
+    if (!startDate && !endDate) {
+      // Default: the last 6 full months.
+      const now = new Date();
+      const first = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 6, 1));
+      const last = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0));
+      startDate = first.toISOString().slice(0, 10);
+      endDate = last.toISOString().slice(0, 10);
+    }
+    if (!REPORT_DATE_RE.test(startDate || "") || !REPORT_DATE_RE.test(endDate || "")) {
+      return res.status(400).json({ error: "start_date and end_date must be YYYY-MM-DD" });
+    }
+    const start = new Date(`${startDate}T00:00:00Z`);
+    const end = new Date(`${endDate}T00:00:00Z`);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+      return res.status(400).json({ error: "start_date and end_date must be valid dates" });
+    }
+    if (start > end) {
+      return res.status(400).json({ error: "start_date must be on or before end_date" });
+    }
+    if (end - start > 5 * 366 * 86400000) {
+      return res.status(400).json({ error: "Range cannot exceed 5 years" });
+    }
+    const summary = await getReportSummary({ startDate, endDate });
+    res.json(summary);
+  } catch (err) {
+    console.error("Report summary failed:", err.message);
+    res.status(500).json({ error: "Failed to build report summary" });
   }
 });
 

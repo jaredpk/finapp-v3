@@ -682,6 +682,171 @@ export async function getSpendingByCategory({ startDate, endDate } = {}) {
   return rows;
 }
 
+// ── Report summary ────────────────────────────────────────────────────────────
+
+const UNCATEGORIZED_COLOR = "#6b7280";
+
+// Mirrors Dashboard.jsx's isTransfer: internal money movement stays out of the
+// income/spend totals but still shows in the by-category breakdown.
+function isTransferCategory(name) {
+  return /^transfer/i.test(name || "");
+}
+
+const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+
+function monthKeysBetween(startDate, endDate) {
+  const months = [];
+  let [y, m] = String(startDate).slice(0, 7).split("-").map(Number);
+  const [ey, em] = String(endDate).slice(0, 7).split("-").map(Number);
+  if (!y || !m || !ey || !em) return months;
+  while (y < ey || (y === ey && m <= em)) {
+    months.push(`${y}-${String(m).padStart(2, "0")}`);
+    m += 1;
+    if (m > 12) { m = 1; y += 1; }
+  }
+  return months;
+}
+
+// Pure assembly: per-month × per-category rows in → response shape out. Split
+// from getReportSummary so the bucketing/math is unit-testable without a DB.
+// `rows` is the contract the SQL in getReportSummary produces:
+//   { month: 'YYYY-MM', category_id, name, color, spend, income }
+// where spend/income are that category's positive-outflow and inflow sums for
+// the month. Duplicate (month, category) rows are tolerated and summed.
+export function buildReportSummary({ startDate, endDate, rows = [], merchantRows = [] }) {
+  const months = monthKeysBetween(startDate, endDate);
+  const monthBuckets = new Map(months.map((m) => [m, { income: 0, spend: 0, cats: new Map() }]));
+  const totalCats = new Map();
+  let totalIncome = 0;
+  let totalSpend = 0;
+
+  const addCat = (map, r, spend) => {
+    const key = r.category_id ?? "__uncategorized__";
+    const entry = map.get(key) || {
+      category_id: r.category_id ?? null,
+      name: r.name || "Uncategorized",
+      color: r.color || UNCATEGORIZED_COLOR,
+      amount: 0,
+    };
+    entry.amount += spend;
+    map.set(key, entry);
+  };
+
+  for (const r of rows) {
+    const bucket = monthBuckets.get(r.month);
+    if (!bucket) continue; // outside the requested range
+    const spend = Number(r.spend) || 0;
+    const income = Number(r.income) || 0;
+    if (!isTransferCategory(r.name)) {
+      bucket.income += income;
+      bucket.spend += spend;
+      totalIncome += income;
+      totalSpend += spend;
+    }
+    if (spend > 0) {
+      addCat(bucket.cats, r, spend);
+      addCat(totalCats, r, spend);
+    }
+  }
+
+  const catList = (map) =>
+    [...map.values()]
+      .map((c) => ({ ...c, amount: round2(c.amount) }))
+      .sort((a, b) => b.amount - a.amount);
+
+  return {
+    start_date: startDate,
+    end_date: endDate,
+    monthly: months.map((month) => {
+      const b = monthBuckets.get(month);
+      return {
+        month,
+        income: round2(b.income),
+        spend: round2(b.spend),
+        net: round2(b.income - b.spend),
+        by_category: catList(b.cats),
+      };
+    }),
+    totals: {
+      income: round2(totalIncome),
+      spend: round2(totalSpend),
+      net: round2(totalIncome - totalSpend),
+      by_category: catList(totalCats),
+    },
+    top_merchants: merchantRows.map((m) => ({
+      merchant: m.merchant || "Unknown",
+      amount: round2(Number(m.amount) || 0),
+      count: Number(m.count) || 0,
+    })),
+  };
+}
+
+export async function getReportSummary({ startDate, endDate }) {
+  // One pass over transactions: the CTE explodes splits so a split transaction
+  // contributes its split amounts to each split's category instead of its full
+  // amount to the assigned category. Any leftover (splits that don't sum to
+  // the transaction total) stays with the assigned category — the same
+  // convention the split editor keeps by recalculating line 0 to absorb the
+  // remainder. Exclusions mirror getSpendingByCategory.
+  const params = [startDate, endDate];
+  const [{ rows }, { rows: merchantRows }] = await Promise.all([
+    pool.query(
+      `WITH base AS (
+         SELECT t.id, t.date, t.amount::numeric AS amount, a.category_id AS assigned_category_id
+         FROM transactions t
+         LEFT JOIN assignments a ON a.transaction_id = t.id
+         WHERE t.status != 'pending'
+           AND (t.hidden IS NOT TRUE)
+           AND (t.account NOT IN (SELECT account_id FROM hidden_accounts))
+           AND t.date >= $1 AND t.date <= $2
+       ),
+       split_totals AS (
+         SELECT transaction_id, SUM(amount)::numeric AS total
+         FROM splits GROUP BY transaction_id
+       ),
+       contributions AS (
+         -- Split transactions: each split amount under its split category…
+         SELECT b.date, s.category_id, s.amount::numeric AS amount
+         FROM base b JOIN splits s ON s.transaction_id = b.id
+         UNION ALL
+         -- …plus any leftover under the assigned category…
+         SELECT b.date, b.assigned_category_id, (b.amount - st.total) AS amount
+         FROM base b JOIN split_totals st ON st.transaction_id = b.id
+         WHERE b.amount - st.total <> 0
+         UNION ALL
+         -- …and unsplit transactions: the full amount under the assigned category
+         -- (COALESCE(s.amount, t.amount) / COALESCE(s.category_id, a.category_id)).
+         SELECT b.date, b.assigned_category_id, b.amount
+         FROM base b LEFT JOIN split_totals st ON st.transaction_id = b.id
+         WHERE st.transaction_id IS NULL
+       )
+       SELECT TO_CHAR(c.date, 'YYYY-MM') AS month,
+              c.category_id, cat.name, cat.color,
+              SUM(CASE WHEN c.amount > 0 THEN c.amount ELSE 0 END)::float AS spend,
+              SUM(CASE WHEN c.amount < 0 THEN -c.amount ELSE 0 END)::float AS income
+       FROM contributions c
+       LEFT JOIN categories cat ON cat.id = c.category_id
+       GROUP BY 1, 2, 3, 4
+       ORDER BY 1, spend DESC`,
+      params
+    ),
+    pool.query(
+      `SELECT COALESCE(mo.merchant_name, t.merchant, t.name) AS merchant,
+              SUM(t.amount)::float AS amount, COUNT(*)::int AS count
+       FROM transactions t
+       LEFT JOIN merchant_overrides mo ON mo.transaction_id = t.id
+       WHERE t.status != 'pending'
+         AND (t.hidden IS NOT TRUE)
+         AND (t.account NOT IN (SELECT account_id FROM hidden_accounts))
+         AND t.amount > 0
+         AND t.date >= $1 AND t.date <= $2
+       GROUP BY 1 ORDER BY amount DESC LIMIT 15`,
+      params
+    ),
+  ]);
+  return buildReportSummary({ startDate, endDate, rows, merchantRows });
+}
+
 // Full-fidelity upsert for Quadratic imports — uses real Plaid transaction_ids and all extended columns.
 // Returns the number of rows actually written, so callers report what landed
 // rather than what they handed us.

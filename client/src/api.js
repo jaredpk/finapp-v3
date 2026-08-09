@@ -140,6 +140,21 @@ export async function saveAssignment(transaction_id, category_id) {
   return r.json();
 }
 
+// ── Reports ───────────────────────────────────────────────────────────────────
+export async function fetchReportSummary(startDate, endDate) {
+  const qs = new URLSearchParams();
+  if (startDate) qs.set("start_date", startDate);
+  if (endDate) qs.set("end_date", endDate);
+  const r = await fetch(`${BASE}/reports/summary${qs.toString() ? `?${qs}` : ""}`, {
+    headers: await authHeaders(),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body.error || `Report request failed: ${r.status}`);
+  }
+  return r.json();
+}
+
 // ── Merchant overrides ────────────────────────────────────────────────────────
 export async function fetchMerchantOverrides() {
   const r = await fetch(`${BASE}/merchant-overrides`, { headers: await authHeaders() });

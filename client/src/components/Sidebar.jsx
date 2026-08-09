@@ -7,6 +7,7 @@ const NAV = [
   { id: "categories",   label: "Categories",    icon: "◑" },
   { id: "budget",       label: "Budget",        icon: "◎" },
   { id: "cashflow",     label: "Cash Flow",     icon: "⇌" },
+  { id: "reports",      label: "Reports",       icon: "▥" },
   { id: "property",     label: "Property",      icon: "⌂" },
   { id: "settings",     label: "Settings",      icon: "⚙" },
 ];
