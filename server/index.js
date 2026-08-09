@@ -20,7 +20,7 @@ import {
   getUserItems, upsertUserItem, removeUserItem,
   getCursor, saveCursor, upsertTransactions,
   clearCursors, listTransactionIds, getTransactionsByIds,
-  getTransactions, getSpendingByCategory, getReportSummary,
+  getTransactions, getVisibleTransactions, getSpendingByCategory, getReportSummary,
   deleteRemovedTransactions, populateSuggestedCategories, applySuggestedCategories,
   findDuplicateTransactions, deduplicateTransactions,
   getSuppressions, recordSuppression, tryAdvisoryLock, releaseAdvisoryLock,
@@ -52,6 +52,7 @@ import {
 import pool from "./db.js";
 import { gmailConfigured, getGmailAuthUrl, exchangeGmailAuthCode, gmailConnected } from "./gmail.js";
 import { receiptScanConfigured, runReceiptScan } from "./receiptScan.js";
+import { askAiConfigured, runAskLoop, createGeminiGenerate, impl as askAiImpl } from "./askAi.js";
 import { findUnmatchedPaymentLegs } from "./transactionMatching.js";
 import { registerPropertyFinanceRoutes } from "./property/routes.js";
 
@@ -784,6 +785,33 @@ app.post("/api/receipts/scan", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("Receipt scan failed:", err.message);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Ask AI ────────────────────────────────────────────────────────────────────
+// Natural-language questions answered by Gemini over a read-only tool surface.
+// Non-streaming v1; the loop itself lives in askAi.js so it's unit-testable.
+app.post("/api/ask", requireAuth, async (req, res) => {
+  if (!askAiConfigured())
+    return res.status(503).json({ error: "Ask AI not configured" });
+  const question = typeof req.body?.question === "string" ? req.body.question.trim() : "";
+  if (!question) return res.status(400).json({ error: "question is required" });
+  if (question.length > 2000)
+    return res.status(400).json({ error: "question must be 2000 characters or fewer" });
+  try {
+    const { answer, toolCalls } = await runAskLoop({
+      question,
+      history: req.body.history, // clamped to the last 10 turns in runAskLoop
+      generate: createGeminiGenerate(),
+      impl: askAiImpl,
+    });
+    console.log(`ask-ai: ${toolCalls.length} tool call(s)${toolCalls.length ? ` [${toolCalls.join(", ")}]` : ""}`);
+    res.json({ answer });
+  } catch (err) {
+    // Free-tier 429s are expected under bursts; surface them so the client can
+    // say "wait a minute" instead of "broken".
+    console.error("ask-ai:", err.status || "", err.message);
+    res.status(err.status === 429 ? 429 : 502).json({ error: "AI request failed" });
   }
 });
 
@@ -1835,9 +1863,7 @@ function buildMcpServer() {
     end_date: z.string().optional().describe("YYYY-MM-DD"),
     category: z.string().optional(),
   }, async ({ limit = 50, start_date, end_date, category }) => {
-    const txns = await getTransactions({ limit, startDate: start_date, endDate: end_date, category });
-    const hiddenAcctIds = new Set(await getHiddenAccounts());
-    const visible = txns.filter(t => !t.hidden && !hiddenAcctIds.has(t.account_id));
+    const visible = await getVisibleTransactions({ limit, startDate: start_date, endDate: end_date, category });
     return { content: [{ type: "text", text: JSON.stringify(visible, null, 2) }] };
   });
 
@@ -2191,9 +2217,9 @@ initDb().then(async () => {
   app.listen(PORT, () => {
     console.log(`FinApp server running on :${PORT}`);
     console.log(
-      "Receipt scanner: GEMINI_API_KEY must be minted in a BILLED Google Cloud " +
-        "project — only paid-tier usage carries the no-training data terms for " +
-        "receipt emails."
+      "Receipt scanner & Ask AI: GEMINI_API_KEY must be minted in a BILLED " +
+        "Google Cloud project — only paid-tier usage carries the no-training " +
+        "data terms for financial data."
     );
 
     // Daily 8 AM ET safety-net sync (only fires when machine is running)

@@ -155,6 +155,25 @@ export async function fetchReportSummary(startDate, endDate) {
   return r.json();
 }
 
+// ── Ask AI ────────────────────────────────────────────────────────────────────
+// history: last ≤10 turns as [{ role: "user"|"model", text }]. Throws with
+// err.status set so the view can distinguish 503 (not configured) and 429
+// (rate limited) from other failures.
+export async function askAi(question, history) {
+  const r = await fetch(`${BASE}/ask`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ question, history }),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    const err = new Error(body.error || `Ask AI request failed: ${r.status}`);
+    err.status = r.status;
+    throw err;
+  }
+  return r.json();
+}
+
 // ── Merchant overrides ────────────────────────────────────────────────────────
 export async function fetchMerchantOverrides() {
   const r = await fetch(`${BASE}/merchant-overrides`, { headers: await authHeaders() });

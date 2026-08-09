@@ -709,6 +709,15 @@ export async function getTransactions({ limit = 100, startDate, endDate, categor
   return rows;
 }
 
+// Shared by the MCP get_transactions tool and Ask AI: getTransactions minus
+// per-transaction hidden flags and transactions on hidden accounts. Extracted
+// from the MCP handler so both callers filter identically.
+export async function getVisibleTransactions(opts = {}) {
+  const [txns, hiddenAcctIds] = await Promise.all([getTransactions(opts), getHiddenAccounts()]);
+  const hidden = new Set(hiddenAcctIds);
+  return txns.filter((t) => !t.hidden && !hidden.has(t.account_id));
+}
+
 export async function getSpendingByCategory({ startDate, endDate } = {}) {
   const conditions = ["status != 'pending'", "amount > 0", "(hidden IS NOT TRUE)", "(account NOT IN (SELECT account_id FROM hidden_accounts))"];
   const params = [];
