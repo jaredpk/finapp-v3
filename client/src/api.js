@@ -140,6 +140,40 @@ export async function saveAssignment(transaction_id, category_id) {
   return r.json();
 }
 
+// ── Reports ───────────────────────────────────────────────────────────────────
+export async function fetchReportSummary(startDate, endDate) {
+  const qs = new URLSearchParams();
+  if (startDate) qs.set("start_date", startDate);
+  if (endDate) qs.set("end_date", endDate);
+  const r = await fetch(`${BASE}/reports/summary${qs.toString() ? `?${qs}` : ""}`, {
+    headers: await authHeaders(),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body.error || `Report request failed: ${r.status}`);
+  }
+  return r.json();
+}
+
+// ── Ask AI ────────────────────────────────────────────────────────────────────
+// history: last ≤10 turns as [{ role: "user"|"model", text }]. Throws with
+// err.status set so the view can distinguish 503 (not configured) and 429
+// (rate limited) from other failures.
+export async function askAi(question, history) {
+  const r = await fetch(`${BASE}/ask`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ question, history }),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    const err = new Error(body.error || `Ask AI request failed: ${r.status}`);
+    err.status = r.status;
+    throw err;
+  }
+  return r.json();
+}
+
 // ── Merchant overrides ────────────────────────────────────────────────────────
 export async function fetchMerchantOverrides() {
   const r = await fetch(`${BASE}/merchant-overrides`, { headers: await authHeaders() });
@@ -479,6 +513,43 @@ export async function unhideTransactionApi(id) {
   const r = await fetch(`${BASE}/transactions/${encodeURIComponent(id)}/unhide`, {
     method: "POST",
     headers: await authHeaders(),
+  });
+  return r.json();
+}
+
+// ── Review workflow & Gmail receipt scanning ──────────────────────────────────
+export async function reviewTransactions(ids) {
+  const r = await fetch(`${BASE}/transactions/review`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ ids }),
+  });
+  return r.json();
+}
+
+export async function scanReceipts() {
+  const r = await fetch(`${BASE}/receipts/scan`, {
+    method: "POST",
+    headers: await authHeaders(),
+  });
+  return r.json();
+}
+
+export async function gmailStatus() {
+  const r = await fetch(`${BASE}/gmail/status`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function gmailAuthUrl() {
+  const r = await fetch(`${BASE}/gmail/auth-url`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function gmailAuthCode(code) {
+  const r = await fetch(`${BASE}/gmail/auth-code`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ code }),
   });
   return r.json();
 }

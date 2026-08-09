@@ -7,6 +7,8 @@ import Transactions from "./views/Transactions.jsx";
 import Categories from "./views/Categories.jsx";
 import Budget from "./views/Budget.jsx";
 import CashFlow from "./views/CashFlow.jsx";
+import Reports from "./views/Reports.jsx";
+import AskAI from "./views/AskAI.jsx";
 import PropertyFinance from "./views/PropertyFinance.jsx";
 import Settings from "./views/Settings.jsx";
 import { usePlaidConnect, usePlaidUpdateLink } from "./hooks/usePlaid.js";
@@ -170,6 +172,8 @@ function AuthenticatedApp({ user }) {
     categories: Categories,
     budget: Budget,
     cashflow: CashFlow,
+    reports: Reports,
+    askai: AskAI,
     property: PropertyFinance,
     settings: Settings,
   };

@@ -20,7 +20,7 @@ import {
   getUserItems, upsertUserItem, removeUserItem,
   getCursor, saveCursor, upsertTransactions,
   clearCursors, listTransactionIds, getTransactionsByIds,
-  getTransactions, getSpendingByCategory,
+  getTransactions, getVisibleTransactions, getSpendingByCategory, getReportSummary,
   deleteRemovedTransactions, populateSuggestedCategories, applySuggestedCategories,
   findDuplicateTransactions, deduplicateTransactions,
   getSuppressions, recordSuppression, tryAdvisoryLock, releaseAdvisoryLock,
@@ -47,8 +47,12 @@ import {
   getAccountNicknames, upsertAccountNickname, deleteAccountNickname,
   getLastAuditLog, saveAuditLog, updateAuditInsertedCount, completeAuditLog,
   getTransactionDateAmountSet, parseAuditXlsx,
+  reviewTransactions, unreviewTransaction, getGmailRefreshToken,
 } from "./db.js";
 import pool from "./db.js";
+import { gmailConfigured, getGmailAuthUrl, exchangeGmailAuthCode, gmailConnected } from "./gmail.js";
+import { receiptScanConfigured, runReceiptScan } from "./receiptScan.js";
+import { askAiConfigured, runAskLoop, createGeminiGenerate, impl as askAiImpl } from "./askAi.js";
 import { findUnmatchedPaymentLegs } from "./transactionMatching.js";
 import { registerPropertyFinanceRoutes } from "./property/routes.js";
 
@@ -710,6 +714,140 @@ app.post("/api/transactions/:id/unhide", requireAuth, async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Review workflow (Brief 01) ────────────────────────────────────────────────
+app.post("/api/transactions/review", requireAuth, async (req, res) => {
+  try {
+    const { ids } = req.body || {};
+    if (!Array.isArray(ids) || ids.length === 0)
+      return res.status(400).json({ error: "ids array required" });
+    if (ids.length > 1000)
+      return res.status(400).json({ error: "At most 1000 ids per request" });
+    const result = await reviewTransactions(ids);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/transactions/:id/unreview", requireAuth, async (req, res) => {
+  try {
+    const ok = await unreviewTransaction(req.params.id);
+    if (!ok) return res.status(404).json({ error: "Transaction not found" });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Gmail receipt scanner (Brief 01) ──────────────────────────────────────────
+app.get("/api/gmail/auth-url", requireAuth, async (req, res) => {
+  if (!gmailConfigured())
+    return res.status(503).json({ error: "Gmail OAuth not configured — set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET" });
+  try {
+    res.json({ url: getGmailAuthUrl() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/gmail/auth-code", requireAuth, async (req, res) => {
+  if (!gmailConfigured())
+    return res.status(503).json({ error: "Gmail OAuth not configured — set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET" });
+  try {
+    const { code } = req.body || {};
+    if (!code) return res.status(400).json({ error: "code required" });
+    await exchangeGmailAuthCode(code);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/gmail/status", requireAuth, async (req, res) => {
+  try {
+    res.json({ connected: await gmailConnected() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/receipts/scan", requireAuth, async (req, res) => {
+  if (!receiptScanConfigured())
+    return res.status(503).json({ error: "Receipt scanning not configured — set GEMINI_API_KEY" });
+  if (!(await gmailConnected()))
+    return res.status(503).json({ error: "Gmail is not connected — connect it in Settings first" });
+  try {
+    const result = await runReceiptScan();
+    res.json(result);
+  } catch (err) {
+    console.error("Receipt scan failed:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Ask AI ────────────────────────────────────────────────────────────────────
+// Natural-language questions answered by Gemini over a read-only tool surface.
+// Non-streaming v1; the loop itself lives in askAi.js so it's unit-testable.
+app.post("/api/ask", requireAuth, async (req, res) => {
+  if (!askAiConfigured())
+    return res.status(503).json({ error: "Ask AI not configured" });
+  const question = typeof req.body?.question === "string" ? req.body.question.trim() : "";
+  if (!question) return res.status(400).json({ error: "question is required" });
+  if (question.length > 2000)
+    return res.status(400).json({ error: "question must be 2000 characters or fewer" });
+  try {
+    const { answer, toolCalls } = await runAskLoop({
+      question,
+      history: req.body.history, // clamped to the last 10 turns in runAskLoop
+      generate: createGeminiGenerate(),
+      impl: askAiImpl,
+    });
+    console.log(`ask-ai: ${toolCalls.length} tool call(s)${toolCalls.length ? ` [${toolCalls.join(", ")}]` : ""}`);
+    res.json({ answer });
+  } catch (err) {
+    // Free-tier 429s are expected under bursts; surface them so the client can
+    // say "wait a minute" instead of "broken".
+    console.error("ask-ai:", err.status || "", err.message);
+    res.status(err.status === 429 ? 429 : 502).json({ error: "AI request failed" });
+  }
+});
+
+// ── Reports ───────────────────────────────────────────────────────────────────
+const REPORT_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+app.get("/api/reports/summary", requireApiKeyOrAuth, async (req, res) => {
+  try {
+    let { start_date: startDate, end_date: endDate } = req.query;
+    if (!startDate && !endDate) {
+      // Default: the last 6 full months.
+      const now = new Date();
+      const first = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 6, 1));
+      const last = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0));
+      startDate = first.toISOString().slice(0, 10);
+      endDate = last.toISOString().slice(0, 10);
+    }
+    if (!REPORT_DATE_RE.test(startDate || "") || !REPORT_DATE_RE.test(endDate || "")) {
+      return res.status(400).json({ error: "start_date and end_date must be YYYY-MM-DD" });
+    }
+    const start = new Date(`${startDate}T00:00:00Z`);
+    const end = new Date(`${endDate}T00:00:00Z`);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+      return res.status(400).json({ error: "start_date and end_date must be valid dates" });
+    }
+    if (start > end) {
+      return res.status(400).json({ error: "start_date must be on or before end_date" });
+    }
+    if (end - start > 5 * 366 * 86400000) {
+      return res.status(400).json({ error: "Range cannot exceed 5 years" });
+    }
+    const summary = await getReportSummary({ startDate, endDate });
+    res.json(summary);
+  } catch (err) {
+    console.error("Report summary failed:", err.message);
+    res.status(500).json({ error: "Failed to build report summary" });
   }
 });
 
@@ -1725,9 +1863,7 @@ function buildMcpServer() {
     end_date: z.string().optional().describe("YYYY-MM-DD"),
     category: z.string().optional(),
   }, async ({ limit = 50, start_date, end_date, category }) => {
-    const txns = await getTransactions({ limit, startDate: start_date, endDate: end_date, category });
-    const hiddenAcctIds = new Set(await getHiddenAccounts());
-    const visible = txns.filter(t => !t.hidden && !hiddenAcctIds.has(t.account_id));
+    const visible = await getVisibleTransactions({ limit, startDate: start_date, endDate: end_date, category });
     return { content: [{ type: "text", text: JSON.stringify(visible, null, 2) }] };
   });
 
@@ -2080,6 +2216,11 @@ initDb().then(async () => {
 
   app.listen(PORT, () => {
     console.log(`FinApp server running on :${PORT}`);
+    console.log(
+      "Receipt scanner & Ask AI: GEMINI_API_KEY must be minted in a BILLED " +
+        "Google Cloud project — only paid-tier usage carries the no-training " +
+        "data terms for financial data."
+    );
 
     // Daily 8 AM ET safety-net sync (only fires when machine is running)
     (function scheduleDailySync() {
@@ -2091,6 +2232,28 @@ initDb().then(async () => {
         console.log("Running daily scheduled sync");
         try { await syncTransactions(); } catch (e) { console.error("Scheduled sync failed:", e.message); }
         scheduleDailySync();
+      }, next - now);
+    })();
+
+    // Opt-in daily receipt scan, shortly after the safety-net sync. Only runs
+    // when Gmail has been connected (gmail_tokens has a row) and a Gemini key
+    // is present — otherwise it reschedules and stays silent.
+    (function scheduleDailyReceiptScan() {
+      const now = new Date();
+      const next = new Date();
+      next.setUTCHours(13, 10, 0, 0); // ~8:10 AM EST, after the daily sync
+      if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
+      setTimeout(async () => {
+        try {
+          if (receiptScanConfigured() && (await getGmailRefreshToken())) {
+            console.log("Running daily receipt scan");
+            const result = await runReceiptScan();
+            console.log(`Daily receipt scan: scanned ${result.scanned}, receipts ${result.receipts_found}, matched ${result.matched}`);
+          }
+        } catch (e) {
+          console.error("Daily receipt scan failed:", e.message);
+        }
+        scheduleDailyReceiptScan();
       }, next - now);
     })();
   });

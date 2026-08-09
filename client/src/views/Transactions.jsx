@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from "react";
-import { saveAssignment, saveMerchantOverride, deleteTransaction, unhideTransactionApi, replaceSplitsApi } from "../api.js";
+import { saveAssignment, saveMerchantOverride, deleteTransaction, unhideTransactionApi, replaceSplitsApi, reviewTransactions } from "../api.js";
 
 const toNum = (n) => n == null ? null : parseFloat(n);
 
@@ -50,6 +50,8 @@ export default function Transactions({
   const [dateFrom, setDateFrom]     = useState("");
   const [dateTo, setDateTo]         = useState("");
   const [showHidden, setShowHidden] = useState(false);
+  const [reviewFilter, setReviewFilter] = useState(false);
+  const [approving, setApproving]   = useState(false);
   const [saving, setSaving]         = useState({});
   const [editingMerchant, setEditingMerchant] = useState(null);
   const [merchantDraft, setMerchantDraft]     = useState("");
@@ -81,7 +83,8 @@ export default function Transactions({
     const visible = transactions.filter(t => !t.hidden && !hiddenAccounts?.has(t.account_id));
     const spend = visible.filter((t) => toNum(t.amount) > 0).reduce((s, t) => s + toNum(t.amount), 0);
     const needsReview = visible.filter((t) => !assignments?.[t.transaction_id] && !splits?.[t.transaction_id]?.length).length;
-    return { total: visible.length, spend, needsReview };
+    const needsApproval = visible.filter((t) => t.reviewed_at == null).length;
+    return { total: visible.length, spend, needsReview, needsApproval };
   }, [transactions, assignments, splits, hiddenAccounts]);
 
   function toggleSort(col) {
@@ -126,6 +129,7 @@ export default function Transactions({
     let rows = transactions.filter((t) => {
       if (!showHidden && t.hidden) return false;
       if (hiddenAccounts?.has(t.account_id)) return false;
+      if (reviewFilter && t.reviewed_at != null) return false;
       const name = getDisplayName(t).toLowerCase();
       const amt = Math.abs(toNum(t.amount) ?? 0);
       if (search && !name.includes(search.toLowerCase())) return false;
@@ -158,7 +162,21 @@ export default function Transactions({
     });
 
     return rows;
-  }, [transactions, search, catFilter, acctFilter, minAmount, maxAmount, sort, assignments, splits, merchantOverrides, acctMap, effectiveDateRange, showHidden, hiddenAccounts]);
+  }, [transactions, search, catFilter, acctFilter, minAmount, maxAmount, sort, assignments, splits, merchantOverrides, acctMap, effectiveDateRange, showHidden, hiddenAccounts, reviewFilter]);
+
+  async function handleApprove(ids) {
+    if (!ids.length || approving) return;
+    setApproving(true);
+    try {
+      const res = await reviewTransactions(ids);
+      if (res.error) throw new Error(res.error);
+      if (reloadData) reloadData();
+    } catch (err) {
+      console.error("Approve failed:", err);
+    } finally {
+      setApproving(false);
+    }
+  }
 
   async function handleCategoryChange(txnId, categoryId) {
     setSaving((prev) => ({ ...prev, [txnId]: true }));
@@ -294,7 +312,7 @@ export default function Transactions({
     }
   }
 
-  const hasFilters = search || catFilter !== "all" || acctFilter !== "all" || minAmount || maxAmount || datePreset !== "all";
+  const hasFilters = search || catFilter !== "all" || acctFilter !== "all" || minAmount || maxAmount || datePreset !== "all" || reviewFilter;
   const hiddenCount = transactions.filter(t => t.hidden && !hiddenAccounts?.has(t.account_id)).length;
 
   return (
@@ -362,6 +380,24 @@ export default function Transactions({
         )}
         <input type="number" placeholder="Min $" value={minAmount} onChange={(e) => setMinAmount(e.target.value)} style={{ ...styles.input, maxWidth: 90 }} />
         <input type="number" placeholder="Max $" value={maxAmount} onChange={(e) => setMaxAmount(e.target.value)} style={{ ...styles.input, maxWidth: 90 }} />
+        {stats.needsApproval > 0 && (
+          <button
+            style={{ ...styles.reviewChip, ...(reviewFilter ? styles.reviewChipActive : {}) }}
+            onClick={() => setReviewFilter((v) => !v)}
+            title="Show transactions with a receipt suggestion waiting for approval"
+          >
+            Needs review ({stats.needsApproval})
+          </button>
+        )}
+        {reviewFilter && filtered.length > 0 && (
+          <button
+            style={{ ...styles.approveAllBtn, opacity: approving ? 0.6 : 1 }}
+            onClick={() => handleApprove(filtered.map((t) => t.transaction_id))}
+            disabled={approving}
+          >
+            {approving ? "Approving…" : `Approve all shown (${filtered.length})`}
+          </button>
+        )}
         {hiddenCount > 0 && (
           <label style={styles.showHiddenLabel}>
             <input type="checkbox" checked={showHidden} onChange={e => setShowHidden(e.target.checked)} style={{ marginRight: 4 }} />
@@ -371,7 +407,7 @@ export default function Transactions({
         {hasFilters && (
           <button
             style={styles.clearBtn}
-            onClick={() => { setSearch(""); setCatFilter("all"); setAcctFilter("all"); setMinAmount(""); setMaxAmount(""); setDatePreset("all"); setDateFrom(""); setDateTo(""); }}
+            onClick={() => { setSearch(""); setCatFilter("all"); setAcctFilter("all"); setMinAmount(""); setMaxAmount(""); setDatePreset("all"); setDateFrom(""); setDateTo(""); setReviewFilter(false); }}
           >
             Clear
           </button>
@@ -403,6 +439,7 @@ export default function Transactions({
             const unassigned = !assigned && !hasSplits;
             const isSaving   = saving[t.transaction_id];
             const isHidden   = t.hidden;
+            const needsApproval = !isHidden && t.reviewed_at == null;
             const isSplitOpen  = splitExpanded === t.transaction_id;
             const isDetailOpen = detailExpanded === t.transaction_id;
 
@@ -411,7 +448,8 @@ export default function Transactions({
                 <div
                   style={{
                     ...styles.row,
-                    background: isHidden ? "rgba(100,100,100,0.06)" : unassigned ? "rgba(185,28,28,0.04)" : "transparent",
+                    background: isHidden ? "rgba(100,100,100,0.06)" : needsApproval ? "rgba(251,191,36,0.08)" : unassigned ? "rgba(185,28,28,0.04)" : "transparent",
+                    borderLeft: needsApproval ? "2px solid #fbbf24" : "2px solid transparent",
                     opacity: isHidden ? 0.55 : 1,
                   }}
                 >
@@ -534,7 +572,15 @@ export default function Transactions({
                 )}
 
                 {/* Detail panel */}
-                {isDetailOpen && <DetailPanel t={t} onClose={() => setDetailExpanded(null)} />}
+                {isDetailOpen && (
+                  <DetailPanel
+                    t={t}
+                    categories={categories}
+                    approving={approving}
+                    onApprove={() => handleApprove([t.transaction_id])}
+                    onClose={() => setDetailExpanded(null)}
+                  />
+                )}
               </React.Fragment>
             );
           })}
@@ -616,7 +662,12 @@ function SplitEditor({ t, splitDraft, categories, hasSplits, splitSaving, onUpda
   );
 }
 
-function DetailPanel({ t, onClose }) {
+function DetailPanel({ t, categories, approving, onApprove, onClose }) {
+  const needsApproval = !t.hidden && t.reviewed_at == null;
+  const hasReceipt = t.receipt_merchant != null || t.receipt_total != null || (t.receipt_items || []).length > 0;
+  const suggestedName = t.suggested_category_id
+    ? (categories || []).find((c) => c.id === t.suggested_category_id)?.name || null
+    : null;
   const fields = [
     ["Raw description",  t.original_description || t.name || "—"],
     ["Plaid name",       t.name && t.name !== t.merchant_name ? t.name : null],
@@ -647,6 +698,53 @@ function DetailPanel({ t, onClose }) {
           </React.Fragment>
         ))}
       </div>
+
+      {/* Receipt (Gmail scanner match) — shown while the row is amber */}
+      {needsApproval && hasReceipt && (
+        <div style={styles.receiptBox}>
+          <p style={styles.receiptTitle}>Receipt found in Gmail</p>
+          <div style={styles.detailGrid}>
+            {t.receipt_merchant && (
+              <>
+                <span style={styles.detailLabel}>Merchant</span>
+                <span style={styles.detailValue}>{t.receipt_merchant}</span>
+              </>
+            )}
+            {t.receipt_date && (
+              <>
+                <span style={styles.detailLabel}>Receipt date</span>
+                <span style={styles.detailValue}>{t.receipt_date}</span>
+              </>
+            )}
+            {t.receipt_total != null && (
+              <>
+                <span style={styles.detailLabel}>Total</span>
+                <span style={styles.detailValue}>${Math.abs(toNum(t.receipt_total) ?? 0).toFixed(2)}</span>
+              </>
+            )}
+          </div>
+          {(t.receipt_items || []).length > 0 && (
+            <div style={styles.receiptItems}>
+              {(t.receipt_items || []).map((item, i) => (
+                <div key={i} style={styles.receiptItemLine}>
+                  <span style={styles.receiptItemDesc}>{item.description || "—"}</span>
+                  <span style={styles.receiptItemAmt}>
+                    {item.amount != null ? `$${Math.abs(toNum(item.amount) ?? 0).toFixed(2)}` : ""}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={styles.receiptFooter}>
+            <span style={styles.receiptSuggested}>
+              {suggestedName ? <>Suggested: <strong>{suggestedName}</strong></> : "No category suggestion"}
+            </span>
+            <button style={{ ...styles.approveBtn, opacity: approving ? 0.6 : 1 }} onClick={onApprove} disabled={approving}>
+              {approving ? "Approving…" : "Approve"}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -673,6 +771,17 @@ const styles = {
     fontFamily: "var(--font-mono)", outline: "none", cursor: "pointer",
   },
   showHiddenLabel: { fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-mono)", display: "flex", alignItems: "center", cursor: "pointer", userSelect: "none" },
+  reviewChip: {
+    padding: "8px 12px", background: "rgba(251,191,36,0.08)", border: "1px solid #fbbf24",
+    borderRadius: "var(--radius)", color: "#fbbf24", fontSize: 12, fontWeight: 600,
+    fontFamily: "var(--font-mono)", cursor: "pointer",
+  },
+  reviewChipActive: { background: "#fbbf24", color: "#1c1917" },
+  approveAllBtn: {
+    padding: "8px 12px", background: "var(--accent)", border: "none",
+    borderRadius: "var(--radius)", color: "#fff", fontSize: 12, fontWeight: 700,
+    fontFamily: "var(--font-mono)", cursor: "pointer",
+  },
   clearBtn: {
     padding: "8px 12px", background: "none", border: "1px solid var(--border)",
     borderRadius: "var(--radius)", color: "var(--muted)", fontSize: 12,
@@ -828,4 +937,28 @@ const styles = {
   },
   detailLabel: { fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", fontWeight: 600, paddingTop: 1 },
   detailValue: { fontSize: 12, color: "var(--text)", fontFamily: "var(--font-mono)", wordBreak: "break-all" },
+
+  // Receipt block inside the detail panel (amber rows)
+  receiptBox: {
+    marginTop: 12, padding: "12px 14px",
+    background: "rgba(251,191,36,0.08)",
+    border: "1px solid rgba(251,191,36,0.35)",
+    borderLeft: "2px solid #fbbf24",
+    borderRadius: 8,
+  },
+  receiptTitle: {
+    fontSize: 11, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase",
+    color: "#fbbf24", fontFamily: "var(--font-mono)", marginBottom: 8,
+  },
+  receiptItems: { marginTop: 8, borderTop: "1px solid var(--border)", paddingTop: 6, display: "flex", flexDirection: "column", gap: 3 },
+  receiptItemLine: { display: "flex", justifyContent: "space-between", gap: 12 },
+  receiptItemDesc: { fontSize: 12, color: "var(--text)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  receiptItemAmt: { fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-mono)", flexShrink: 0 },
+  receiptFooter: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 12 },
+  receiptSuggested: { fontSize: 12, color: "var(--text)", fontFamily: "var(--font-mono)" },
+  approveBtn: {
+    background: "#fbbf24", color: "#1c1917", border: "none",
+    borderRadius: 6, padding: "6px 16px", fontSize: 12, fontWeight: 700,
+    cursor: "pointer", fontFamily: "var(--font-mono)",
+  },
 };

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { getApiKey, generateApiKey, analyzeSimplifi, importSimplifi, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi, setPropertyBaselineApi, fetchManualAccounts, saveManualAccount, deleteManualAccountApi, downloadXlsx, saveAccountNickname, deleteAccountNicknameApi, getLastAudit, uploadAuditSheet, insertAuditTransactions, completeAudit, fetchImportedAccounts, clearImportedTransactions, fetchVehicles, saveVehicle, deleteVehicleApi, setVehicleBaselineApi, syncVehiclesApi, fetchLinkedInstitutions, removeLinkedInstitution, replayBackfill, getBackfillStatus } from "../api.js";
+import { getApiKey, generateApiKey, analyzeSimplifi, importSimplifi, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi, setPropertyBaselineApi, fetchManualAccounts, saveManualAccount, deleteManualAccountApi, downloadXlsx, saveAccountNickname, deleteAccountNicknameApi, getLastAudit, uploadAuditSheet, insertAuditTransactions, completeAudit, fetchImportedAccounts, clearImportedTransactions, fetchVehicles, saveVehicle, deleteVehicleApi, setVehicleBaselineApi, syncVehiclesApi, fetchLinkedInstitutions, removeLinkedInstitution, replayBackfill, getBackfillStatus, gmailStatus, gmailAuthUrl, gmailAuthCode, scanReceipts } from "../api.js";
 
 export default function Settings({ reloadData, user, accounts = [] }) {
   // Connected banks state
@@ -83,6 +83,15 @@ export default function Settings({ reloadData, user, accounts = [] }) {
   const [clearSelected, setClearSelected]   = useState(new Set());
   const [clearTyped, setClearTyped]         = useState("");
 
+  // Gmail receipt scanner state
+  const [gmailConnected, setGmailConnected] = useState(null); // null = loading
+  const [gmailUrl, setGmailUrl]             = useState(null);
+  const [gmailCode, setGmailCode]           = useState("");
+  const [gmailBusy, setGmailBusy]           = useState(false);
+  const [gmailResult, setGmailResult]       = useState(null);
+  const [scanning, setScanning]             = useState(false);
+  const [scanResult, setScanResult]         = useState(null);
+
   // Dedup state
   const [deduping, setDeduping]         = useState(false);
   const [replaying, setReplaying]       = useState(false);
@@ -101,7 +110,56 @@ export default function Settings({ reloadData, user, accounts = [] }) {
     fetchVehicles().then((data) => { setVehicles(data.vehicles || []); setVehiclesLoading(false); });
     getLastAudit().then(({ log }) => setLastAudit(log || null)).catch(() => {});
     fetchLinkedInstitutions().then((data) => setInstitutions(data.institutions || [])).catch(() => {});
+    gmailStatus().then((data) => setGmailConnected(!!data.connected)).catch(() => setGmailConnected(false));
   }, []);
+
+  // ── Gmail receipt scanner ─────────────────────────────────────────────────────
+  async function handleGmailAuthUrl() {
+    setGmailBusy(true);
+    setGmailResult(null);
+    try {
+      const res = await gmailAuthUrl();
+      if (res.error) { setGmailResult(`Error: ${res.error}`); return; }
+      setGmailUrl(res.url);
+    } catch (err) {
+      setGmailResult(`Error: ${err.message}`);
+    } finally {
+      setGmailBusy(false);
+    }
+  }
+
+  async function handleGmailAuthCode() {
+    if (!gmailCode.trim()) return;
+    setGmailBusy(true);
+    setGmailResult(null);
+    try {
+      const res = await gmailAuthCode(gmailCode.trim());
+      if (res.error) { setGmailResult(`Error: ${res.error}`); return; }
+      setGmailConnected(true);
+      setGmailUrl(null);
+      setGmailCode("");
+      setGmailResult("Gmail connected. Receipts will also be scanned automatically each morning.");
+    } catch (err) {
+      setGmailResult(`Error: ${err.message}`);
+    } finally {
+      setGmailBusy(false);
+    }
+  }
+
+  async function handleScanReceipts() {
+    setScanning(true);
+    setScanResult(null);
+    try {
+      const res = await scanReceipts();
+      if (res.error) { setScanResult(`Error: ${res.error}`); return; }
+      setScanResult(`Scanned ${res.scanned} email${res.scanned !== 1 ? "s" : ""} · ${res.receipts_found} receipt${res.receipts_found !== 1 ? "s" : ""} found · ${res.matched} matched.`);
+      if (reloadData) reloadData();
+    } catch (err) {
+      setScanResult(`Error: ${err.message}`);
+    } finally {
+      setScanning(false);
+    }
+  }
 
   async function removeInstitution(itemId, institutionName) {
     if (!window.confirm(`Remove ${institutionName}? You can reconnect at any time.`)) return;
@@ -670,6 +728,69 @@ export default function Settings({ reloadData, user, accounts = [] }) {
               </div>
             ))}
           </div>
+        )}
+      </section>
+
+      {/* Gmail receipt scanner */}
+      <section style={styles.card}>
+        <h2 style={styles.cardTitle}>Connect Gmail</h2>
+        <p style={styles.description}>
+          Scans your Gmail for e-receipts (read-only) and matches them to transactions.
+          Matched transactions turn amber on the Transactions page until you approve the
+          suggested category.
+        </p>
+        {gmailConnected === null ? (
+          <p style={styles.muted}>Loading…</p>
+        ) : gmailConnected ? (
+          <>
+            <p style={{ ...styles.muted, marginBottom: 12 }}>
+              <span style={{ color: "var(--green, #22c55e)" }}>✓ Gmail connected</span> — receipts are scanned automatically each morning.
+            </p>
+            <button style={styles.generateBtn} onClick={handleScanReceipts} disabled={scanning}>
+              {scanning ? "Scanning… this can take a few minutes" : "Scan Now"}
+            </button>
+          </>
+        ) : (
+          <>
+            {!gmailUrl ? (
+              <button style={styles.generateBtn} onClick={handleGmailAuthUrl} disabled={gmailBusy}>
+                {gmailBusy ? "…" : "Connect Gmail"}
+              </button>
+            ) : (
+              <div style={styles.dupeBox}>
+                <p style={{ fontSize: 13, color: "var(--text)", marginBottom: 10 }}>
+                  1. Open the link below and approve read-only Gmail access.<br />
+                  2. Your browser will end on a <code style={styles.inlineCode}>localhost</code> page that won't load —
+                  copy the <code style={styles.inlineCode}>code</code> parameter from the address bar.<br />
+                  3. Paste it here.
+                </p>
+                <div style={styles.keyBox}>
+                  <a href={gmailUrl} target="_blank" rel="noreferrer" style={{ ...styles.keyText, color: "var(--accent)" }}>
+                    Open Google consent page
+                  </a>
+                </div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <input
+                    style={{ ...styles.propInput, flex: 1 }}
+                    placeholder="Paste authorization code"
+                    value={gmailCode}
+                    onChange={(e) => setGmailCode(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleGmailAuthCode()}
+                  />
+                  <button style={styles.generateBtn} onClick={handleGmailAuthCode} disabled={gmailBusy || !gmailCode.trim()}>
+                    {gmailBusy ? "Connecting…" : "Save"}
+                  </button>
+                  <button style={styles.regenerateBtn} onClick={() => { setGmailUrl(null); setGmailCode(""); }}>Cancel</button>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+        {gmailResult && (
+          <p style={gmailResult.startsWith("Error") ? styles.importError : styles.importSuccess}>{gmailResult}</p>
+        )}
+        {scanResult && (
+          <p style={scanResult.startsWith("Error") ? styles.importError : styles.importSuccess}>{scanResult}</p>
         )}
       </section>
 
