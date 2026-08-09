@@ -498,6 +498,43 @@ export async function unhideTransactionApi(id) {
   return r.json();
 }
 
+// ── Review workflow & Gmail receipt scanning ──────────────────────────────────
+export async function reviewTransactions(ids) {
+  const r = await fetch(`${BASE}/transactions/review`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ ids }),
+  });
+  return r.json();
+}
+
+export async function scanReceipts() {
+  const r = await fetch(`${BASE}/receipts/scan`, {
+    method: "POST",
+    headers: await authHeaders(),
+  });
+  return r.json();
+}
+
+export async function gmailStatus() {
+  const r = await fetch(`${BASE}/gmail/status`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function gmailAuthUrl() {
+  const r = await fetch(`${BASE}/gmail/auth-url`, { headers: await authHeaders() });
+  return r.json();
+}
+
+export async function gmailAuthCode(code) {
+  const r = await fetch(`${BASE}/gmail/auth-code`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ code }),
+  });
+  return r.json();
+}
+
 // ── Splits ────────────────────────────────────────────────────────────────────
 export async function fetchSplits() {
   const r = await fetch(`${BASE}/splits`, { headers: await authHeaders() });

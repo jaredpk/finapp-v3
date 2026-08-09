@@ -196,6 +196,40 @@ export async function initDb() {
     ALTER TABLE transactions ADD COLUMN IF NOT EXISTS hidden BOOLEAN DEFAULT FALSE;
   `);
 
+  // Review state (Brief 01). NULL = unreviewed (amber). Guarded so the
+  // one-time backfill runs exactly once: rows that existed before the column
+  // are considered reviewed; only the receipt scanner clears the flag.
+  const revCol = await pool.query(
+    `SELECT 1 FROM information_schema.columns
+     WHERE table_name = 'transactions' AND column_name = 'reviewed_at'`);
+  if (revCol.rowCount === 0) {
+    await pool.query(`ALTER TABLE transactions ADD COLUMN reviewed_at TIMESTAMPTZ`);
+    await pool.query(`UPDATE transactions SET reviewed_at = NOW()`);
+  }
+
+  // Gmail receipt scanner tables (Brief 01, Part B)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS gmail_tokens (
+      id TEXT PRIMARY KEY DEFAULT 'default',
+      refresh_token TEXT NOT NULL,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS receipt_matches (
+      transaction_id TEXT PRIMARY KEY REFERENCES transactions(id) ON DELETE CASCADE,
+      gmail_message_id TEXT NOT NULL,
+      merchant TEXT, receipt_date DATE, total NUMERIC(12,2),
+      items JSONB,                    -- [{description, amount}]
+      suggested_category_id UUID,     -- FK to categories, nullable
+      extracted JSONB,                -- full Gemini output for debugging
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS scanned_gmail_messages (
+      gmail_message_id TEXT PRIMARY KEY,
+      scanned_at TIMESTAMPTZ DEFAULT NOW(),
+      matched BOOLEAN DEFAULT FALSE
+    );
+  `);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS hidden_accounts (
       account_id TEXT PRIMARY KEY,
@@ -620,8 +654,8 @@ export async function upsertTransactions(transactions) {
     const status = t.pending ? 'pending' : 'reviewed';  // constraint: pending | reviewed
     const pendingTxnId = t.pending_transaction_id || null;
     await pool.query(
-      `INSERT INTO transactions (id, date, merchant, amount, account, plaid_category, status, currency, pending_transaction_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'USD', $8)
+      `INSERT INTO transactions (id, date, merchant, amount, account, plaid_category, status, currency, pending_transaction_id, reviewed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'USD', $8, NOW())
        ON CONFLICT (id) DO UPDATE SET amount = $4, status = $7, pending_transaction_id = $8`,
       [txnId, t.date, merchant, t.amount, t.account_id || t.account || 'unknown', category, status, pendingTxnId]
     );
@@ -632,36 +666,44 @@ export async function getTransactions({ limit = 100, startDate, endDate, categor
   const conditions = [];
   const params = [];
   let i = 1;
-  if (startDate) { conditions.push(`date >= $${i++}`); params.push(startDate); }
-  if (endDate)   { conditions.push(`date <= $${i++}`); params.push(endDate); }
-  if (category)  { conditions.push(`LOWER(plaid_category) = LOWER($${i++})`); params.push(category); }
+  if (startDate) { conditions.push(`t.date >= $${i++}`); params.push(startDate); }
+  if (endDate)   { conditions.push(`t.date <= $${i++}`); params.push(endDate); }
+  if (category)  { conditions.push(`LOWER(t.plaid_category) = LOWER($${i++})`); params.push(category); }
   params.push(limit);
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const { rows } = await pool.query(
     `SELECT
-       id AS transaction_id,
-       TO_CHAR(date, 'YYYY-MM-DD') AS date,
-       TO_CHAR(authorized_date, 'YYYY-MM-DD') AS authorized_date,
-       merchant AS merchant_name,
-       name,
-       amount::float,
-       currency,
-       account AS account_id,
-       payment_channel,
-       plaid_category AS category,
-       primary_category,
-       category_confidence,
-       pending_transaction_id,
-       city,
-       state,
-       website,
-       logo_url,
-       original_description,
-       suggested_category,
-       (status = 'pending') AS pending,
-       hidden,
-       created_at
-     FROM transactions ${where} ORDER BY date DESC LIMIT $${i}`,
+       t.id AS transaction_id,
+       TO_CHAR(t.date, 'YYYY-MM-DD') AS date,
+       TO_CHAR(t.authorized_date, 'YYYY-MM-DD') AS authorized_date,
+       t.merchant AS merchant_name,
+       t.name,
+       t.amount::float,
+       t.currency,
+       t.account AS account_id,
+       t.payment_channel,
+       t.plaid_category AS category,
+       t.primary_category,
+       t.category_confidence,
+       t.pending_transaction_id,
+       t.city,
+       t.state,
+       t.website,
+       t.logo_url,
+       t.original_description,
+       t.suggested_category,
+       (t.status = 'pending') AS pending,
+       t.hidden,
+       t.created_at,
+       t.reviewed_at,
+       rm.merchant AS receipt_merchant,
+       TO_CHAR(rm.receipt_date, 'YYYY-MM-DD') AS receipt_date,
+       rm.total::float AS receipt_total,
+       rm.items AS receipt_items,
+       rm.suggested_category_id
+     FROM transactions t
+     LEFT JOIN receipt_matches rm ON rm.transaction_id = t.id
+     ${where} ORDER BY t.date DESC LIMIT $${i}`,
     params
   );
   return rows;
@@ -878,8 +920,9 @@ export async function upsertPlaidTransactions(transactions) {
       `INSERT INTO transactions
          (id, date, merchant, amount, account, plaid_category, status, currency,
           pending_transaction_id, authorized_date, name, primary_category,
-          category_confidence, city, state, website, logo_url, original_description)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+          category_confidence, city, state, website, logo_url, original_description,
+          reviewed_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,NOW())
        ON CONFLICT (id) DO UPDATE SET
          amount                = EXCLUDED.amount,
          status                = EXCLUDED.status,
@@ -1453,8 +1496,8 @@ export async function upsertCsvTransaction(t) {
   // import because some unrelated account happened to move the same sum that
   // day, and an inflow was treated as covered by an outflow of equal size.
   const { rowCount } = await pool.query(
-    `INSERT INTO transactions (id, date, merchant, amount, account, plaid_category, status, currency)
-     SELECT $1, $2, $3, $4, $5, $6, 'reviewed', 'USD'
+    `INSERT INTO transactions (id, date, merchant, amount, account, plaid_category, status, currency, reviewed_at)
+     SELECT $1, $2, $3, $4, $5, $6, 'reviewed', 'USD', NOW()
      WHERE NOT EXISTS (
        SELECT 1 FROM transactions
        WHERE date = $2::date
@@ -1622,8 +1665,8 @@ export async function upsertImportedTransaction(t) {
     [t.transaction_id]
   );
   await pool.query(
-    `INSERT INTO transactions (id, date, merchant, amount, account, plaid_category, status, currency)
-     VALUES ($1, $2, $3, $4, $5, $6, 'reviewed', 'USD')`,
+    `INSERT INTO transactions (id, date, merchant, amount, account, plaid_category, status, currency, reviewed_at)
+     VALUES ($1, $2, $3, $4, $5, $6, 'reviewed', 'USD', NOW())`,
     [t.transaction_id, t.date, t.merchant_name || t.name, t.amount, t.account_id || 'imported', t.category || null]
   );
 }
@@ -1890,6 +1933,58 @@ export async function upsertAssignment(transactionId, categoryId) {
      ON CONFLICT (transaction_id) DO UPDATE SET category_id = $2, updated_at = NOW()`,
     [transactionId, categoryId || null]
   );
+}
+
+// ── Review state & Gmail receipt scanning ─────────────────────────────────────
+export async function saveGmailRefreshToken(refreshToken) {
+  await pool.query(
+    `INSERT INTO gmail_tokens (id, refresh_token, updated_at)
+     VALUES ('default', $1, NOW())
+     ON CONFLICT (id) DO UPDATE SET refresh_token = $1, updated_at = NOW()`,
+    [refreshToken]
+  );
+}
+
+export async function getGmailRefreshToken() {
+  const { rows } = await pool.query(
+    `SELECT refresh_token FROM gmail_tokens WHERE id = 'default'`
+  );
+  return rows[0]?.refresh_token || null;
+}
+
+// Approves transactions: sets reviewed_at and, when the scanner suggested a
+// category and nothing is assigned yet, applies the suggestion. Assignment
+// first, then the reviewed_at flip — approval is what applies the category.
+export async function reviewTransactions(ids) {
+  if (!ids?.length) return { reviewed: 0, categorized: 0 };
+  const { rows } = await pool.query(
+    `SELECT t.id, rm.suggested_category_id
+     FROM transactions t
+     JOIN receipt_matches rm ON rm.transaction_id = t.id
+     LEFT JOIN assignments a ON a.transaction_id = t.id
+     WHERE t.id = ANY($1)
+       AND rm.suggested_category_id IS NOT NULL
+       AND a.transaction_id IS NULL`,
+    [ids]
+  );
+  let categorized = 0;
+  for (const r of rows) {
+    await upsertAssignment(r.id, r.suggested_category_id);
+    categorized++;
+  }
+  const { rowCount } = await pool.query(
+    `UPDATE transactions SET reviewed_at = NOW() WHERE id = ANY($1)`,
+    [ids]
+  );
+  return { reviewed: rowCount, categorized };
+}
+
+export async function unreviewTransaction(id) {
+  const { rowCount } = await pool.query(
+    `UPDATE transactions SET reviewed_at = NULL WHERE id = $1`,
+    [id]
+  );
+  return rowCount > 0;
 }
 
 // ── Splits ────────────────────────────────────────────────────────────────────

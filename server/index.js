@@ -47,8 +47,11 @@ import {
   getAccountNicknames, upsertAccountNickname, deleteAccountNickname,
   getLastAuditLog, saveAuditLog, updateAuditInsertedCount, completeAuditLog,
   getTransactionDateAmountSet, parseAuditXlsx,
+  reviewTransactions, unreviewTransaction, getGmailRefreshToken,
 } from "./db.js";
 import pool from "./db.js";
+import { gmailConfigured, getGmailAuthUrl, exchangeGmailAuthCode, gmailConnected } from "./gmail.js";
+import { receiptScanConfigured, runReceiptScan } from "./receiptScan.js";
 import { findUnmatchedPaymentLegs } from "./transactionMatching.js";
 import { registerPropertyFinanceRoutes } from "./property/routes.js";
 
@@ -709,6 +712,77 @@ app.post("/api/transactions/:id/unhide", requireAuth, async (req, res) => {
     await unhideTransaction(req.params.id);
     res.json({ ok: true });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Review workflow (Brief 01) ────────────────────────────────────────────────
+app.post("/api/transactions/review", requireAuth, async (req, res) => {
+  try {
+    const { ids } = req.body || {};
+    if (!Array.isArray(ids) || ids.length === 0)
+      return res.status(400).json({ error: "ids array required" });
+    if (ids.length > 1000)
+      return res.status(400).json({ error: "At most 1000 ids per request" });
+    const result = await reviewTransactions(ids);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/transactions/:id/unreview", requireAuth, async (req, res) => {
+  try {
+    const ok = await unreviewTransaction(req.params.id);
+    if (!ok) return res.status(404).json({ error: "Transaction not found" });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Gmail receipt scanner (Brief 01) ──────────────────────────────────────────
+app.get("/api/gmail/auth-url", requireAuth, async (req, res) => {
+  if (!gmailConfigured())
+    return res.status(503).json({ error: "Gmail OAuth not configured — set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET" });
+  try {
+    res.json({ url: getGmailAuthUrl() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/gmail/auth-code", requireAuth, async (req, res) => {
+  if (!gmailConfigured())
+    return res.status(503).json({ error: "Gmail OAuth not configured — set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET" });
+  try {
+    const { code } = req.body || {};
+    if (!code) return res.status(400).json({ error: "code required" });
+    await exchangeGmailAuthCode(code);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/gmail/status", requireAuth, async (req, res) => {
+  try {
+    res.json({ connected: await gmailConnected() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/receipts/scan", requireAuth, async (req, res) => {
+  if (!receiptScanConfigured())
+    return res.status(503).json({ error: "Receipt scanning not configured — set GEMINI_API_KEY" });
+  if (!(await gmailConnected()))
+    return res.status(503).json({ error: "Gmail is not connected — connect it in Settings first" });
+  try {
+    const result = await runReceiptScan();
+    res.json(result);
+  } catch (err) {
+    console.error("Receipt scan failed:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -2116,6 +2190,11 @@ initDb().then(async () => {
 
   app.listen(PORT, () => {
     console.log(`FinApp server running on :${PORT}`);
+    console.log(
+      "Receipt scanner: GEMINI_API_KEY must be minted in a BILLED Google Cloud " +
+        "project — only paid-tier usage carries the no-training data terms for " +
+        "receipt emails."
+    );
 
     // Daily 8 AM ET safety-net sync (only fires when machine is running)
     (function scheduleDailySync() {
@@ -2127,6 +2206,28 @@ initDb().then(async () => {
         console.log("Running daily scheduled sync");
         try { await syncTransactions(); } catch (e) { console.error("Scheduled sync failed:", e.message); }
         scheduleDailySync();
+      }, next - now);
+    })();
+
+    // Opt-in daily receipt scan, shortly after the safety-net sync. Only runs
+    // when Gmail has been connected (gmail_tokens has a row) and a Gemini key
+    // is present — otherwise it reschedules and stays silent.
+    (function scheduleDailyReceiptScan() {
+      const now = new Date();
+      const next = new Date();
+      next.setUTCHours(13, 10, 0, 0); // ~8:10 AM EST, after the daily sync
+      if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
+      setTimeout(async () => {
+        try {
+          if (receiptScanConfigured() && (await getGmailRefreshToken())) {
+            console.log("Running daily receipt scan");
+            const result = await runReceiptScan();
+            console.log(`Daily receipt scan: scanned ${result.scanned}, receipts ${result.receipts_found}, matched ${result.matched}`);
+          }
+        } catch (e) {
+          console.error("Daily receipt scan failed:", e.message);
+        }
+        scheduleDailyReceiptScan();
       }, next - now);
     })();
   });
