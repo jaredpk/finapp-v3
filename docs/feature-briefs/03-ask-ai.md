@@ -19,13 +19,24 @@ The owner has a Google AI Pro subscription and asked whether it includes API acc
   loop — the free tier is ample.
 - Google also grants **Google Cloud credits to AI Pro/Ultra subscribers** usable
   toward Gemini API on a billed project.
-- **Privacy tradeoff:** free-tier ("unpaid services") requests may be used by Google
-  to improve products; these requests will contain transaction data. Paid-tier data
-  is not used for training and costs cents/month at this volume (`gemini-2.5-flash`
-  ≈ $0.30/M input, $2.50/M output tokens) — coverable by the subscriber credits.
-  **Owner's call**; the code is identical either way.
+- **DECIDED (owner, 2026-08-09): paid tier is required.** As a matter of principle,
+  financial data must not be used for training. Free-tier ("unpaid services")
+  requests may be used by Google to improve products; paid-tier data is not. Cost is
+  cents/month at this volume (`gemini-2.5-flash` ≈ $0.30/M input, $2.50/M output
+  tokens), coverable by the AI Pro subscriber Cloud credits.
 
-Net: **yes, leverage Gemini at effectively $0.** Same `GEMINI_API_KEY` as Brief 01.
+**Required setup (owner):** create/select a Google Cloud project, **enable billing**
+on it (attach the subscriber Cloud credits), and mint the `GEMINI_API_KEY` in
+AI Studio **tied to that billed project** — that places all API usage under the
+paid-tier data terms. A key from an unbilled project silently falls under free-tier
+terms, so the implementer must add a startup log line reminding which project the
+key should come from, and the Settings/README note must state the billed-project
+requirement. (Full OAuth/service-account auth via Vertex AI would also satisfy the
+data terms but is heavier than needed for a single-user server; the billed-project
+API key is the chosen mechanism.)
+
+Net: **use Gemini on the paid tier at cents/month.** Same `GEMINI_API_KEY` as
+Brief 01 — one billed project covers both features.
 
 ## Constraints (already decided — do not revisit)
 

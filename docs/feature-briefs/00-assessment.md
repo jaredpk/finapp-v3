@@ -28,12 +28,13 @@ Findings (verified 2026-08-09):
   together stay well inside that for one user.
 - Google grants **Cloud credits to AI Pro/Ultra subscribers** that can be applied to
   Gemini API usage on a billed project.
-- **Privacy tradeoff to decide once, for both features:** free-tier requests may be
-  used by Google to improve products, and these requests carry email receipt text
-  (feature 1) and transaction data (feature 3). The paid tier excludes training use
-  and costs cents/month at this volume (`gemini-2.5-flash` ≈ $0.30/M input, $2.50/M
-  output tokens) — coverable by the subscriber Cloud credits. The code is identical
-  either way; it's purely a billing-toggle decision on the AI Studio project.
+- **Privacy decision (owner, 2026-08-09): paid tier required for both features.**
+  Free-tier requests may be used by Google to improve products, and these requests
+  carry email receipt text (feature 1) and transaction data (feature 3). As a matter
+  of principle the owner's finances must not be used for training, so the
+  `GEMINI_API_KEY` must come from a Google Cloud project **with billing enabled**
+  (paid tier ≈ $0.30/M input, $2.50/M output on `gemini-2.5-flash` — cents/month,
+  coverable by the AI Pro subscriber Cloud credits).
 
 ## Recommended order
 

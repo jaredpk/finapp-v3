@@ -15,15 +15,15 @@ The implementer cannot do these; the owner (jaredpk@gmail.com) must:
 1. Create a Google Cloud project; enable the **Gmail API**; configure an OAuth
    consent screen (internal/testing is fine for single-user); create OAuth 2.0
    **Desktop** credentials → `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`.
-2. Get a **Gemini API key** from Google AI Studio → `GEMINI_API_KEY`.
-   - Free tier works (~10 req/min, ~250 req/day on `gemini-2.5-flash`; limits were
-     reduced in Dec 2025 — re-check current numbers).
-   - **Privacy decision:** on the free tier, Google's terms allow submitted content
-     to be used to improve their products. These requests will contain email receipt
-     contents. If that's unacceptable, enable billing on the project (paid-tier data
-     is not used for training; cost at this volume is cents/month, and Google AI
-     Pro subscriber cloud credits can cover it). The brief defaults to whichever the
-     owner chooses; the code is identical.
+2. Get a **Gemini API key** from Google AI Studio → `GEMINI_API_KEY`, minted in a
+   Google Cloud project **with billing enabled**.
+   - **DECIDED (owner, 2026-08-09): paid tier is required** — receipt emails are
+     financial data and must not be used for training; only paid-tier usage carries
+     the no-training data terms. Cost is cents/month at this volume, coverable by
+     the AI Pro subscriber Cloud credits. A key from an unbilled project silently
+     falls under free-tier terms — use the same billed project as Brief 03.
+   - Rate limits still apply (paid tier 1 raises them well above the free tier's
+     ~10 RPM; the scanner's throttle stays as specified as a safety margin).
 3. Run the one-time OAuth authorization flow (Part B, step 1) to mint a refresh
    token.
 
