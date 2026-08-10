@@ -4,7 +4,12 @@
 // scanned_gmail_messages inserts, and reviewed_at = NULL on the matched
 // transaction — it never modifies amounts, dates, or merchants and never
 // deletes anything.
-import { GoogleGenAI, Type } from "@google/genai";
+// @google/genai costs ~34 MB RSS at import, so it is loaded on first use
+// rather than at boot — the 256 MB production VM can't afford it idle.
+// Type mirrors the SDK's enum, which is plain uppercase strings.
+const Type = { OBJECT: "OBJECT", STRING: "STRING", NUMBER: "NUMBER", INTEGER: "INTEGER", BOOLEAN: "BOOLEAN", ARRAY: "ARRAY" };
+let genaiModule = null;
+export function loadGenAI() { return (genaiModule ??= import("@google/genai")); }
 import pool from "./db.js";
 import { getCategories, unreviewTransaction } from "./db.js";
 import { getGmailClient } from "./gmail.js";
@@ -210,6 +215,7 @@ async function insertReceiptMatch(transactionId, gmailMessageId, receipt, sugges
 export async function runReceiptScan() {
   if (!receiptScanConfigured()) throw new Error("GEMINI_API_KEY is not set");
   const gmail = await getGmailClient();
+  const { GoogleGenAI } = await loadGenAI();
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
   const categories = await getCategories();
   const categoryNames = categories.map((c) => c.name);

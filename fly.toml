@@ -1,5 +1,6 @@
 app = 'finapp-v3'
 primary_region = 'sjc'
+swap_size_mb = 256
 
 
 [http_service]

@@ -5,7 +5,10 @@
 //
 // Nothing here touches Google at import time, so the app boots with none of the
 // OAuth env vars set — the route handlers return "not configured" instead.
-import { google } from "googleapis";
+// Scoped @googleapis/gmail instead of the googleapis monolith: the monolith
+// eagerly loads every Google API client and costs ~113 MB RSS at import,
+// which OOMed the 256 MB production VM.
+import { auth as googleAuth, gmail } from "@googleapis/gmail";
 import { saveGmailRefreshToken, getGmailRefreshToken } from "./db.js";
 
 const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
@@ -22,7 +25,7 @@ export function gmailConfigured() {
 }
 
 function makeOAuthClient() {
-  return new google.auth.OAuth2(
+  return new googleAuth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
     REDIRECT_URI
@@ -58,5 +61,5 @@ export async function getGmailClient() {
   if (!refreshToken) throw new Error("Gmail is not connected");
   const auth = makeOAuthClient();
   auth.setCredentials({ refresh_token: refreshToken });
-  return google.gmail({ version: "v1", auth });
+  return gmail({ version: "v1", auth });
 }

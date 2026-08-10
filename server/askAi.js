@@ -6,7 +6,10 @@
 // (production passes a closure over ai.models.generateContent, tests pass a
 // scripted fake) and `impl` is the tool-name → async function map, so the loop
 // is unit-testable without a network or a database (test/askAi.test.js).
-import { GoogleGenAI, Type } from "@google/genai";
+// @google/genai is loaded on first use, not at boot — see receiptScan.js for
+// the memory rationale. Type mirrors the SDK's plain-string enum.
+import { loadGenAI } from "./receiptScan.js";
+const Type = { OBJECT: "OBJECT", STRING: "STRING", NUMBER: "NUMBER", INTEGER: "INTEGER", BOOLEAN: "BOOLEAN", ARRAY: "ARRAY" };
 import {
   getVisibleTransactions, getSpendingByCategory, getCategories,
   getLatestBalances, getReportSummary,
@@ -194,12 +197,14 @@ export async function runAskLoop({ question, history, generate, impl: tools, max
 // Production `generate`: a closure over ai.models.generateContent. Created per
 // request so the system prompt carries the current date.
 export function createGeminiGenerate() {
-  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
   const systemInstruction = buildSystemPrompt();
-  return (contents) =>
-    ai.models.generateContent({
+  return async (contents) => {
+    const { GoogleGenAI } = await loadGenAI();
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    return ai.models.generateContent({
       model: process.env.ASK_AI_MODEL || "gemini-2.5-flash",
       contents,
       config: { systemInstruction, tools: [{ functionDeclarations }] },
     });
+  };
 }
