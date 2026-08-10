@@ -749,6 +749,19 @@ export default function Settings({ reloadData, user, accounts = [] }) {
             <button style={styles.generateBtn} onClick={handleScanReceipts} disabled={scanning}>
               {scanning ? "Scanning… this can take a few minutes" : "Scan Now"}
             </button>
+            <button
+              style={{ ...styles.generateBtn, marginLeft: 8, opacity: 0.75 }}
+              disabled={gmailBusy}
+              onClick={async () => {
+                // Re-runs the consent flow; the pasted code overwrites the stored
+                // refresh token (needed after publishing the OAuth app so the
+                // token stops expiring every 7 days).
+                setGmailConnected(false);
+                await handleGmailAuthUrl();
+              }}
+            >
+              Reconnect
+            </button>
           </>
         ) : (
           <>
