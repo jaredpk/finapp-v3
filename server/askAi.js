@@ -27,7 +27,11 @@ const MAX_HISTORY_TURNS = 10;
 // slow question degrades to an honest answer we control. Sized against a 60s
 // proxy timeout (we don't know the real one; 60s is the common default) and
 // the per-round-trip timeout below: 35s budget + 20s in-flight call = 55s
-// worst case. With thinking disabled the normal path finishes far inside 35s.
+// worst case. The 35s was sized when the default model ran with thinking
+// switched off entirely; the current default (gemini-3.7-flash) only turns it
+// DOWN to LOW — 3.x cannot disable thinking at all — so the normal path now
+// carries some thinking time per round-trip. Revisit this budget if latency
+// regresses.
 export const ASK_DEADLINE_MS = 35_000;
 
 export function askAiConfigured() {
@@ -216,9 +220,25 @@ export async function runAskLoop({
         // rephrase the call or answer around it.
         result = { error: String(e.message) };
       }
+      // Echo the call's id back when the model populated one. Gemini 3 matches
+      // a response to its call by id (FunctionCall.id → FunctionResponse.id,
+      // dist/genai.d.ts on 2.16.0: "return the response with the matching
+      // id"); name alone is ambiguous the moment one turn contains parallel
+      // calls to the same tool. gemini-2.5-flash doesn't populate ids, so the
+      // key is spread in rather than written out: the object then carries no
+      // `id` at all. On the wire it would make no difference — JSON.stringify
+      // drops undefined-valued keys — but `Object.keys`/`in` would still see
+      // one, and the tests pin that shape to keep the 2.5 request byte-for-byte
+      // what it is today.
       contents.push({
         role: "user",
-        parts: [{ functionResponse: { name: call.name, response: { result: truncateJson(result) } } }],
+        parts: [{ functionResponse: {
+          // `!= null` rather than truthiness: an id is a string, and "" should
+          // be passed through as-is rather than silently dropped.
+          ...(call.id != null ? { id: call.id } : {}),
+          name: call.name,
+          response: { result: truncateJson(result) },
+        } }],
       });
     }
   }
@@ -229,34 +249,62 @@ export async function runAskLoop({
 }
 
 // Resolved in one place because two things now depend on the model name: the
-// request itself and whether thinking can be switched off for it.
+// request itself and how (or whether) thinking can be turned down for it.
+// The default is a moving target — it tracks the current-generation flash
+// model, so it changes as Google ships one — and ASK_AI_MODEL is the escape
+// hatch for when a new default misbehaves in production: setting it (e.g.
+// `fly secrets set ASK_AI_MODEL=gemini-2.5-flash`) rolls back to a known-good
+// model without a deploy. Don't rename it or let the default win over it.
 export function resolveAskModel() {
-  return process.env.ASK_AI_MODEL || "gemini-2.5-flash";
+  return process.env.ASK_AI_MODEL || "gemini-3.7-flash";
 }
 
 // Thinking costs latency we don't need — Ask AI runs up to MAX_ITERATIONS
-// round-trips, so per-call thinking time is multiplied by the loop — hence
-// thinkingBudget 0 (ThinkingConfig.thinkingBudget, "0 is DISABLED", verified
-// against dist/genai.d.ts on 2.16.0). But the budget is NOT universally
-// settable, and ASK_AI_MODEL is an env knob, so sending the field to a model
+// round-trips, so per-call thinking time is multiplied by the loop. How you
+// turn it down depends on the model GENERATION, and the two knobs are mutually
+// exclusive: ThinkingConfig carries both `thinkingBudget` (a token count, "0 is
+// DISABLED") and `thinkingLevel` (an enum), but Gemini 3 REPLACED the budget
+// with the level and rejects a request that sets both. So each branch below
+// emits exactly one field, never both.
+//   - 2.5 flash tier → thinkingBudget 0, i.e. thinking fully off. Unchanged.
+//   - 3.x flash tier → thinkingLevel LOW. LOW is the floor here, not MINIMAL:
+//     gemini-3.7-flash does not support MINIMAL and fails request validation on
+//     it, so thinking cannot be switched off entirely on 3.x — only turned down.
+// Everything else keeps the model's own default, because the field is NOT
+// universally settable and ASK_AI_MODEL is an env knob: sending it to a model
 // that won't take it turns one env var into a config that 400s every single
 // request — precisely the failure class removed from the tool declarations
-// above. Two distinct ways to get that wrong:
-//   - gemini-2.5-pro understands thinking but cannot switch it off (minimum
-//     budget 128), so 0 is rejected;
+// above. Three distinct ways to get that wrong:
+//   - pro of any generation understands thinking but cannot switch it off
+//     (gemini-2.5-pro has a minimum budget of 128), so 0 is rejected;
 //   - gemini-2.0-flash / gemini-1.5-flash predate thinking entirely and have
 //     no thinkingConfig to set — matching them on the substring "flash" would
-//     reintroduce the same breakage from the other direction.
-// So this is an allow-list, not a keyword search: only the 2.5 flash tier
-// (gemini-2.5-flash and gemini-2.5-flash-lite, plus their dated/preview
-// suffixes) is known to accept 0. Anything unrecognised — new models, other
-// vendors' naming, a typo — falls through to {} and keeps the model's own
-// default, so the failure mode of being wrong here is "slower than it could
-// be", never "broken". Returns a spreadable fragment so "omit" really means
-// absent, not an undefined key.
+//     reintroduce the same breakage from the other direction;
+//   - crossing the generations, e.g. sending thinkingBudget to a 3.x model or
+//     thinkingLevel to a 2.5 one, is wrong even though both models think.
+// So this is an allow-list, not a keyword search: only the flash tiers whose
+// accepted field is known (gemini-2.5-flash / gemini-3.N-flash, their -lite
+// variants and dated/preview suffixes) get one. Anything unrecognised — new
+// models, other vendors' naming, a typo — falls through to {}, so the failure
+// mode of being wrong here is "slower than it could be", never "broken".
+// Returns a spreadable fragment so "omit" really means absent, not an
+// undefined key. (Field names verified against dist/genai.d.ts on 2.16.0.)
+//
+// ThinkingLevel mirrors the SDK's plain-string enum exactly as Type does at the
+// top of this file, and only the one member we send. The casing is a live trap:
+// the SDK declares the name TWICE. `ThinkingConfig.thinkingLevel` — the field
+// generateContent takes, which is our path — is typed as the UPPERCASE enum
+// `ThinkingLevel` (LOW = "LOW"). The lowercase spelling in the same file
+// ("minimal" | "low" | "medium" | "high") is a different type that hangs off
+// `GenerationConfig_2.thinking_level`, the agent/streaming surface, which
+// nothing here uses. So the wire value must be "LOW"; lowercasing it sends
+// generateContent a level its enum doesn't define.
+const ThinkingLevel = { LOW: "LOW" };
 export function thinkingConfigFor(model) {
-  if (!/^gemini-2\.5-flash\b/.test(String(model))) return {};
-  return { thinkingConfig: { thinkingBudget: 0 } };
+  const name = String(model);
+  if (/^gemini-2\.5-flash\b/.test(name)) return { thinkingConfig: { thinkingBudget: 0 } };
+  if (/^gemini-3\.\d+-flash\b/.test(name)) return { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } };
+  return {};
 }
 
 // Production `generate`: a closure over ai.models.generateContent. Created per
