@@ -41,9 +41,15 @@ Brief 01 — one billed project covers both features.
 ## Constraints (already decided — do not revisit)
 
 1. **Read-only tool surface** — query functions only; no delete/import/sync/write.
-2. **Model `gemini-2.5-flash`**, overridable via env `ASK_AI_MODEL`
-   (`gemini-2.5-pro` for smarter answers if the owner enables billing — Pro's free
-   quota is much smaller).
+2. **Model: the current-generation flash model**, overridable via env
+   `ASK_AI_MODEL` (`gemini-2.5-pro` for smarter answers if the owner enables
+   billing — Pro's free quota is much smaller). The brief was written against
+   `gemini-2.5-flash`; the shipped default is **`gemini-3.7-flash`** as of
+   commit 1c5d62a. It is a moving target by design — it tracks whatever
+   current-generation flash model Google ships — so read `resolveAskModel()` in
+   `server/askAi.js` for today's value rather than this line. `ASK_AI_MODEL`
+   always wins over the default, and is the rollback path when a new one
+   misbehaves.
 3. Endpoint behind `requireAuth`. Non-streaming v1.
 4. App must boot without `GEMINI_API_KEY` (endpoint returns 503, client shows a
    friendly notice).
@@ -121,7 +127,7 @@ app.post("/api/ask", requireAuth, async (req, res) => {
     ];
     for (let i = 0; i < 8; i++) {
       const r = await ai.models.generateContent({
-        model: process.env.ASK_AI_MODEL || "gemini-2.5-flash",
+        model: process.env.ASK_AI_MODEL || "gemini-3.7-flash", // default moves; env wins
         contents,
         config: { systemInstruction: SYSTEM_PROMPT, tools: [{ functionDeclarations }] },
       });
@@ -136,7 +142,7 @@ app.post("/api/ask", requireAuth, async (req, res) => {
         contents.push({
           role: "user",
           parts: [{ functionResponse: { name: call.name,
-            response: { result: truncateJson(result, 50_000) } } }],
+            response: { result: truncateJson(result) } } }],
         });
       }
     }
@@ -150,8 +156,16 @@ app.post("/api/ask", requireAuth, async (req, res) => {
 
 Notes for the implementer:
 
-- `truncateJson(x, n)`: `JSON.stringify`, cut at n chars, append `"(truncated)"` —
-  one broad query must not blow the context.
+- `truncateJson(x, n)`: `JSON.stringify`, and REFUSE outright above n chars —
+  one broad query must not blow the context. Do NOT implement this as "cut at n
+  and append `(truncated)`", which is what shipped first and what had to be
+  fixed: the results are ordered oldest-first, so the cut silently dropped the
+  most RECENT months, and the model reported the missing tail as $0.00 rather
+  than as absent. It also left invalid JSON. Return a structured
+  `{ error: "RESULT_TOO_LARGE", message }` carrying no data at all, and have the
+  system prompt tell the model to retry with a narrower range or a category
+  filter and never read an absent period as zero. Partial aggregate data is
+  worse than none, because it looks complete.
 - System prompt (<~30 lines): today's date (the model doesn't know it), the amount
   sign convention, single-user context, "answer only from tool data; if the data
   doesn't cover it, say so," and "amounts in USD."

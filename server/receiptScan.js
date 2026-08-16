@@ -33,6 +33,7 @@ export function loadGenAI() {
 import pool from "./db.js";
 import { getCategories, unreviewTransaction } from "./db.js";
 import { getGmailClient } from "./gmail.js";
+import { checkGeminiBudget, recordGeminiCall, usageFromResponse } from "./geminiUsage.js";
 
 const GMAIL_QUERY =
   '("receipt" OR "order confirmation" OR "invoice" OR "your purchase") newer_than:35d -category:promotions';
@@ -137,8 +138,11 @@ function isRateLimitError(err) {
 }
 
 async function extractReceipt(ai, categoryNames, emailText) {
+  // Resolved into a local because two things need it now: the request, and the
+  // usage row that has to say which model's price list the estimate came from.
+  const model = process.env.RECEIPT_MODEL || "gemini-2.5-flash";
   const res = await ai.models.generateContent({
-    model: process.env.RECEIPT_MODEL || "gemini-2.5-flash",
+    model,
     contents:
       `Categories: ${categoryNames.join(", ")}\n` +
       `If this email is a purchase receipt, extract it. If not, return is_receipt=false.\n\n` +
@@ -161,6 +165,11 @@ async function extractReceipt(ai, categoryNames, emailText) {
       },
     },
   });
+  // Accounted after the call returns and before the parse: a call that threw
+  // has no usageMetadata to account for, while one whose JSON we then fail to
+  // parse was still paid for. recordGeminiCall swallows its own failures, so
+  // this line cannot cost us a receipt.
+  await recordGeminiCall({ feature: "receipt_scan", model, usage: usageFromResponse(res) });
   return JSON.parse(res.text);
 }
 
@@ -234,6 +243,26 @@ async function insertReceiptMatch(transactionId, gmailMessageId, receipt, sugges
 // next run resumes with it.
 export async function runReceiptScan() {
   if (!receiptScanConfigured()) throw new Error("GEMINI_API_KEY is not set");
+  // Budget guard, before Gmail or the SDK is touched. It lives here rather than
+  // in POST /api/receipts/scan because the caller that actually needs stopping
+  // is the 8:10 AM scheduled job in index.js: unattended, up to
+  // MAX_MESSAGES_PER_RUN Gemini calls a night, and the only thing in this app
+  // that can quietly spend a month's budget while nobody is looking. The manual
+  // button is gated by the same line for free. The scanner is cut off at 100%
+  // while interactive Ask AI deliberately runs on past it (see /api/ask) — when
+  // money runs short, the request a human is waiting on wins.
+  // Throwing rather than returning a result matches the configuration refusal
+  // directly above and is what carries the reason to the user: the route turns
+  // an Error into the message the UI already shows, whereas a zero-count result
+  // would look like a scan that simply found nothing.
+  const budget = await checkGeminiBudget("receipt_scan");
+  if (budget.level === "over") {
+    throw new Error(
+      `Monthly Gemini budget reached: $${budget.spentUsd} of $${budget.budgetUsd} spent in ${budget.month} ` +
+        `(${budget.pct}%). Receipt scanning is paused until the month rolls over — raise ` +
+        `GEMINI_MONTHLY_BUDGET_USD to continue sooner.`
+    );
+  }
   const gmail = await getGmailClient();
   const { GoogleGenAI } = await loadGenAI();
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });

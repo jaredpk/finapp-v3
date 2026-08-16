@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { getApiKey, generateApiKey, analyzeSimplifi, importSimplifi, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi, setPropertyBaselineApi, fetchManualAccounts, saveManualAccount, deleteManualAccountApi, downloadXlsx, saveAccountNickname, deleteAccountNicknameApi, getLastAudit, uploadAuditSheet, insertAuditTransactions, completeAudit, fetchImportedAccounts, clearImportedTransactions, fetchVehicles, saveVehicle, deleteVehicleApi, setVehicleBaselineApi, syncVehiclesApi, fetchLinkedInstitutions, removeLinkedInstitution, replayBackfill, getBackfillStatus, gmailStatus, gmailAuthUrl, gmailAuthCode, scanReceipts } from "../api.js";
+import { getApiKey, generateApiKey, analyzeSimplifi, importSimplifi, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi, setPropertyBaselineApi, fetchManualAccounts, saveManualAccount, deleteManualAccountApi, downloadXlsx, saveAccountNickname, deleteAccountNicknameApi, getLastAudit, uploadAuditSheet, insertAuditTransactions, completeAudit, fetchImportedAccounts, clearImportedTransactions, fetchVehicles, saveVehicle, deleteVehicleApi, setVehicleBaselineApi, syncVehiclesApi, fetchLinkedInstitutions, removeLinkedInstitution, replayBackfill, getBackfillStatus, gmailStatus, gmailAuthUrl, gmailAuthCode, scanReceipts, fetchGeminiUsage } from "../api.js";
 
 export default function Settings({ reloadData, user, accounts = [] }) {
   // Connected banks state
@@ -92,6 +92,14 @@ export default function Settings({ reloadData, user, accounts = [] }) {
   const [scanning, setScanning]             = useState(false);
   const [scanResult, setScanResult]         = useState(null);
 
+  // Gemini usage state
+  const [geminiUsage, setGeminiUsage]       = useState(null); // null = loading
+  const [geminiUsageError, setGeminiUsageError] = useState(null);
+  // Separate from the error above because it says something the error doesn't:
+  // the spend guard is failing open right now. Set only when the SERVER
+  // answered — see the fetch below.
+  const [geminiGuardUnknown, setGeminiGuardUnknown] = useState(false);
+
   // Dedup state
   const [deduping, setDeduping]         = useState(false);
   const [replaying, setReplaying]       = useState(false);
@@ -111,6 +119,23 @@ export default function Settings({ reloadData, user, accounts = [] }) {
     getLastAudit().then(({ log }) => setLastAudit(log || null)).catch(() => {});
     fetchLinkedInstitutions().then((data) => setInstitutions(data.institutions || [])).catch(() => {});
     gmailStatus().then((data) => setGmailConnected(!!data.connected)).catch(() => setGmailConnected(false));
+    // A usage card that can't load is a footnote, not a failure — it reports
+    // itself and leaves the rest of Settings alone.
+    //
+    // But an error the SERVER produced is more than a footnote: /api/gemini-usage
+    // only fails when the gemini_usage read fails, and that is the same read the
+    // budget guard fails OPEN on — it allows the call rather than blocking the
+    // app. So a body carrying `error` means spend protection is off right now,
+    // and so does an explicit `unknown` (which only a future degrading response
+    // would carry; today that path is the 500). A rejected fetch is different —
+    // offline, a proxy, a dropped socket — and says nothing about the server, so
+    // it stays a plain error line.
+    fetchGeminiUsage()
+      .then((data) => {
+        if (data.error) { setGeminiUsageError(data.error); setGeminiGuardUnknown(true); }
+        else { setGeminiUsage(data); setGeminiGuardUnknown(Boolean(data.unknown)); }
+      })
+      .catch((err) => setGeminiUsageError(err.message));
   }, []);
 
   // ── Gmail receipt scanner ─────────────────────────────────────────────────────
@@ -681,6 +706,13 @@ export default function Settings({ reloadData, user, accounts = [] }) {
 
   const auditOverdue = !lastAudit || ((Date.now() - new Date(lastAudit.audit_date).getTime()) / 86400000 > 14);
 
+  // The server's three budget levels, in this file's existing emphasis colours.
+  // "ok" keeps the normal value colour so only the states worth noticing stand out.
+  const geminiLevelColor =
+    geminiUsage?.level === "over" ? "var(--red, #ef4444)"
+      : geminiUsage?.level === "warn" ? "var(--amber, #f59e0b)"
+        : styles.value.color;
+
   const sseUrl = apiKey ? `${window.location.origin}/sse?key=${apiKey}` : null;
   const mcpConfig = apiKey ? JSON.stringify({
     mcpServers: { finapp: { command: "npx", args: ["-y", "mcp-remote", `${window.location.origin}/mcp`, "--header", `x-api-key:${apiKey}`] } },
@@ -804,6 +836,79 @@ export default function Settings({ reloadData, user, accounts = [] }) {
         )}
         {scanResult && (
           <p style={scanResult.startsWith("Error") ? styles.importError : styles.importSuccess}>{scanResult}</p>
+        )}
+      </section>
+
+      {/* AI usage */}
+      <section style={styles.card}>
+        <h2 style={styles.cardTitle}>AI Usage</h2>
+        <p style={styles.description}>
+          <strong>Estimate only.</strong> Month-to-date Gemini spend for Ask AI and the receipt
+          scanner, calculated from token counts × Google's published rates. The authoritative
+          figure is <strong>Google Cloud Billing</strong> — where the two disagree, Cloud Billing
+          is right. This is here to catch a runaway bill, not to be one.
+        </p>
+        {geminiUsageError ? (
+          <p style={styles.importError}>Error: {geminiUsageError}</p>
+        ) : !geminiUsage ? (
+          <p style={styles.muted}>Loading…</p>
+        ) : (
+          <>
+            <div style={styles.row}>
+              <span style={styles.label}>Estimated spend ({geminiUsage.month})</span>
+              <span style={{ ...styles.value, color: geminiLevelColor }}>
+                ${Number(geminiUsage.spentUsd).toFixed(2)} of ${Number(geminiUsage.budgetUsd).toFixed(2)}
+              </span>
+            </div>
+            <div style={styles.row}>
+              <span style={styles.label}>Budget used</span>
+              <span style={{ ...styles.value, color: geminiLevelColor }}>
+                {geminiUsage.pct}%
+                {geminiUsage.level === "over" ? " · over budget" : geminiUsage.level === "warn" ? " · nearing budget" : ""}
+              </span>
+            </div>
+            {(geminiUsage.byFeature || []).map((f) => (
+              <div key={f.feature} style={styles.row}>
+                <span style={styles.label}>{FEATURE_LABELS[f.feature] || f.feature}</span>
+                <span style={styles.value}>
+                  ${Number(f.costUsd).toFixed(2)} · {f.calls} call{f.calls !== 1 ? "s" : ""}
+                </span>
+              </div>
+            ))}
+            <div style={styles.row}>
+              <span style={styles.label}>Total calls</span>
+              {/* Every other figure on this card is coerced or defaulted; this
+                  one is a bare number off the body, and `undefined.toLocaleString()`
+                  would take the whole Settings page down rather than this card. */}
+              <span style={styles.value}>{geminiUsage.calls?.toLocaleString() ?? "—"}</span>
+            </div>
+            {geminiUsage.unpricedCalls > 0 && (
+              <p style={{ ...styles.muted, marginTop: 12, color: "var(--amber, #f59e0b)" }}>
+                {geminiUsage.unpricedCalls} of {geminiUsage.calls} call{geminiUsage.calls !== 1 ? "s" : ""} ran on a
+                model with no published price and were charged at the highest rate we know of, so the
+                total above may overstate the real spend.
+              </p>
+            )}
+            {geminiUsage.level === "over" && (
+              <p style={{ ...styles.muted, marginTop: 12, color: "var(--red, #ef4444)" }}>
+                The receipt scanner is paused for the rest of the month. Raise
+                {" "}<code style={styles.inlineCode}>GEMINI_MONTHLY_BUDGET_USD</code> to continue.
+              </p>
+            )}
+          </>
+        )}
+        {/* Outside the branches above on purpose: it applies to the error case
+            (the read failed, which is exactly when the guard fails open) and to
+            a loaded body that says `unknown`. "Couldn't load the card" and
+            "spend protection is currently off" are different sentences and the
+            second is the one worth reading. */}
+        {geminiGuardUnknown && (
+          <p style={{ ...styles.muted, marginTop: 12, color: "var(--red, #ef4444)" }}>
+            <strong>The budget guard is off.</strong> Month-to-date spend can't be read, and the
+            guard fails open on that read rather than blocking the app — so Ask AI and the receipt
+            scanner keep spending, unmetered and unstopped, until it succeeds. The Google Cloud
+            Billing budget alert is the only backstop left.
+          </p>
         )}
       </section>
 
@@ -1634,6 +1739,10 @@ export default function Settings({ reloadData, user, accounts = [] }) {
     </div>
   );
 }
+
+// The two callers that spend the Gemini budget, as `feature` is recorded
+// server-side. An unrecognised value falls back to the raw name.
+const FEATURE_LABELS = { ask_ai: "Ask AI", receipt_scan: "Receipt scanner" };
 
 const styles = {
   container: { padding: "40px 48px", maxWidth: 720 },

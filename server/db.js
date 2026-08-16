@@ -230,6 +230,29 @@ export async function initDb() {
     );
   `);
 
+  // Gemini token accounting. One row per completed Gemini call from either
+  // caller, priced by geminiUsage.js at insert time — the rate table lives in
+  // code and moves, so the dollar figure is frozen into the row rather than
+  // recomputed later from token counts at whatever price is current. The index
+  // is not optional: the month-to-date SUM over created_at runs before every
+  // gated call (both the Ask AI route and each receipt scan), and this table is
+  // append-only, so it is the one query here that grows without bound.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS gemini_usage (
+      id BIGSERIAL PRIMARY KEY,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      feature TEXT NOT NULL,            -- 'ask_ai' | 'receipt_scan'
+      model TEXT NOT NULL,
+      prompt_tokens INTEGER,
+      output_tokens INTEGER,
+      cached_tokens INTEGER,
+      total_tokens INTEGER,
+      estimated_cost_usd NUMERIC(12,6), -- an ESTIMATE; Cloud Billing is authoritative
+      priced TEXT                       -- 'exact' | 'fallback' (model not in the price table)
+    );
+    CREATE INDEX IF NOT EXISTS gemini_usage_created_at_idx ON gemini_usage (created_at);
+  `);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS hidden_accounts (
       account_id TEXT PRIMARY KEY,
@@ -832,7 +855,17 @@ export function buildReportSummary({ startDate, endDate, rows = [], merchantRows
   };
 }
 
-export async function getReportSummary({ startDate, endDate }) {
+// `category` is OPTIONAL and, when given, is a user BUDGET category NAME
+// (categories.name, matched case-insensitively) — not a plaid_category. It
+// exists because the common question is about one category over many months,
+// and answering it by returning every category for every month produces a
+// payload big enough to be refused outright by Ask AI's result ceiling
+// (MAX_RESULT_CHARS in askAi.js). Filtering here turns that into a small one.
+//
+// Omitting it must behave exactly as before: GET /api/reports/summary calls
+// this with { startDate, endDate } only, so the unfiltered path below runs the
+// same two queries with the same parameters it always did.
+export async function getReportSummary({ startDate, endDate, category }) {
   // One pass over transactions: the CTE explodes splits so a split transaction
   // contributes its split amounts to each split's category instead of its full
   // amount to the assigned category. Any leftover (splits that don't sum to
@@ -840,7 +873,25 @@ export async function getReportSummary({ startDate, endDate }) {
   // convention the split editor keeps by recalculating line 0 to absorb the
   // remainder. Exclusions mirror getSpendingByCategory.
   const params = [startDate, endDate];
-  const [{ rows }, { rows: merchantRows }] = await Promise.all([
+  // Applied after the categories join, so it filters on the category's NAME and
+  // drops rows with no category at all (uncategorized contributions have no
+  // categories row to match). Both the per-month by_category lists and the
+  // totals fall out of these rows, so filtering here restricts both. Two notes
+  // on what the filtered shape means:
+  //   - the merchant query below is deliberately NOT filtered (it aggregates
+  //     whole transactions, and a split transaction belongs to several
+  //     categories at once, so there is no honest per-category merchant total
+  //     to give); top_merchants therefore still covers everything, which the
+  //     tool description says out loud.
+  //   - filtering to a Transfer* category yields by_category amounts but zero
+  //     income/spend, because buildReportSummary keeps transfers out of the
+  //     totals. That is the existing convention, not an artefact of the filter.
+  // The filtered query takes a third parameter; the merchant query keeps
+  // `params` untouched, since binding it a parameter it doesn't reference is an
+  // error, not a no-op.
+  const categoryFilter = category ? "WHERE LOWER(cat.name) = LOWER($3)" : "";
+  const monthlyParams = category ? [...params, category] : params;
+  const [{ rows }, { rows: merchantRows }, known] = await Promise.all([
     pool.query(
       `WITH base AS (
          SELECT t.id, t.date, t.amount::numeric AS amount, a.category_id AS assigned_category_id
@@ -877,9 +928,10 @@ export async function getReportSummary({ startDate, endDate }) {
               SUM(CASE WHEN c.amount < 0 THEN -c.amount ELSE 0 END)::float AS income
        FROM contributions c
        LEFT JOIN categories cat ON cat.id = c.category_id
+       ${categoryFilter}
        GROUP BY 1, 2, 3, 4
        ORDER BY 1, spend DESC`,
-      params
+      monthlyParams
     ),
     pool.query(
       `SELECT COALESCE(mo.merchant_name, t.merchant, t.name) AS merchant,
@@ -894,7 +946,18 @@ export async function getReportSummary({ startDate, endDate }) {
        GROUP BY 1 ORDER BY amount DESC LIMIT 15`,
       params
     ),
+    // Does a category by that name exist at all? A name that matches nothing —
+    // a typo, or a plaid_category handed to a budget-category filter — would
+    // otherwise return every month with zeros, which reads exactly like "you
+    // spent nothing" and is the failure this whole path is meant to stop.
+    // Cheap enough to run alongside the other two rather than before them.
+    category
+      ? pool.query("SELECT 1 FROM categories WHERE LOWER(name) = LOWER($1) LIMIT 1", [category])
+      : null,
   ]);
+  if (category && known.rowCount === 0) {
+    throw new Error(`Unknown budget category: "${category}" — no user category has that name`);
+  }
   return buildReportSummary({ startDate, endDate, rows, merchantRows });
 }
 
@@ -1994,6 +2057,75 @@ export async function unreviewTransaction(id) {
     [id]
   );
   return rowCount > 0;
+}
+
+// ── Gemini usage & budget ─────────────────────────────────────────────────────
+// The pricing and budget math lives in geminiUsage.js; this is only storage and
+// aggregation. Nothing here imports that module — it imports this one.
+export async function recordGeminiUsage({ feature, model, promptTokens, outputTokens, cachedTokens, totalTokens, estimatedCostUsd, priced }) {
+  await pool.query(
+    `INSERT INTO gemini_usage
+       (feature, model, prompt_tokens, output_tokens, cached_tokens, total_tokens, estimated_cost_usd, priced)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [feature, model, promptTokens ?? null, outputTokens ?? null, cachedTokens ?? null,
+     totalTokens ?? null, estimatedCostUsd ?? null, priced ?? null]
+  );
+}
+
+// Month-to-date totals for one UTC month ('YYYY-MM'), the figure the budget
+// guard gates on.
+//
+// The range is written as two bounds on created_at rather than
+// TO_CHAR(created_at, 'YYYY-MM') = $1 so the gemini_usage_created_at_idx index
+// can actually be used — this runs before every gated call. `($1 || '-01')`
+// casts to a plain timestamp first: adding INTERVAL '1 month' to a naive
+// timestamp is pure calendar arithmetic with no DST to trip over, and the
+// AT TIME ZONE 'UTC' that follows pins both ends to UTC whatever the session's
+// timezone happens to be, matching currentMonthKey().
+//
+// Both sums are cast because pg hands NUMERIC back as a STRING to preserve
+// precision, and a string spend breaks the arithmetic downstream. Not in the
+// comparison — budgetPct coerces with Number() and "7.5" prices out at 75%
+// correctly — but in getBudgetStatus, which rounds first: round6("7.5") adds
+// Number.EPSILON to a string, giving "7.52.220446049250313e-16", which
+// multiplies out to NaN. JSON.stringify turns that into `"spentUsd": null`, and
+// the settings card's Number(null).toFixed(2) renders it as "$0.00 of $10.00" —
+// a spend of zero on a month that spent $7.50, which is the one direction a
+// budget guard must never be wrong in. COALESCE covers
+// the empty month: SUM over no rows is NULL, and Number(null) is 0 but
+// null >= budget is false in a way that reads like a bug. `IS DISTINCT FROM`
+// rather than <> so rows with a NULL `priced` count as unpriced too.
+export async function getGeminiSpendForMonth(monthKey) {
+  const { rows } = await pool.query(
+    `SELECT COALESCE(SUM(estimated_cost_usd), 0)::float AS spent_usd,
+            COUNT(*)::int AS calls,
+            COUNT(*) FILTER (WHERE priced IS DISTINCT FROM 'exact')::int AS unpriced_calls
+     FROM gemini_usage
+     WHERE created_at >= ($1::text || '-01')::timestamp AT TIME ZONE 'UTC'
+       AND created_at <  (($1::text || '-01')::timestamp + INTERVAL '1 month') AT TIME ZONE 'UTC'`,
+    [monthKey]
+  );
+  return {
+    spentUsd: rows[0]?.spent_usd ?? 0,
+    calls: rows[0]?.calls ?? 0,
+    unpricedCalls: rows[0]?.unpriced_calls ?? 0,
+  };
+}
+
+// Per-feature breakdown for the usage card: which of the two callers is
+// spending the month's budget. Same month bounds as above; camel-cased on the
+// way out because it is rendered straight into the /api/gemini-usage response.
+export async function getGeminiUsageByFeature(monthKey) {
+  const { rows } = await pool.query(
+    `SELECT feature, COUNT(*)::int AS calls,
+            COALESCE(SUM(estimated_cost_usd), 0)::float AS cost_usd
+     FROM gemini_usage
+     WHERE created_at >= ($1::text || '-01')::timestamp AT TIME ZONE 'UTC'
+       AND created_at <  (($1::text || '-01')::timestamp + INTERVAL '1 month') AT TIME ZONE 'UTC'
+     GROUP BY feature ORDER BY cost_usd DESC`,
+    [monthKey]
+  );
+  return rows.map((r) => ({ feature: r.feature, calls: r.calls, costUsd: r.cost_usd }));
 }
 
 // ── Splits ────────────────────────────────────────────────────────────────────

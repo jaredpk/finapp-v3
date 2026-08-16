@@ -48,11 +48,15 @@ import {
   getLastAuditLog, saveAuditLog, updateAuditInsertedCount, completeAuditLog,
   getTransactionDateAmountSet, parseAuditXlsx,
   reviewTransactions, unreviewTransaction, getGmailRefreshToken,
+  getGeminiUsageByFeature,
 } from "./db.js";
 import pool from "./db.js";
 import { gmailConfigured, getGmailAuthUrl, exchangeGmailAuthCode, gmailConnected } from "./gmail.js";
 import { receiptScanConfigured, runReceiptScan } from "./receiptScan.js";
-import { askAiConfigured, runAskLoop, createGeminiGenerate, impl as askAiImpl } from "./askAi.js";
+import { askAiConfigured, runAskLoop, createGeminiGenerate, impl as askAiImpl, resolveAskModel } from "./askAi.js";
+import {
+  ASK_HARD_CEILING_PCT, checkGeminiBudget, getBudgetStatus, recordGeminiCall,
+} from "./geminiUsage.js";
 import { findUnmatchedPaymentLegs } from "./transactionMatching.js";
 import { registerPropertyFinanceRoutes } from "./property/routes.js";
 
@@ -805,19 +809,82 @@ app.post("/api/ask", requireAuth, async (req, res) => {
   // this is financial data.
   const startedAt = Date.now();
   try {
-    const { answer, toolCalls } = await runAskLoop({
+    // Budget guard. Ask AI is the interactive caller and deliberately outlives
+    // the receipt scanner's cutoff: the scanner stops dead at 100% of the
+    // monthly budget because nobody is watching it, while a question the owner
+    // typed keeps working up to ASK_HARD_CEILING_PCT (150% by default).
+    // Refusing to answer mid-conversation over a few dollars is the worse
+    // failure of the two, and the ceiling is what stops "a few dollars" from
+    // becoming unbounded. 503 rather than 402 or 429: this is a temporary
+    // unavailability that clears itself when the month rolls over, and the
+    // client already renders the `error` text of a non-2xx body. The message
+    // names the env var on purpose — whoever hits this is who can raise it.
+    // Inside the try so a database that can't be read fails as an AI error
+    // rather than an unhandled rejection that hangs the request (Express 4
+    // doesn't catch async handler throws).
+    const budget = await checkGeminiBudget("ask_ai");
+    if (budget.pct >= ASK_HARD_CEILING_PCT) {
+      return res.status(503).json({
+        error:
+          `Monthly Gemini budget exhausted: $${budget.spentUsd} of $${budget.budgetUsd} spent in ` +
+          `${budget.month} (${budget.pct}%), past the ${ASK_HARD_CEILING_PCT}% hard ceiling for Ask AI. ` +
+          `Raise GEMINI_ASK_CEILING_PCT (or GEMINI_MONTHLY_BUDGET_USD) to continue this month.`,
+      });
+    }
+    const { answer, toolCalls, usage } = await runAskLoop({
       question,
       history: req.body.history, // clamped to the last 10 turns in runAskLoop
       generate: createGeminiGenerate(),
       impl: askAiImpl,
     });
     console.log(`ask-ai: ${toolCalls.length} tool call(s)${toolCalls.length ? ` [${toolCalls.join(", ")}]` : ""} in ${Date.now() - startedAt}ms`);
+    // Accounted once per question, summed over the loop's round-trips, and
+    // never able to fail the answer — recordGeminiCall swallows its own errors.
+    // resolveAskModel() is asked again rather than threaded through: it reads
+    // the same ASK_AI_MODEL the generator did a moment ago.
+    await recordGeminiCall({ feature: "ask_ai", model: resolveAskModel(), usage });
     res.json({ answer });
   } catch (err) {
+    // A question that threw still spent whatever it spent before the throw, and
+    // those calls are the expensive ones — every round-trip re-sends the whole
+    // conversation, so the fifth costs far more than the first. runAskLoop
+    // attaches its running total to the error for exactly this (err.usage
+    // there); this is the only place it can be recorded, because the success
+    // path below never runs. Skipped when nothing was billed — a 429 on the
+    // very first round-trip carries zero tokens, and a row for a call that
+    // never happened would inflate the card's call count for no gain.
+    // Non-fatal on the same terms as the success path: recordGeminiCall
+    // swallows its own errors, so a failed insert can't change the status or
+    // body the client is about to get.
+    if (err?.usage?.totalTokens > 0) {
+      await recordGeminiCall({ feature: "ask_ai", model: resolveAskModel(), usage: err.usage });
+    }
     // Free-tier 429s are expected under bursts; surface them so the client can
     // say "wait a minute" instead of "broken".
-    console.error("ask-ai:", err.status || "", err.message, `after ${Date.now() - startedAt}ms`);
-    res.status(err.status === 429 ? 429 : 502).json({ error: "AI request failed" });
+    // Optional chaining throughout: everything from here to res.json() runs
+    // before the client hears anything, so a TypeError raised while REPORTING
+    // the failure would strand the request open until a gateway timeout — the
+    // caller would see an un-parseable 502 instead of this JSON. `err` is
+    // whatever was thrown; it is not guaranteed to be an Error.
+    console.error("ask-ai:", err?.status || "", err?.message, `after ${Date.now() - startedAt}ms`);
+    res.status(err?.status === 429 ? 429 : 502).json({ error: "AI request failed" });
+  }
+});
+
+// ── Gemini usage ──────────────────────────────────────────────────────────────
+// What the month has cost so far and how close that is to the cutoffs, for the
+// settings card. Read-only, so it calls getBudgetStatus rather than
+// checkGeminiBudget: refreshing a card must not write a warning line. Both
+// numbers come from the same snapshot the guard itself gates on, so the card
+// can never disagree with the thing that blocked a scan.
+app.get("/api/gemini-usage", requireAuth, async (req, res) => {
+  try {
+    const status = await getBudgetStatus();
+    const byFeature = await getGeminiUsageByFeature(status.month);
+    res.json({ ...status, byFeature });
+  } catch (err) {
+    console.error("Gemini usage failed:", err.message);
+    res.status(500).json({ error: "Failed to read Gemini usage" });
   }
 });
 

@@ -174,6 +174,14 @@ export async function askAi(question, history) {
   return r.json();
 }
 
+// Month-to-date estimated Gemini spend and how close it is to the monthly
+// budget, for the settings card. Read-only, so a failure comes back as
+// { error } like the other plain GETs rather than throwing.
+export async function fetchGeminiUsage() {
+  const r = await fetch(`${BASE}/gemini-usage`, { headers: await authHeaders() });
+  return r.json();
+}
+
 // ── Merchant overrides ────────────────────────────────────────────────────────
 export async function fetchMerchantOverrides() {
   const r = await fetch(`${BASE}/merchant-overrides`, { headers: await authHeaders() });
