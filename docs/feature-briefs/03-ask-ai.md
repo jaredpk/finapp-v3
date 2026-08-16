@@ -92,8 +92,16 @@ const functionDeclarations = [
       },
     },
   },
-  // Same shape for: get_spending_by_category, list_categories,
-  // get_report_summary (Brief 02, if merged), get_latest_balances.
+  // Same shape for the other tools that TAKE arguments:
+  // get_spending_by_category, get_report_summary (Brief 02, if merged).
+  //
+  // Zero-argument tools (list_categories, get_latest_balances) must OMIT
+  // `parameters` entirely — do NOT give them an OBJECT schema with empty
+  // `properties`. The API rejects that at request validation with 400
+  // INVALID_ARGUMENT ("parameters.properties: should be non-empty for OBJECT
+  // type"), and because every declaration is sent on every generateContent
+  // call, one such entry breaks every Ask AI request. The SDK marks
+  // `parameters` optional for exactly this case.
 ];
 
 const impl = {

@@ -798,6 +798,12 @@ app.post("/api/ask", requireAuth, async (req, res) => {
   if (!question) return res.status(400).json({ error: "question is required" });
   if (question.length > 2000)
     return res.status(400).json({ error: "question must be 2000 characters or fewer" });
+  // Elapsed ms on both paths: it's the one number that separates "rejected
+  // instantly" (bad request, bad config, missing key) from "ran to the wall
+  // clock" (a timeout upstream) without having to reproduce anything. Counts,
+  // tool names and timing only — never the question or any row that came back,
+  // this is financial data.
+  const startedAt = Date.now();
   try {
     const { answer, toolCalls } = await runAskLoop({
       question,
@@ -805,12 +811,12 @@ app.post("/api/ask", requireAuth, async (req, res) => {
       generate: createGeminiGenerate(),
       impl: askAiImpl,
     });
-    console.log(`ask-ai: ${toolCalls.length} tool call(s)${toolCalls.length ? ` [${toolCalls.join(", ")}]` : ""}`);
+    console.log(`ask-ai: ${toolCalls.length} tool call(s)${toolCalls.length ? ` [${toolCalls.join(", ")}]` : ""} in ${Date.now() - startedAt}ms`);
     res.json({ answer });
   } catch (err) {
     // Free-tier 429s are expected under bursts; surface them so the client can
     // say "wait a minute" instead of "broken".
-    console.error("ask-ai:", err.status || "", err.message);
+    console.error("ask-ai:", err.status || "", err.message, `after ${Date.now() - startedAt}ms`);
     res.status(err.status === 429 ? 429 : 502).json({ error: "AI request failed" });
   }
 });

@@ -9,7 +9,27 @@
 // Type mirrors the SDK's enum, which is plain uppercase strings.
 const Type = { OBJECT: "OBJECT", STRING: "STRING", NUMBER: "NUMBER", INTEGER: "INTEGER", BOOLEAN: "BOOLEAN", ARRAY: "ARRAY" };
 let genaiModule = null;
-export function loadGenAI() { return (genaiModule ??= import("@google/genai")); }
+// Caching the promise (not the module) is what makes concurrent first-callers
+// share one import instead of racing two. But a REJECTED promise would stay
+// cached just as happily: `??=` only reassigns on null/undefined, so one
+// transient failure would poison every later call and take both the scanner
+// and Ask AI down until the process restarted. So clear the cache on rejection
+// and let the next caller retry. The clear runs in a microtask after the
+// assignment below has already completed, so it can't null out a fresh entry;
+// on success nothing reassigns and the one cached promise is reused forever.
+// Know what this does and doesn't buy: Node's ESM loader keeps its own
+// per-URL module job, and a failure during load or evaluation is cached there
+// too — a second import() of the same specifier replays the recorded rejection
+// without re-attempting anything. So the retry only truly recovers from the
+// failures Node won't cache (resolution-class, e.g. the specifier not
+// resolving yet), not from a mid-load OOM or evaluation throw. It is still
+// strictly better than caching the rejection ourselves on top of Node's.
+export function loadGenAI() {
+  return (genaiModule ??= import("@google/genai").catch((err) => {
+    genaiModule = null;
+    throw err;
+  }));
+}
 import pool from "./db.js";
 import { getCategories, unreviewTransaction } from "./db.js";
 import { getGmailClient } from "./gmail.js";

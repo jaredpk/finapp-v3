@@ -18,6 +18,17 @@ import {
 export const MAX_ITERATIONS = 8;
 export const MAX_RESULT_CHARS = 50_000;
 const MAX_HISTORY_TURNS = 10;
+// Wall-clock budget for the whole loop. MAX_ITERATIONS alone bounds the number
+// of round-trips but not their duration: eight slow generateContent calls can
+// outlast the proxy's request timeout, and once that fires the client gets a
+// gateway HTML page instead of our JSON — an un-parseable error that says
+// nothing about what went wrong (the same failure shape documented at the
+// backfill replay in index.js). Stopping ourselves under that ceiling means a
+// slow question degrades to an honest answer we control. Sized against a 60s
+// proxy timeout (we don't know the real one; 60s is the common default) and
+// the per-round-trip timeout below: 35s budget + 20s in-flight call = 55s
+// worst case. With thinking disabled the normal path finishes far inside 35s.
+export const ASK_DEADLINE_MS = 35_000;
 
 export function askAiConfigured() {
   return Boolean(process.env.GEMINI_API_KEY);
@@ -75,16 +86,22 @@ export const functionDeclarations = [
       },
     },
   },
+  // The next two take no arguments, so they carry no `parameters` key at all —
+  // the SDK marks it optional ("for function with no parameters, this can be
+  // left unset") and the API rejects the obvious-looking alternative outright:
+  // an OBJECT schema with an empty `properties` fails request validation with
+  // 400 INVALID_ARGUMENT ("parameters.properties: should be non-empty for
+  // OBJECT type"). Every declaration ships on every generateContent call, so
+  // one bad entry here fails all of Ask AI. Don't "fix" this by adding
+  // `parameters: { type: Type.OBJECT, properties: {} }` back.
   {
     name: "list_categories",
     description: "List the user-defined budget categories (id, name, color).",
-    parameters: { type: Type.OBJECT, properties: {} },
   },
   {
     name: "get_latest_balances",
     description:
       "Latest snapshot of account balances (account, institution, type, balance, available, snapshot_date).",
-    parameters: { type: Type.OBJECT, properties: {} },
   },
   {
     name: "get_report_summary",
@@ -157,14 +174,29 @@ export function clampHistory(history, maxTurns = MAX_HISTORY_TURNS) {
 // echoing the model turn back — verified against dist/genai.d.ts.
 // Returns { answer, toolCalls } where toolCalls is the ordered list of tool
 // names invoked (the route logs it — acceptance criterion 1).
-export async function runAskLoop({ question, history, generate, impl: tools, maxIterations = MAX_ITERATIONS }) {
+// `now` is injected for the same reason `generate` is: the deadline has to be
+// testable without spending real seconds in the suite.
+export async function runAskLoop({
+  question, history, generate, impl: tools,
+  maxIterations = MAX_ITERATIONS, deadlineMs = ASK_DEADLINE_MS, now = () => Date.now(),
+}) {
   const contents = [
     ...clampHistory(history),
     { role: "user", parts: [{ text: question }] },
   ];
   const toolCalls = [];
+  const deadline = now() + deadlineMs;
 
   for (let i = 0; i < maxIterations; i++) {
+    // Checked only between round-trips: a request already in flight is left to
+    // finish (aborting it would waste tokens already paid for and buys nothing
+    // — what we're preventing is *starting* work that can't land in time).
+    // So the real worst case is the deadline plus one whole round-trip:
+    // ASK_DEADLINE_MS 35s + httpOptions.timeout 20s = 55s, which is why the
+    // budget is set below the proxy's assumed 60s timeout rather than at it.
+    if (now() >= deadline) {
+      return { answer: "That took too long to answer — try a narrower question.", toolCalls };
+    }
     const r = await generate(contents);
     const calls = r.functionCalls;
     if (!calls || calls.length === 0) {
@@ -191,20 +223,77 @@ export async function runAskLoop({ question, history, generate, impl: tools, max
     }
   }
 
+  // Iteration cap, not the clock — deliberately worded differently from the
+  // deadline answer above so a log or a bug report tells you which limit bit.
   return { answer: "I couldn't finish answering that — try a narrower question.", toolCalls };
+}
+
+// Resolved in one place because two things now depend on the model name: the
+// request itself and whether thinking can be switched off for it.
+export function resolveAskModel() {
+  return process.env.ASK_AI_MODEL || "gemini-2.5-flash";
+}
+
+// Thinking costs latency we don't need — Ask AI runs up to MAX_ITERATIONS
+// round-trips, so per-call thinking time is multiplied by the loop — hence
+// thinkingBudget 0 (ThinkingConfig.thinkingBudget, "0 is DISABLED", verified
+// against dist/genai.d.ts on 2.16.0). But the budget is NOT universally
+// settable, and ASK_AI_MODEL is an env knob, so sending the field to a model
+// that won't take it turns one env var into a config that 400s every single
+// request — precisely the failure class removed from the tool declarations
+// above. Two distinct ways to get that wrong:
+//   - gemini-2.5-pro understands thinking but cannot switch it off (minimum
+//     budget 128), so 0 is rejected;
+//   - gemini-2.0-flash / gemini-1.5-flash predate thinking entirely and have
+//     no thinkingConfig to set — matching them on the substring "flash" would
+//     reintroduce the same breakage from the other direction.
+// So this is an allow-list, not a keyword search: only the 2.5 flash tier
+// (gemini-2.5-flash and gemini-2.5-flash-lite, plus their dated/preview
+// suffixes) is known to accept 0. Anything unrecognised — new models, other
+// vendors' naming, a typo — falls through to {} and keeps the model's own
+// default, so the failure mode of being wrong here is "slower than it could
+// be", never "broken". Returns a spreadable fragment so "omit" really means
+// absent, not an undefined key.
+export function thinkingConfigFor(model) {
+  if (!/^gemini-2\.5-flash\b/.test(String(model))) return {};
+  return { thinkingConfig: { thinkingBudget: 0 } };
 }
 
 // Production `generate`: a closure over ai.models.generateContent. Created per
 // request so the system prompt carries the current date.
 export function createGeminiGenerate() {
   const systemInstruction = buildSystemPrompt();
+  const model = resolveAskModel();
+  // Memoized so a request builds one client instead of one per loop iteration:
+  // runAskLoop can call `generate` up to MAX_ITERATIONS times and there is no
+  // per-call state to keep them apart. The import stays lazy (deliberate: see
+  // the boot-memory note at the top of this file), so the first call resolves
+  // it and later calls reuse the same client. The guarantee holds for SERIAL
+  // callers only — the check and the await aren't atomic, so N calls made
+  // concurrently on one generator would each pass `!ai` and build N clients.
+  // runAskLoop awaits every `generate` before the next, which is the only way
+  // production drives this; the fallout for a concurrent caller is a few extra
+  // clients, not incorrect behaviour, so this isn't worth a lock.
+  let ai = null;
   return async (contents) => {
-    const { GoogleGenAI } = await loadGenAI();
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    if (!ai) {
+      const { GoogleGenAI } = await loadGenAI();
+      ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    }
     return ai.models.generateContent({
-      model: process.env.ASK_AI_MODEL || "gemini-2.5-flash",
+      model,
       contents,
-      config: { systemInstruction, tools: [{ functionDeclarations }] },
+      config: {
+        systemInstruction,
+        tools: [{ functionDeclarations }],
+        // Per-request timeout in ms (HttpOptions.timeout, verified against
+        // dist/genai.d.ts on 2.16.0). Without it one hung socket could eat the
+        // whole runAskLoop deadline on its own and the loop would never get to
+        // make its second call — the deadline bounds the loop, this bounds a
+        // single round-trip so a stall costs one iteration, not all eight.
+        httpOptions: { timeout: 20_000 },
+        ...thinkingConfigFor(model),
+      },
     });
   };
 }
