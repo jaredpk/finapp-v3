@@ -685,7 +685,26 @@ export async function upsertTransactions(transactions) {
   }
 }
 
-export async function getTransactions({ limit = 100, startDate, endDate, category } = {}) {
+// Ordered date DESC, id DESC — the id is a tiebreak, not a preference. `date`
+// is a DATE, so a busy day produces dozens of rows Postgres considers equal,
+// and ORDER BY date alone leaves their relative order up to the plan: the same
+// query can return a different set of same-day rows run to run, and LIMIT can
+// slice through the middle of a date arbitrarily. That matters everywhere the
+// result is capped — /api/transactions fetches limit + 1 to detect truncation
+// (limits.js), so an unstable sort meant the probe row itself changed WHICH
+// tied rows survived, and the export's "here is the oldest date I included"
+// notice was describing a boundary that would move if you ran it again. id is
+// the primary key, so (date, id) is a total order and the cut is now
+// reproducible. Same rows, same cap, deterministically the same page.
+//
+// `offset` rides on that same total order and is what makes the capped result
+// pageable: OFFSET n skips the first n rows of one fixed list, so consecutive
+// pages meet exactly — no gap, no overlap — even inside a single busy date,
+// which a date range can never split (a DATE bound cannot cut a day in half).
+// The xlsx export is the only caller that passes it today; it defaults to 0,
+// and OFFSET 0 is a no-op, so /api/transactions, the MCP get_transactions tool,
+// Ask AI and the reconcile route keep exactly the query they had.
+export async function getTransactions({ limit = 100, offset = 0, startDate, endDate, category } = {}) {
   const conditions = [];
   const params = [];
   let i = 1;
@@ -693,6 +712,9 @@ export async function getTransactions({ limit = 100, startDate, endDate, categor
   if (endDate)   { conditions.push(`t.date <= $${i++}`); params.push(endDate); }
   if (category)  { conditions.push(`LOWER(t.plaid_category) = LOWER($${i++})`); params.push(category); }
   params.push(limit);
+  const limitParam = i++;
+  params.push(offset);
+  const offsetParam = i++;
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const { rows } = await pool.query(
     `SELECT
@@ -726,7 +748,7 @@ export async function getTransactions({ limit = 100, startDate, endDate, categor
        rm.suggested_category_id
      FROM transactions t
      LEFT JOIN receipt_matches rm ON rm.transaction_id = t.id
-     ${where} ORDER BY t.date DESC LIMIT $${i}`,
+     ${where} ORDER BY t.date DESC, t.id DESC LIMIT $${limitParam} OFFSET $${offsetParam}`,
     params
   );
   return rows;
@@ -754,6 +776,62 @@ export async function getSpendingByCategory({ startDate, endDate } = {}) {
     params
   );
   return rows;
+}
+
+// The Transactions view's four stat tiles, computed over the WHOLE table
+// instead of over whatever page the view happens to be holding. The tiles used
+// to be derived from the fetched array, so a 2000-row page reported "2000
+// transactions" on a database with 40,000 of them — a wrong number that looked
+// exactly like a right one. Four aggregates, one pass, no rows materialised.
+//
+// This reproduces Transactions.jsx's `stats` memo exactly, quirks included:
+//
+//   - visible = not hidden, on an account that isn't hidden. Same two clauses
+//     getSpendingByCategory and getReportSummary use, so "hidden" means one
+//     thing across the app. (Those two ALSO drop status = 'pending'; the client
+//     tiles never have, and quietly adopting that here would move every number
+//     the owner has been reading. Kept as the client has it — pending rows
+//     count — so the tiles agree with the list under them. The discrepancy is
+//     deliberate, not an oversight.)
+//   - needsReview keys off the assignment's CATEGORY, not the assignment row:
+//     the client builds assignments[txn] = category_id and tests it for
+//     falsiness, and upsertAssignment happily writes a NULL category_id, so a
+//     row with no category still reads as "needs review" there. Hence the
+//     category_id IS NOT NULL inside the EXISTS.
+//   - needsApproval is reviewed_at IS NULL — the amber unreviewed state.
+//
+// Every aggregate is cast: COUNT is bigint and SUM over NUMERIC is numeric, and
+// pg hands both back as STRINGS to preserve precision (the hazard documented at
+// length on getGeminiSpendForMonth). A string `total` would still render, and a
+// string `spend` would concatenate rather than add. COALESCE covers the empty
+// range, where SUM is NULL rather than 0.
+export async function getTransactionStats({ startDate, endDate } = {}) {
+  const conditions = ["(t.hidden IS NOT TRUE)", "(t.account NOT IN (SELECT account_id FROM hidden_accounts))"];
+  const params = [];
+  let i = 1;
+  if (startDate) { conditions.push(`t.date >= $${i++}`); params.push(startDate); }
+  if (endDate)   { conditions.push(`t.date <= $${i++}`); params.push(endDate); }
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS total,
+            COALESCE(SUM(t.amount) FILTER (WHERE t.amount > 0), 0)::float AS spend,
+            COUNT(*) FILTER (
+              WHERE NOT EXISTS (
+                      SELECT 1 FROM assignments a
+                      WHERE a.transaction_id = t.id AND a.category_id IS NOT NULL)
+                AND NOT EXISTS (
+                      SELECT 1 FROM splits s WHERE s.transaction_id = t.id)
+            )::int AS needs_review,
+            COUNT(*) FILTER (WHERE t.reviewed_at IS NULL)::int AS needs_approval
+     FROM transactions t
+     WHERE ${conditions.join(" AND ")}`,
+    params
+  );
+  return {
+    total: rows[0]?.total ?? 0,
+    spend: rows[0]?.spend ?? 0,
+    needsReview: rows[0]?.needs_review ?? 0,
+    needsApproval: rows[0]?.needs_approval ?? 0,
+  };
 }
 
 // ── Report summary ────────────────────────────────────────────────────────────

@@ -116,7 +116,17 @@ export default function Dashboard({ accounts, transactions, categories, assignme
         />
         <StatCard label="This Month" value={monthSpend ? fmt(-monthSpend) : "—"} sub="total spending" accent="var(--red)" delay={0.06} />
         <StatCard label="Accounts" value={accounts.length || "—"} sub="connected" delay={0.12} />
-        <StatCard label="Transactions" value={transactions.length || "—"} sub="last 90 days" delay={0.18} />
+        {/* Relabelled rather than re-derived. `transactions` is one capped page
+            of the table (the 2000 most recent), and nothing on this page says
+            how far back that reaches or whether the cap was hit — so a count
+            filtered to 90 days here would be an unverifiable claim, while the
+            array length is a fact. */}
+        <StatCard
+          label="Transactions"
+          value={transactions.length ? transactions.length.toLocaleString("en-US") : "—"}
+          sub="loaded (most recent)"
+          delay={0.18}
+        />
       </div>
 
       {/* Accounts */}

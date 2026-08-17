@@ -1,5 +1,5 @@
-import React, { useState, useMemo } from "react";
-import { saveAssignment, saveMerchantOverride, deleteTransaction, unhideTransactionApi, replaceSplitsApi, reviewTransactions } from "../api.js";
+import React, { useState, useMemo, useEffect } from "react";
+import { saveAssignment, saveMerchantOverride, deleteTransaction, unhideTransactionApi, replaceSplitsApi, reviewTransactions, fetchTransactionStats } from "../api.js";
 
 const toNum = (n) => n == null ? null : parseFloat(n);
 
@@ -20,6 +20,8 @@ const fmtRound = (n) => {
   if (v == null || isNaN(v)) return "—";
   return "$" + Math.round(Math.abs(v)).toLocaleString("en-US");
 };
+
+const fmtCount = (n) => (n ?? 0).toLocaleString("en-US");
 
 const fmtDate = (d) => {
   if (!d) return "—";
@@ -79,13 +81,72 @@ export default function Transactions({
   const getDisplayName = (t) =>
     merchantOverrides?.[t.transaction_id] || t.merchant_name || t.name || t.suggested_category || "Unknown";
 
-  const stats = useMemo(() => {
+  // What the loaded rows say. `transactions` is one capped page of the table
+  // (/api/transactions returns the 2000 most recent by default), so this answers
+  // "what am I holding", not "what exists". Still computed on every render: it
+  // is the denominator for "showing X of Y" and the fallback when the totals
+  // request fails.
+  const loadedStats = useMemo(() => {
     const visible = transactions.filter(t => !t.hidden && !hiddenAccounts?.has(t.account_id));
     const spend = visible.filter((t) => toNum(t.amount) > 0).reduce((s, t) => s + toNum(t.amount), 0);
     const needsReview = visible.filter((t) => !assignments?.[t.transaction_id] && !splits?.[t.transaction_id]?.length).length;
     const needsApproval = visible.filter((t) => t.reviewed_at == null).length;
     return { total: visible.length, spend, needsReview, needsApproval };
   }, [transactions, assignments, splits, hiddenAccounts]);
+
+  // What the table says. Same four figures, counted in SQL over every
+  // transaction (and with the same hidden-row / hidden-account exclusions), so
+  // the tiles stop presenting a page total as a total. Refetched whenever an
+  // edit moves one of them: approving reloads `transactions`, categorising and
+  // splitting change what counts as needing review.
+  const [serverStats, setServerStats] = useState(null);
+  const [statsFailed, setStatsFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchTransactionStats()
+      .then((res) => {
+        if (cancelled) return;
+        if (res?.error || res?.total == null) { setServerStats(null); setStatsFailed(true); }
+        else { setServerStats(res); setStatsFailed(false); }
+      })
+      // A totals outage is a footnote, not a failure: the tiles drop back to the
+      // loaded rows and say so, rather than emptying the page.
+      .catch(() => { if (!cancelled) { setServerStats(null); setStatsFailed(true); } });
+    return () => { cancelled = true; };
+  }, [transactions, assignments, splits]);
+
+  // Server figures when we have them, loaded-row figures until then and if the
+  // request fails — in which case every tile carries a "(loaded)" label so no
+  // capped number is ever shown as a total.
+  const stats = serverStats ?? loadedStats;
+  const statsArePartial = serverStats == null;
+  const statLabel = (base) => (statsArePartial ? `${base} (loaded)` : base);
+
+  const loadedCount = loadedStats.total;
+  const notAllLoaded = serverStats != null && serverStats.total > loadedCount;
+
+  // The approval chip and the "Approve all shown" button beside it answer two
+  // different questions, and side by side they read as one. The chip carried
+  // the server-wide needsApproval (91 with the whole table counted) while the
+  // button acted on loaded rows (4), with nothing on screen or in the tooltip
+  // marking the difference — and since the chip is also the list filter, it
+  // showed a list of 4 under a control saying 91, then dropped to 87 after
+  // approving with no account of where the other 87 went.
+  //
+  // So the chip shows both, subset first: "4 of 91" against "Approve all shown
+  // (4)" makes the two 4s the same 4 and the 91 visibly something else. It is
+  // also renamed off "Needs review", which the tile above already uses for a
+  // different figure — the tile counts needsReview (no category, no splits),
+  // the chip counts needsApproval (reviewed_at IS NULL). Same two words, two
+  // numbers, one screen. The chip's name now matches the field behind it.
+  const loadedNeedsApproval = loadedStats.needsApproval;
+  const approvalChipLabel = serverStats
+    ? `${fmtCount(loadedNeedsApproval)} of ${fmtCount(serverStats.needsApproval)}`
+    : fmtCount(loadedNeedsApproval);
+  const approvalChipTitle = serverStats
+    ? `Filters the loaded rows down to transactions waiting for approval. ${fmtCount(loadedNeedsApproval)} of the ${fmtCount(serverStats.needsApproval)} awaiting approval across all transactions are among the ${fmtCount(loadedCount)} rows loaded here — this filter and "Approve all shown" reach only those. The rest are in older rows this page has not fetched and cannot be approved from this screen.`
+    : `Filters the loaded rows down to transactions waiting for approval. Counted over the ${fmtCount(loadedCount)} rows loaded here, not over every transaction on record.`;
 
   function toggleSort(col) {
     setSort(prev => prev.col === col
@@ -322,24 +383,40 @@ export default function Transactions({
       {/* Stats */}
       <div className="fade-up" style={styles.stats}>
         <div style={styles.stat}>
-          <p style={styles.statLabel}>Transactions</p>
-          <p style={styles.statVal}>{stats.total || "—"}</p>
+          <p style={styles.statLabel}>{statLabel("Transactions")}</p>
+          <p style={styles.statVal}>{stats.total ? fmtCount(stats.total) : "—"}</p>
         </div>
         <div style={styles.stat}>
-          <p style={styles.statLabel}>Total Spend</p>
+          <p style={styles.statLabel}>{statLabel("Total Spend")}</p>
           <p style={styles.statVal}>{stats.spend ? fmtRound(stats.spend) : "—"}</p>
         </div>
         <div style={styles.stat}>
-          <p style={styles.statLabel}>Needs Review</p>
+          <p style={styles.statLabel}>{statLabel("Needs Review")}</p>
           <p style={{ ...styles.statVal, color: stats.needsReview > 0 ? "var(--red)" : "var(--text)" }}>
-            {stats.needsReview}
+            {fmtCount(stats.needsReview)}
           </p>
         </div>
+        {/* Not a row count — the category list arrives whole, so it needs no
+            "(loaded)" caveat. */}
         <div style={styles.stat}>
           <p style={styles.statLabel}>Categories</p>
           <p style={styles.statVal}>{(categories || []).length || "—"}</p>
         </div>
       </div>
+
+      {notAllLoaded && (
+        <p className="fade-up" style={styles.partialNote}>
+          Showing {fmtCount(loadedCount)} of {fmtCount(serverStats.total)} transactions — the most recent
+          are loaded. The tiles above count all {fmtCount(serverStats.total)}; the search, filters and
+          table below only see the {fmtCount(loadedCount)} loaded rows.
+        </p>
+      )}
+      {statsFailed && (
+        <p className="fade-up" style={styles.statsErrorNote}>
+          Totals unavailable — the tiles above count the {fmtCount(loadedCount)} loaded rows only, which
+          may be fewer than every transaction on record.
+        </p>
+      )}
 
       {/* Toolbar */}
       <div className="fade-up" style={styles.toolbar}>
@@ -380,13 +457,16 @@ export default function Transactions({
         )}
         <input type="number" placeholder="Min $" value={minAmount} onChange={(e) => setMinAmount(e.target.value)} style={{ ...styles.input, maxWidth: 90 }} />
         <input type="number" placeholder="Max $" value={maxAmount} onChange={(e) => setMaxAmount(e.target.value)} style={{ ...styles.input, maxWidth: 90 }} />
+        {/* Rendered off stats.needsApproval (whole-table when we have it) so the
+            control does not vanish while unapproved rows exist further back,
+            but LABELLED with the loaded subset, which is all it can act on. */}
         {stats.needsApproval > 0 && (
           <button
             style={{ ...styles.reviewChip, ...(reviewFilter ? styles.reviewChipActive : {}) }}
             onClick={() => setReviewFilter((v) => !v)}
-            title="Show transactions with a receipt suggestion waiting for approval"
+            title={approvalChipTitle}
           >
-            Needs review ({stats.needsApproval})
+            Awaiting approval ({approvalChipLabel})
           </button>
         )}
         {reviewFilter && filtered.length > 0 && (
@@ -394,8 +474,9 @@ export default function Transactions({
             style={{ ...styles.approveAllBtn, opacity: approving ? 0.6 : 1 }}
             onClick={() => handleApprove(filtered.map((t) => t.transaction_id))}
             disabled={approving}
+            title={`Approves the ${fmtCount(filtered.length)} rows currently listed below and nothing else — not every transaction awaiting approval.`}
           >
-            {approving ? "Approving…" : `Approve all shown (${filtered.length})`}
+            {approving ? "Approving…" : `Approve all shown (${fmtCount(filtered.length)})`}
           </button>
         )}
         {hiddenCount > 0 && (
@@ -412,13 +493,22 @@ export default function Transactions({
             Clear
           </button>
         )}
-        <span style={styles.count}>{filtered.length} of {stats.total}</span>
+        {/* Counted against the loaded rows, not stats.total: filtering never
+            reaches rows that were never fetched, and "12 of 3,847" would say it
+            did. */}
+        <span style={styles.count}>
+          {fmtCount(filtered.length)} of {fmtCount(loadedCount)}{notAllLoaded ? " loaded" : ""}
+        </span>
       </div>
 
       {/* Table */}
       {filtered.length === 0 ? (
         <p style={styles.empty}>
-          {transactions.length === 0 ? "No transactions yet." : "No results match your filters."}
+          {transactions.length === 0
+            ? "No transactions yet."
+            : notAllLoaded
+              ? `No results match your filters in the ${fmtCount(loadedCount)} loaded rows — older transactions were not searched.`
+              : "No results match your filters."}
         </p>
       ) : (
         <div className="fade-up-2" style={styles.tableWrap}>
@@ -788,6 +878,10 @@ const styles = {
     fontFamily: "var(--font-mono)", cursor: "pointer",
   },
   count: { fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", marginLeft: "auto" },
+  // Same amber/red emphasis the rest of the app uses for "this number is
+  // partial" and "this read failed" — see the AI Usage card in Settings.jsx.
+  partialNote:    { fontSize: 12, color: "var(--amber, #f59e0b)", fontFamily: "var(--font-mono)", lineHeight: 1.5, marginBottom: 14 },
+  statsErrorNote: { fontSize: 12, color: "var(--red, #ef4444)",   fontFamily: "var(--font-mono)", lineHeight: 1.5, marginBottom: 14 },
   empty: { color: "var(--muted)", fontSize: 13, fontFamily: "var(--font-mono)", textAlign: "center", padding: "48px 0" },
 
   tableWrap: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", overflowX: "auto" },

@@ -20,7 +20,7 @@ import {
   getUserItems, upsertUserItem, removeUserItem,
   getCursor, saveCursor, upsertTransactions,
   clearCursors, listTransactionIds, getTransactionsByIds,
-  getTransactions, getVisibleTransactions, getSpendingByCategory, getReportSummary,
+  getTransactions, getVisibleTransactions, getTransactionStats, getSpendingByCategory, getReportSummary,
   deleteRemovedTransactions, populateSuggestedCategories, applySuggestedCategories,
   findDuplicateTransactions, deduplicateTransactions,
   getSuppressions, recordSuppression, tryAdvisoryLock, releaseAdvisoryLock,
@@ -58,6 +58,11 @@ import {
   ASK_HARD_CEILING_PCT, checkGeminiBudget, getBudgetStatus, recordGeminiCall,
 } from "./geminiUsage.js";
 import { findUnmatchedPaymentLegs } from "./transactionMatching.js";
+import {
+  exportMaxRows, resolveTransactionLimit, fetchLimit, takeWithTruncation,
+  truncationHeaders, TRUNCATION_HEADERS, validateDateRange, parseOffset,
+  buildExportInfoRows, exportInfoSheetName, exportFilename,
+} from "./limits.js";
 import { registerPropertyFinanceRoutes } from "./property/routes.js";
 
 dotenv.config();
@@ -98,7 +103,10 @@ app.use(cors({
     cb(null, allowed ? origin || "*" : false);
   },
   allowedHeaders: ["Content-Type", "Authorization", "x-api-key", "mcp-session-id"],
-  exposedHeaders: ["mcp-session-id"],
+  // The truncation headers have to be exposed explicitly or the browser hides
+  // them from fetch() — a cross-origin response carries them, and
+  // Response.headers.get() returns null anyway unless they are listed here.
+  exposedHeaders: ["mcp-session-id", ...Object.values(TRUNCATION_HEADERS)],
   credentials: true,
 }));
 app.use(express.json({ limit: "50mb" }));
@@ -687,18 +695,57 @@ app.delete("/api/account-nicknames/:accountId", requireAuth, async (req, res) =>
 });
 
 // ── Transactions ──────────────────────────────────────────────────────────────
+// The response body is unchanged — { transactions: [...] }, same rows, same
+// order — because the client, the MCP tools and any API-key consumer already
+// read it. What is new is that hitting the limit is now visible: the row cap
+// stays (it is what keeps a 256 MB VM alive), but a caller that got 200 of 340
+// matching rows is told so in the headers instead of being handed a short array
+// that looks like the whole month. fetchTransactionsForMonth in the client asks
+// for limit=2000 per month and is exactly the caller this is for — that used to
+// be 200, which a busy month really could exceed.
 app.get("/api/transactions", requireApiKeyOrAuth, async (req, res) => {
   try {
-    const limit = Math.min(parseInt(req.query.limit) || 2000, 10000);
-    const transactions = await getTransactions({
-      limit,
+    const limit = resolveTransactionLimit(req.query.limit);
+    // One row past the limit, then discard it: that is the difference between
+    // "there are more" and "there might be more". See limits.js.
+    const rows = await getTransactions({
+      limit: fetchLimit(limit),
       startDate: req.query.start_date,
       endDate: req.query.end_date,
       category: req.query.category,
     });
+    const { rows: transactions, truncated } = takeWithTruncation(rows, limit);
+    res.set(truncationHeaders({ truncated, limit, count: transactions.length }));
     res.json({ transactions });
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch transactions" });
+  }
+});
+
+// True totals for the Transactions view's stat tiles, computed in SQL over the
+// whole table rather than over the page the view is holding. Separate endpoint
+// rather than a field on /api/transactions precisely because that response
+// shape is load-bearing elsewhere; the tiles are a different question anyway
+// ("what exists") from the list ("what am I looking at"), and answering it costs
+// four aggregates instead of a second page of rows.
+//
+// Optional start_date/end_date, validated exactly as /api/reports/summary
+// validates them. No UI reaches them today: Transactions.jsx calls
+// fetchTransactionStats() with no arguments, so the tiles it feeds are
+// whole-table totals and the view's own date filter is applied client-side to
+// the loaded rows only. The params exist for API-key callers and for the day
+// the tiles are wired to that filter; until then, treat "the tiles ignore the
+// date filter" as the actual behaviour rather than a bug in this route.
+app.get("/api/transactions/stats", requireAuth, async (req, res) => {
+  try {
+    const { start_date: startDate, end_date: endDate } = req.query;
+    const invalid = validateDateRange({ startDate, endDate });
+    if (invalid) return res.status(400).json({ error: invalid.error });
+    const stats = await getTransactionStats({ startDate, endDate });
+    res.json(stats);
+  } catch (err) {
+    console.error("Transaction stats failed:", err.message);
+    res.status(500).json({ error: "Failed to compute transaction stats" });
   }
 });
 
@@ -1267,14 +1314,59 @@ app.get("/api/investment-holdings", requireAuth, async (req, res) => {
 });
 
 // ── Export XLSX (same format as import) ──────────────────────────────────────
+// Two problems this route used to have: it exported the 1000 most recent
+// transactions and nothing else — so older history could not be exported at
+// all — and it said nothing about the other 1000, so a truncated file was
+// indistinguishable from a complete one.
+//
+// Both are fixed without removing the bound, which has to stay: this VM has
+// 256 MB and building a workbook is the most memory-hungry thing the process
+// does. start_date/end_date select the slice of history, `offset` pages through
+// it a cap-sized chunk at a time, and a cap that IS hit is announced three ways
+// — the X-Result-* headers, a "-TRUNCATED" filename, and a sheet inside the
+// workbook that names the exact next offset to ask for. See limits.js.
+//
+// `offset` rather than a moving end_date because dates cannot page: `date` is a
+// DATE, so no end_date splits a single day, and on a day holding more rows than
+// the cap the date-based remedy returns the same page forever while the rows
+// behind it stay unreachable. OFFSET counts rows in the ORDER BY t.date DESC,
+// t.id DESC total order, so successive pages abut exactly — the sequence
+// terminates, with no gap and no duplicate.
+//
+// The three existing sheets keep their exact names, column headers and column
+// order — parseXlsxBase64 selects sheets by name and treats row 1 as the
+// header, so their layout is a contract, not a presentation choice — and the
+// notice goes on a fourth sheet that no parser looks at.
+//
+// "Contract" is aspirational on one side of it: re-importing a file this route
+// produces does NOT currently work. parseXlsxBase64 sniffs for the Quadratic
+// format with / Transactions$| Balances$/ and "Account Balances" ends in
+// " Balances", so every workbook built here is routed to parseQuadraticXlsx,
+// which finds no " Transactions" sheet and no account_id column and returns
+// 0 transactions / 0 balances / 0 holdings. That is pre-existing — the same
+// three sheet names produced the same misroute before this route grew dates or
+// a notice — and fixing the sniff is a separate job. It is called out here so
+// the layout is not "simplified" on the assumption that nothing reads it: the
+// day the parser is fixed, these names and columns are what it will expect.
 app.get("/api/export-xlsx", requireAuth, async (req, res) => {
   try {
     const { utils, write } = xlsxLib;
-    const [balRows, holdingRows, txnRows] = await Promise.all([
+    const { start_date: startDate, end_date: endDate } = req.query;
+    const invalid = validateDateRange({ startDate, endDate });
+    if (invalid) return res.status(400).json({ error: invalid.error });
+    const parsedOffset = parseOffset(req.query.offset);
+    if (parsedOffset.error) return res.status(400).json({ error: parsedOffset.error });
+    const offset = parsedOffset.offset;
+
+    const rowCap = exportMaxRows();
+    const [balRows, holdingRows, fetchedTxns] = await Promise.all([
       getLatestBalances(),
       getLatestHoldings(),
-      getTransactions({ limit: 1000 }),
+      getTransactions({ limit: fetchLimit(rowCap), offset, startDate, endDate }),
     ]);
+    // Balances and holdings are latest-snapshot reads of a handful of rows and
+    // are not capped; only transactions grow without bound.
+    const { rows: txnRows, truncated } = takeWithTruncation(fetchedTxns, rowCap);
 
     const wb = utils.book_new();
 
@@ -1319,10 +1411,36 @@ app.get("/api/export-xlsx", requireAuth, async (req, res) => {
     ];
     utils.book_append_sheet(wb, utils.aoa_to_sheet(txnData), "Transactions");
 
+    // Export Info sheet. It records the slice this file covers — rows
+    // offset+1 .. offset+count of the range — and, when the cap bit, the exact
+    // next call: same dates, offset = offset + count. Following that
+    // mechanically terminates and reproduces the range with no gap and no
+    // duplicate. `oldestIncluded` is still reported as a fact about the file,
+    // but nothing in the remedy depends on it any more. See limits.js.
+    const infoRows = buildExportInfoRows({
+      truncated,
+      rowCount: txnRows.length,
+      rowCap,
+      offset,
+      startDate,
+      endDate,
+      oldestIncluded: txnRows[txnRows.length - 1]?.date,
+      generatedAt: new Date().toISOString(),
+    });
+    utils.book_append_sheet(wb, utils.aoa_to_sheet(infoRows), exportInfoSheetName(truncated));
+    // A truncated workbook opens ON the notice — Excel shows the first sheet,
+    // and a warning nobody clicks to is the same as no warning. A complete one
+    // leaves the existing tab order alone and keeps the notice at the end.
+    // (Safe either way: all three import parsers — parseXlsxBase64,
+    // parseQuadraticXlsx, parseAuditXlsx — select sheets by name, never by
+    // position.)
+    if (truncated) wb.SheetNames.unshift(wb.SheetNames.pop());
+
     const snapshotDate = balRows[0]?.snapshot_date ?? new Date().toISOString().slice(0, 10);
     const buf = write(wb, { type: "buffer", bookType: "xlsx" });
+    res.set(truncationHeaders({ truncated, limit: rowCap, count: txnRows.length }));
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-    res.setHeader("Content-Disposition", `attachment; filename="finapp-${snapshotDate}.xlsx"`);
+    res.setHeader("Content-Disposition", `attachment; filename="${exportFilename(snapshotDate, truncated)}"`);
     res.send(buf);
   } catch (err) {
     console.error("Export error:", err);

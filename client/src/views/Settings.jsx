@@ -55,9 +55,17 @@ export default function Settings({ reloadData, user, accounts = [] }) {
   const [syncingVeh, setSyncingVeh]       = useState(false);
   const [editingVehicle, setEditingVehicle] = useState(null); // { id, value, rate }
 
-  // Export state
+  // Export state. The date bounds and the offset are optional and blank by
+  // default, which is exactly the request the button sent before it took any of
+  // them — blank offset means 0 and is left off the query string entirely.
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState(null);
+  const [exportStart, setExportStart] = useState("");
+  const [exportEnd, setExportEnd]     = useState("");
+  const [exportOffset, setExportOffset] = useState("");
+  // Set only when the finished download hit the row cap:
+  // { filename, count, nextOffset }.
+  const [exportTruncated, setExportTruncated] = useState(null);
 
   // Account nickname state — keyed by account_id
   const [nicknames, setNicknames] = useState({});
@@ -695,8 +703,23 @@ export default function Settings({ reloadData, user, accounts = [] }) {
   async function handleExportXlsx() {
     setExporting(true);
     setExportError(null);
+    setExportTruncated(null);
     try {
-      await downloadXlsx();
+      // Empty string means "no bound" to the server, so a blank pair is the
+      // original whole-table export. Same for a blank or 0 offset: it is not
+      // sent at all, and the server defaults it to 0.
+      const sentOffset = Number(exportOffset) > 0 ? Number(exportOffset) : 0;
+      const res = await downloadXlsx(exportStart || null, exportEnd || null, sentOffset || null);
+      // The next call is this one's offset plus the rows that came back — the
+      // same arithmetic the workbook's own notice does, so the UI and the file
+      // never disagree about where to resume.
+      if (res?.truncated) {
+        setExportTruncated({
+          filename: res.filename,
+          count: res.count,
+          nextOffset: sentOffset + (res.count ?? 0),
+        });
+      }
     } catch (err) {
       setExportError(err.message);
     } finally {
@@ -1363,12 +1386,66 @@ export default function Settings({ reloadData, user, accounts = [] }) {
         <h2 style={styles.cardTitle}>Export to Excel</h2>
         <p style={styles.description}>
           Download your current account balances, investment holdings, and transactions as an <strong>.xlsx</strong> file — in the same format used for import. Use this to prompt Perplexity to regenerate an updated spreadsheet.
+          {" "}Transactions are capped at <strong>10,000 rows per file</strong> (the <code style={styles.inlineCode}>EXPORT_MAX_ROWS</code> default), newest first. A file that hits the cap is named <code style={styles.inlineCode}>-TRUNCATED</code> and carries a sheet telling you the exact offset to ask for next — repeat with that offset until a file reports Complete, and the files append in order with nothing missing and nothing duplicated.
         </p>
+        <p style={{ ...styles.muted, marginBottom: 8 }}>
+          Date range (optional) — leave both blank to export every transaction. Offset skips that many rows (blank = 0, the start).
+        </p>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 16 }}>
+          <input
+            type="date"
+            aria-label="Export start date"
+            style={{ ...styles.propInput, flex: 1 }}
+            value={exportStart}
+            onChange={(e) => setExportStart(e.target.value)}
+          />
+          <span style={styles.muted}>–</span>
+          <input
+            type="date"
+            aria-label="Export end date"
+            style={{ ...styles.propInput, flex: 1 }}
+            value={exportEnd}
+            onChange={(e) => setExportEnd(e.target.value)}
+          />
+          <input
+            type="number"
+            min="0"
+            step="1"
+            placeholder="Offset"
+            aria-label="Export offset"
+            style={{ ...styles.propInput, width: 100 }}
+            value={exportOffset}
+            onChange={(e) => setExportOffset(e.target.value)}
+          />
+          {(exportStart || exportEnd || exportOffset) && (
+            <button style={styles.regenerateBtn} onClick={() => { setExportStart(""); setExportEnd(""); setExportOffset(""); }}>Clear</button>
+          )}
+        </div>
         <button style={styles.generateBtn} onClick={handleExportXlsx} disabled={exporting}>
           {exporting ? "Exporting…" : "Download Excel File"}
         </button>
         {exportError && (
           <p style={styles.importError}>Error: {exportError}</p>
+        )}
+        {/* This has to say the same thing as the notice inside the workbook
+            (server/limits.js buildExportInfoRows) or the two drift: same dates,
+            offset = the next one, repeat until a file reports Complete. It used
+            to advise moving the end date onto the oldest included date, which
+            never terminates — a DATE bound cannot split a day, so any date
+            holding more rows than the cap returns the same page forever. Offset
+            counts rows in the date DESC, id DESC total order, so the slices abut
+            exactly: nothing to de-duplicate, nothing skipped. */}
+        {exportTruncated && (
+          <p style={{ ...styles.muted, marginTop: 12, color: "var(--amber, #f59e0b)" }}>
+            Row cap reached — <strong>{exportTruncated.filename}</strong> holds
+            {" "}{exportTruncated.count?.toLocaleString() ?? "the capped"} transactions, the newest still
+            unexported in that range. To continue, keep the dates as they are, set the offset above to
+            {" "}<strong>{exportTruncated.nextOffset.toLocaleString()}</strong> and export again. Repeat until a
+            file downloads without <code style={styles.inlineCode}>-TRUNCATED</code> in its name; the files
+            append in order, with no gaps and no duplicates. Run the series back-to-back though —
+            offsets count from the newest row, so a sync or import partway through shifts the
+            numbering and a row can land in two files or none.
+          </p>
         )}
       </section>
 

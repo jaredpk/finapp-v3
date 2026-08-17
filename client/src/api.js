@@ -10,6 +10,25 @@ async function authHeaders(extra = {}) {
   return { "Content-Type": "application/json", ...extra };
 }
 
+// The row-cap bookkeeping the server puts on every /api/transactions and
+// /api/export-xlsx response (server/limits.js TRUNCATION_HEADERS, listed in the
+// CORS exposedHeaders or the browser would hide them from fetch()). Merged into
+// the parsed body by the two callers that actually display it —
+// fetchTransactionsForMonth (CashFlow's per-month partial badge) and
+// downloadXlsx (Settings' row-cap notice). Deliberately NOT merged into
+// fetchTransactions: App.jsx keeps only `transactions` from it, and the
+// Transactions view answers the same question better from
+// /api/transactions/stats, which gives it the total the headers cannot. Adding
+// the fields there would put three values on the wire that nothing reads and
+// imply a consumer that does not exist.
+function readTruncation(r) {
+  return {
+    truncated: r.headers.get("X-Result-Truncated") === "true",
+    limit: Number(r.headers.get("X-Result-Limit")) || null,
+    count: Number(r.headers.get("X-Result-Count")) || null,
+  };
+}
+
 export async function createLinkToken() {
   const r = await fetch(`${BASE}/create_link_token`, {
     method: "POST",
@@ -62,6 +81,21 @@ export async function fetchAccountBalances() {
 
 export async function fetchTransactions() {
   const r = await fetch(`${BASE}/transactions`, { headers: await authHeaders() });
+  return r.json();
+}
+
+// True totals — { total, spend, needsReview, needsApproval } — computed in SQL
+// over every transaction, not over the capped page fetchTransactions returns.
+// Optional YYYY-MM-DD bounds; omit both for the whole table. A failure comes
+// back as { error } like the other plain GETs rather than throwing, because the
+// caller degrades to counting its loaded rows instead of blanking the view.
+export async function fetchTransactionStats(startDate, endDate) {
+  const qs = new URLSearchParams();
+  if (startDate) qs.set("start_date", startDate);
+  if (endDate) qs.set("end_date", endDate);
+  const r = await fetch(`${BASE}/transactions/stats${qs.toString() ? `?${qs}` : ""}`, {
+    headers: await authHeaders(),
+  });
   return r.json();
 }
 
@@ -216,11 +250,30 @@ export async function deleteAccountNicknameApi(account_id) {
 }
 
 // ── XLSX Export ───────────────────────────────────────────────────────────────
-export async function downloadXlsx() {
+// Optional YYYY-MM-DD bounds so history older than one cap-sized chunk is
+// reachable, plus `offset` to page through a range whose slice is bigger than
+// the cap — dates alone cannot do that, because no end_date splits a single
+// day. Omitting all three is the original behaviour (everything, newest first);
+// a 0 or blank offset is omitted from the query string, so the request is
+// byte-identical to what it was before the parameter existed.
+// The filename still comes off Content-Disposition, so the server's
+// "-TRUNCATED" suffix lands on the saved file with no work here. The truncation
+// headers ride back with the filename because Settings.jsx renders the row-cap
+// notice — and the next offset to ask for — from them.
+export async function downloadXlsx(startDate, endDate, offset) {
   const headers = await authHeaders();
   delete headers["Content-Type"];
-  const r = await fetch(`${BASE}/export-xlsx`, { headers });
-  if (!r.ok) throw new Error("Export failed");
+  const qs = new URLSearchParams();
+  if (startDate) qs.set("start_date", startDate);
+  if (endDate) qs.set("end_date", endDate);
+  if (offset) qs.set("offset", offset);
+  const r = await fetch(`${BASE}/export-xlsx${qs.toString() ? `?${qs}` : ""}`, { headers });
+  if (!r.ok) {
+    // The route answers a bad date range or offset with a 400 and { error };
+    // surfacing it beats "Export failed" when the fix is to swap two inputs.
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body.error || "Export failed");
+  }
   const blob = await r.blob();
   const disposition = r.headers.get("Content-Disposition") || "";
   const match = disposition.match(/filename="([^"]+)"/);
@@ -231,6 +284,7 @@ export async function downloadXlsx() {
   a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
+  return { filename, ...readTruncation(r) };
 }
 
 export async function importTransactions(transactions) {
@@ -750,13 +804,22 @@ export async function applyPropertyPlaidPreview(propertyId, transactionId, year)
   return r.json();
 }
 
+// One calendar month of transactions. The old limit=200 sat below what a busy
+// month actually produces, so CashFlow silently under-reported one; 2000 is the
+// server's own default page size and is far more than a month holds, while
+// staying well under the 10,000 hard ceiling that keeps the 256 MB VM alive.
+// The truncation flag rides along so a month that still hits the cap can be
+// shown as partial rather than short.
+const MONTH_TXN_LIMIT = 2000;
+
 export async function fetchTransactionsForMonth(monthKey) {
   const [year, month] = monthKey.split("-");
   const startDate = `${year}-${month}-01`;
   const lastDay = new Date(parseInt(year), parseInt(month), 0).getDate();
   const endDate = `${year}-${month}-${String(lastDay).padStart(2, "0")}`;
-  const r = await fetch(`${BASE}/transactions?start_date=${startDate}&end_date=${endDate}&limit=200`, {
+  const r = await fetch(`${BASE}/transactions?start_date=${startDate}&end_date=${endDate}&limit=${MONTH_TXN_LIMIT}`, {
     headers: await authHeaders(),
   });
-  return r.json();
+  const body = await r.json();
+  return { ...body, ...readTruncation(r) };
 }

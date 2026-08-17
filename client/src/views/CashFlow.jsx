@@ -1510,6 +1510,10 @@ export default function CashFlow({ transactions = [], categories = [], assignmen
   const [allMonthAmounts, setAllMonthAmounts] = useState({});
   // allRecentTxns: { [monthKey]: txns[] }
   const [allRecentTxns, setAllRecentTxns] = useState({});
+  // truncatedMonths: { [monthKey]: rowsReturned } for a month that came back at
+  // the server's row cap, i.e. one whose transactions are known to be
+  // incomplete. null/absent means the month arrived whole.
+  const [truncatedMonths, setTruncatedMonths] = useState({});
   const [txnOrders, setTxnOrders] = useState({});
   const [allMonthNotes, setAllMonthNotes] = useState({});
   const [modal, setModal] = useState(null);
@@ -1801,6 +1805,14 @@ export default function CashFlow({ transactions = [], categories = [], assignmen
 
       fetchTransactionsForMonth(monthKey).then(data => {
         setAllRecentTxns(prev => ({ ...prev, [monthKey]: data?.transactions ?? [] }));
+        // Everything below — matching, auto-confirm, the month's totals — is
+        // computed from the rows that arrived. If the cap cut some off, the
+        // month is partial and the header says so instead of quietly reading
+        // as a light month.
+        setTruncatedMonths(prev => ({
+          ...prev,
+          [monthKey]: data?.truncated ? (data.count ?? data.transactions?.length ?? null) : null,
+        }));
       }).catch(() => {});
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2183,6 +2195,14 @@ export default function CashFlow({ transactions = [], categories = [], assignmen
               {isThree && (
                 <span style={styles.threePaycheckBadge}>3-paycheck month</span>
               )}
+              {truncatedMonths[monthKey] && (
+                <span
+                  style={styles.partialMonthBadge}
+                  title={`Only the ${truncatedMonths[monthKey].toLocaleString("en-US")} most recent transactions for this month were returned — the server's row cap was reached, so matches and totals for this month are incomplete.`}
+                >
+                  Partial — {truncatedMonths[monthKey].toLocaleString("en-US")} txn cap hit
+                </span>
+              )}
             </div>
 
             {activeTab !== "credit" && (
@@ -2369,6 +2389,9 @@ const styles = {
   monthSection: { marginTop: 40, paddingTop: 32, borderTop: "1px solid var(--border)" },
   monthHeader: { display: "flex", alignItems: "center", gap: 12, marginBottom: 16 },
   threePaycheckBadge: { fontSize: 10, fontWeight: 700, fontFamily: "var(--font-mono)", color: "var(--accent)", background: "rgba(240,180,41,0.12)", border: "1px solid rgba(240,180,41,0.3)", borderRadius: "var(--radius)", padding: "3px 8px", textTransform: "uppercase", letterSpacing: "0.08em" },
+  // Same badge shape as above in the app's amber warning colour (#f59e0b), the
+  // one Settings.jsx uses for "this figure is partial".
+  partialMonthBadge: { fontSize: 10, fontWeight: 700, fontFamily: "var(--font-mono)", color: "var(--amber, #f59e0b)", background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.3)", borderRadius: "var(--radius)", padding: "3px 8px", textTransform: "uppercase", letterSpacing: "0.08em", cursor: "help" },
 
   summaryTable: { borderCollapse: "collapse", tableLayout: "fixed", width: 320, maxWidth: "100%", marginBottom: 24, background: "var(--surface)" },
   summaryHeadCell: { background: "#1a1a1a", color: "#fff", fontWeight: 700, fontSize: 11, fontFamily: "var(--font-display)", padding: "3px 8px", border: "1px solid var(--grid-line)", textAlign: "left", height: 24 },
