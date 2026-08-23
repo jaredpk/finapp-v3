@@ -1,6 +1,17 @@
 import React, { useState, useEffect, useRef } from "react";
 import { getApiKey, generateApiKey, analyzeSimplifi, importSimplifi, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi, setPropertyBaselineApi, fetchManualAccounts, saveManualAccount, deleteManualAccountApi, downloadXlsx, saveAccountNickname, deleteAccountNicknameApi, getLastAudit, uploadAuditSheet, insertAuditTransactions, completeAudit, fetchImportedAccounts, clearImportedTransactions, fetchVehicles, saveVehicle, deleteVehicleApi, setVehicleBaselineApi, syncVehiclesApi, fetchLinkedInstitutions, removeLinkedInstitution, replayBackfill, getBackfillStatus, gmailStatus, gmailAuthUrl, gmailAuthCode, scanReceipts, sendTestAlert, fetchGeminiUsage } from "../api.js";
 
+// A grant that dropped gmail.readonly still reports connected — getGmailClient
+// only checks that a refresh token exists — so the scanner would keep running
+// and keep failing. Absent scopes (a pre-migration row) are treated as fine:
+// those connections predate the send scope and were read-only by definition.
+const GMAIL_READ_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
+function hasReadScope(status) {
+  const scopes = status?.scopes;
+  if (!Array.isArray(scopes) || scopes.length === 0) return true;
+  return scopes.includes(GMAIL_READ_SCOPE);
+}
+
 export default function Settings({ reloadData, user, accounts = [] }) {
   // Connected banks state
   const [institutions, setInstitutions] = useState([]);
@@ -102,6 +113,11 @@ export default function Settings({ reloadData, user, accounts = [] }) {
   // Alerting needs the send scope, which a re-consent can grant separately from
   // readonly — so the card reports the grant rather than assuming it.
   const [gmailCanSend, setGmailCanSend]     = useState(false);
+  // Tracked separately from canSend: a consent screen with the read box
+  // unticked leaves the receipt scanner broken with the connection still
+  // reporting "connected", which is exactly the silent failure the scopes
+  // column exists to make visible.
+  const [gmailCanRead, setGmailCanRead]     = useState(true);
   const [testingAlert, setTestingAlert]     = useState(false);
   const [testAlertResult, setTestAlertResult] = useState(null);
 
@@ -132,8 +148,12 @@ export default function Settings({ reloadData, user, accounts = [] }) {
     getLastAudit().then(({ log }) => setLastAudit(log || null)).catch(() => {});
     fetchLinkedInstitutions().then((data) => setInstitutions(data.institutions || [])).catch(() => {});
     gmailStatus()
-      .then((data) => { setGmailConnected(!!data.connected); setGmailCanSend(!!data.canSend); })
-      .catch(() => { setGmailConnected(false); setGmailCanSend(false); });
+      .then((data) => {
+        setGmailConnected(!!data.connected);
+        setGmailCanSend(!!data.canSend);
+        setGmailCanRead(hasReadScope(data));
+      })
+      .catch(() => { setGmailConnected(false); setGmailCanSend(false); setGmailCanRead(true); });
     // A usage card that can't load is a footnote, not a failure — it reports
     // itself and leaves the rest of Settings alone.
     //
@@ -183,6 +203,7 @@ export default function Settings({ reloadData, user, accounts = [] }) {
       // assumption — a consent screen with a box unticked lands here too.
       const status = await gmailStatus().catch(() => null);
       setGmailCanSend(!!status?.canSend);
+      setGmailCanRead(hasReadScope(status));
     } catch (err) {
       setGmailResult(`Error: ${err.message}`);
     } finally {
@@ -826,6 +847,13 @@ export default function Settings({ reloadData, user, accounts = [] }) {
             <p style={{ ...styles.muted, marginBottom: 12 }}>
               <span style={{ color: "var(--green, #22c55e)" }}>✓ Gmail connected</span> — receipts are scanned automatically each morning.
             </p>
+            {!gmailCanRead && (
+              <p style={{ ...styles.muted, marginBottom: 12, color: "var(--amber, #f59e0b)" }}>
+                This connection is missing the Gmail <strong>read</strong> scope, so receipt
+                scanning is broken. Use <strong>Reconnect</strong> and approve both boxes —
+                read <em>and</em> send.
+              </p>
+            )}
             {!gmailCanSend && (
               <p style={{ ...styles.muted, marginBottom: 12, color: "var(--amber, #f59e0b)" }}>
                 Benefit alerting needs the Gmail <strong>send</strong> scope, which this connection

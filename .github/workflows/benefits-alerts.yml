@@ -2,17 +2,35 @@
 # (min_machines_running = 0), so an in-process timer would not fire reliably —
 # this request wakes it via auto_start_machines.
 #
-# Requires two repo secrets:
-#   FINAPP_URL     — https origin of the deployed app, no trailing slash
+# Requires one repo secret:
 #   FINAPP_API_KEY — Settings → API key in the app (requireApiKeyOrAuth)
+#
+# The app's origin is NOT a secret — README.md already publishes it in this
+# public repo — so it is a plain default here rather than theatre. Setting a
+# repository variable named FINAPP_URL overrides it without editing this file.
+# Keeping it out of `secrets` also avoids a masking trap: curl writes network
+# errors to stderr, which lands in the public log, and a message like
+# "Could not resolve host: finapp-v3.fly.dev" carries a substring of the value
+# rather than the value itself, so GitHub's secret masking would not catch it.
 name: Benefits alerts
 on:
   schedule:
     - cron: "0 16 * * *"
   workflow_dispatch:
+
+# sendAlert is check-then-send, not atomic: two overlapping runs on the same
+# alert key both pass the "already sent?" check and both send mail, and the
+# ON CONFLICT DO NOTHING on alert_log then dedupes the row but not the email.
+# A manual dispatch landing on top of the cron is the realistic way that
+# happens, so runs are serialised here rather than racing.
+concurrency:
+  group: benefits-alerts
+  cancel-in-progress: false
+
 jobs:
   run-alerts:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       # THIS REPOSITORY IS PUBLIC AND SO ARE ITS ACTIONS LOGS. The response body
       # is discarded to /dev/null and never echoed: it comes from an endpoint
@@ -21,11 +39,14 @@ jobs:
       # Only the HTTP status code is printed — enough to see that the run
       # succeeded, and nothing else.
       - name: Trigger alert run
+        env:
+          FINAPP_URL: ${{ vars.FINAPP_URL || 'https://finapp-v3.fly.dev' }}
         run: |
           status=$(curl -sS -X POST \
             -H "X-API-Key: ${{ secrets.FINAPP_API_KEY }}" \
+            --max-time 120 \
             -o /dev/null -w '%{http_code}' \
-            "${{ secrets.FINAPP_URL }}/api/alerts/run")
+            "${FINAPP_URL}/api/alerts/run")
           echo "HTTP $status"
           case "$status" in
             2*) ;;

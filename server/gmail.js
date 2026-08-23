@@ -104,11 +104,46 @@ export async function getGmailClient() {
 // RFC 2047 encoded-word for a header value. Plain ASCII goes out as-is; anything
 // else is base64'd, because a raw UTF-8 byte in a header is mangled by the time
 // it reaches an inbox ("Café" arriving as "CafÃ©").
+// RFC 2047 §2 caps an encoded-word at 75 characters. `=?UTF-8?B?` plus `?=`
+// spends 12 of those, leaving 63 for the base64 payload; rounded down to a
+// multiple of 4 that is 60 characters, or 45 bytes of input per word. Anything
+// longer is split across several encoded-words folded with CRLF + space.
+//
+// This is the default path, not an edge case: buildDigestEmail puts an em-dash
+// in every subject it composes, so every digest subject is base64-encoded and
+// almost all of them exceed 45 bytes. Benefit names are owner-entered catalog
+// data with no length bound, so the unfolded version could also push the
+// Subject line past RFC 5322's 998-character hard limit.
+//
+// The split must land on a UTF-8 character boundary — each encoded-word is
+// base64-decoded independently, so a multi-byte character straddling two words
+// would decode to mojibake. Iterating with for..of walks code points, never
+// halves of a surrogate pair.
+const MAX_ENCODED_WORD_BYTES = 45;
+
 function encodeHeaderValue(value) {
   const text = String(value ?? "");
   // eslint-disable-next-line no-control-regex
   if (/^[\x20-\x7E]*$/.test(text)) return text;
-  return `=?UTF-8?B?${Buffer.from(text, "utf8").toString("base64")}?=`;
+
+  const words = [];
+  let chunk = "";
+  let bytes = 0;
+  for (const char of text) {
+    const size = Buffer.byteLength(char, "utf8");
+    if (bytes + size > MAX_ENCODED_WORD_BYTES) {
+      words.push(chunk);
+      chunk = "";
+      bytes = 0;
+    }
+    chunk += char;
+    bytes += size;
+  }
+  if (chunk) words.push(chunk);
+
+  return words
+    .map((w) => `=?UTF-8?B?${Buffer.from(w, "utf8").toString("base64")}?=`)
+    .join("\r\n ");
 }
 
 // Bodies go out base64 for the same reason headers do, plus it sidesteps the
