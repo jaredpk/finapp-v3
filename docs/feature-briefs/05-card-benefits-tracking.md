@@ -137,18 +137,81 @@ note on reset.
 
 ---
 
-## What cannot be automated (plan for it)
+## Keeping the catalog current (owner decision, 2026-08-23)
 
 **The benefit catalog is owner-maintained data, not code.** Issuers change these
-lineups — the Platinum's credit set was reworked in 2025 — and the exact
-amounts, merchants, and period bases must be entered from your card's current
-benefits guide. Do **not** let the catalog be seeded from an LLM's memory of
-what these cards offer; that is precisely the kind of confidently-stale data
-that makes the alerts untrustworthy. Ship it as a seed file you fill in once,
-editable in Settings, with a `verified_on` date per benefit shown in the UI.
+lineups — the Platinum's credit set was reworked in 2025 — so amounts, merchants
+and period bases must come from your card's own benefits guide. Do **not** let
+the catalog be seeded from an LLM's memory of what these cards offer; that is
+exactly the kind of confidently-stale data that makes every downstream alert
+untrustworthy.
 
-Also inherently manual: benefits with no transaction footprint, and any credit
-whose eligibility depends on *how* you booked rather than *where* you charged.
+### Scraping the issuer marketing pages — rejected as a source of record
+
+Considered and turned down for three reasons, in increasing order of importance:
+
+1. **It cannot run in prod.** A JS-rendered issuer page needs headless Chromium
+   (~300–500 MB); the Fly VM is 256 MB and already at ~173 MB RSS. It would have
+   to run on a GitHub Actions runner and POST results in.
+2. **It will break.** Issuer sites front themselves with commercial bot
+   management, and both Fly and GitHub egress from datacenter IP ranges. Expect
+   challenges and intermittent failure, not a feed. Issuer site terms also
+   prohibit automated access.
+3. **The data is wrong for us even when the fetch succeeds.** A marketing page
+   describes the card *as currently sold*. It does not carry reset basis
+   (calendar vs anniversary), enrollment requirements, the merchant strings the
+   match rules need, or which vintage of terms this cardholder actually holds.
+   The authoritative sources — the cardmember benefits guide and the issuer's
+   own benefits tab, which shows real usage figures — are behind authentication
+   and Plaid exposes neither.
+
+Optional later nice-to-have: a **change detector**, not a data source. A GH
+Actions job diffs the page's benefits section against the previous run's hash
+and, on a change, raises a review prompt. It never writes catalog values, so a
+blocked or broken fetch can only fail to nag — it cannot corrupt data. Phase 2
+at the earliest.
+
+### Chosen approach: a curated guided review, triggered three ways
+
+A guided review flow that the owner completes from the card's own benefits
+guide. Triggered by:
+
+1. **The annual fee posting to the card.** The strongest trigger and it needs no
+   new infrastructure — it is a match rule over transaction data already synced.
+   That one row also supplies `anniversary_date`, which the period math needs
+   regardless, and it prompts the audit at the moment the fee is charged.
+2. **A benefits-change email from the issuer.** Reuses the existing read-only
+   Gmail integration: a narrow query scoped to issuer sender domains, same shape
+   as `GMAIL_QUERY` (`server/receiptScan.js:38`), with `scanned_gmail_messages`
+   providing dedupe and `geminiUsage.js` providing the budget guard. Authoritative
+   (addressed to this cardholder, about this card) and it fires when something
+   actually changes.
+3. **A calendar fallback**, annually, so nothing goes stale if 1 and 2 both miss.
+
+A purely annual prompt is not sufficient on its own: issuers change lineups
+mid-year on their own schedule, not on the cardholder's anniversary.
+
+### Review flow requirements
+
+- **Present a diff, not a blank form.** Pre-fill every benefit from the current
+  catalog; confirm / change / remove per row, plus "add new".
+- **Capture the match rule, not just the amount** — merchant pattern, period
+  unit, calendar vs anniversary basis. This is the part that makes tracking work
+  and the part that will not be remembered later.
+- **Stamp `verified_on` per benefit** and surface it in the Benefits view, so a
+  stale row is visible rather than silently trusted.
+
+### Email delivery
+
+Today's Gmail scope is `gmail.readonly` (`server/gmail.js:15`) and cannot send.
+Emailing the prompt requires either adding `gmail.send` and re-consenting, or
+having the GitHub Actions job send it and leaving the server read-only.
+
+### Still inherently manual
+
+Benefits with no transaction footprint (lounge access, elite status, insurance
+coverage, anniversary miles), and any credit whose eligibility depends on *how*
+a booking was made rather than where it was charged.
 
 ---
 
@@ -166,6 +229,8 @@ whose eligibility depends on *how* you booked rather than *where* you charged.
 - `routes.js`: `GET /api/benefits/status`, `POST /api/benefits/:id/mark-used`,
   `POST /api/benefits/evaluate` (`requireApiKeyOrAuth`), catalog CRUD.
 - One tool added to `server/askAi.js`.
+- Catalog-review trigger: an annual-fee match rule, plus an issuer-email scan
+  reusing the receipt-scanner's Gmail plumbing.
 
 **Client**:
 - `views/Benefits.jsx` + a `{ id: "benefits", label: "Benefits", icon: "◆" }`
@@ -180,7 +245,8 @@ whose eligibility depends on *how* you booked rather than *where* you charged.
 evaluate endpoint with an API key from repo secrets.
 
 **Rough split:** period math + tests ~1 day; schema/routes/matching ~1 day; view
-+ Dashboard card ~0.5–1 day; alert delivery ~0.5 day.
++ Dashboard card ~0.5–1 day; alert delivery ~0.5 day; guided catalog review
+~0.5–1 day.
 
 ---
 
@@ -193,3 +259,6 @@ evaluate endpoint with an API key from repo secrets.
 3. Whether posted statement credits appear as their own rows on those two cards,
    and what their descriptions look like. That single observation decides how
    much of the "confirmed" half of the matching design is worth building.
+4. What the annual-fee row looks like on each card (merchant string, amount),
+   since it anchors both `anniversary_date` and the review trigger.
+5. Which sender addresses the two issuers use for benefits-change notices.
