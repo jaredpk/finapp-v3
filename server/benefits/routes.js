@@ -6,12 +6,13 @@ import {
   getCatalog, createCard, updateCard, getCard, deleteCard,
   createBenefit, updateBenefit, getBenefit, deleteBenefit,
   createRule, deleteRule,
-  listUsage, upsertUsage, confirmUsage, deleteUsage, deleteManualUsage,
-  getHistoryStartByAccount, findMatches, sumMatches, matchTest, assertValidRegex,
+  listManualMarks, upsertManualMark, deleteManualMark,
+  getHistoryStartByAccount, fetchUsageAggregates, fetchMatchRows,
+  matchTest, assertValidRegex,
   CARD_FIELDS, BENEFIT_FIELDS, RULE_FIELDS,
 } from "./repository.js";
 import { evaluateBenefits, toDateString } from "./periods.js";
-import { syncUsage } from "./sync.js";
+import { buildWindows, deriveBenefitStats, hasCriteria } from "./derive.js";
 import { DATE_PARAM_RE, validateDateRange } from "../limits.js";
 
 const PERIOD_UNITS = ["month", "quarter", "half", "year", "months_n"];
@@ -42,27 +43,88 @@ function invalidEnum(values) {
   return null;
 }
 
-// ── Matching ──────────────────────────────────────────────────────────────────
-
-// The database half of the sync. sync.js owns the decisions and takes its I/O
-// through this object, so the matching logic can be exercised without a
-// database (test/benefitSync.test.js).
-const SYNC_IO = { findMatches, sumMatches, upsertUsage, confirmUsage, deleteUsage };
+// ── Status ────────────────────────────────────────────────────────────────────
 
 // The whole of GET /api/benefits/status, exported because POST /api/alerts/run
 // (index.js) needs exactly the same picture before it can decide what is due.
+//
+// WRITE-FREE. The model this replaced ran a full match-and-record sync inside
+// every read — hundreds of writes per GET, two concurrent reads racing each
+// other over the same rows — and then evaluated what it had just written.
+// Deriving instead is strictly cheaper (7 queries, whatever the catalog holds,
+// against the 400-33,000 the old path issued) and leaves nothing behind to go
+// stale. See docs/feature-briefs/05-derive-on-read-plan.md.
+//
+// Order: catalog + history in parallel → compile checks → windows →
+// aggregate / rows / manual marks in parallel → derive → evaluate.
 export async function getBenefitsStatus(today) {
   const asOf = toDateString(today) || new Date().toISOString().slice(0, 10);
-  const cards = await getCatalog();
+  const [cards, historyByAccount] = await Promise.all([getCatalog(), getHistoryStartByAccount()]);
+
+  const { ruleErrors, excludedRuleIds } = await checkRules(cards);
+  const { windows, plans } = buildWindows(cards, asOf, { excludedRuleIds });
   const benefitIds = cards.flatMap((card) => card.benefits.map((b) => b.id));
-  let usageRows = await listUsage(benefitIds);
+
+  const [aggregates, rows, marks] = await Promise.all([
+    fetchUsageAggregates(windows, excludedRuleIds),
+    fetchMatchRows(windows, excludedRuleIds),
+    listManualMarks(benefitIds),
+  ]);
+
+  const stats = deriveBenefitStats({ plans, aggregates, rows, marks }, asOf);
   // ruleErrors travels with the evaluation: a rule that could not run means the
   // benefit's usage is unknown, and `rule-error` is how the contract says so
   // instead of letting it fall through to `available`.
-  const { written, ruleErrors } = await syncUsage(cards, usageRows, asOf, SYNC_IO);
-  if (written) usageRows = await listUsage(benefitIds);
-  const historyByAccount = await getHistoryStartByAccount();
-  return { as_of: asOf, cards: evaluateBenefits({ cards, usageRows, historyByAccount, ruleErrors }, asOf) };
+  return { as_of: asOf, cards: evaluateBenefits({ cards, stats, historyByAccount, ruleErrors }, asOf) };
+}
+
+// One regex compile per DISTINCT saved pattern, before any transaction is
+// touched.
+//
+// Kept as its own cheap round trip rather than folded into the match query for
+// one reason: a pattern that no longer parses raises SQLSTATE 2201B, and inside
+// the big CTE that error kills the read for every benefit on every card with no
+// indication of which rule caused it. Here it names the offending rule, that
+// rule alone is excluded from the scan, and the benefit it belongs to reports
+// `rule-error` — a hole in the evidence that announces itself instead of
+// reading as `available`.
+//
+// A rule with no criteria at all is excluded too, but is NOT an error: it would
+// match the entire statement and mark every benefit used, and it is far more
+// likely to be a half-filled row in the editor than a fault.
+async function checkRules(cards) {
+  const ruleErrors = [];
+  const excludedRuleIds = [];
+  const compiled = new Map();
+  for (const card of cards) {
+    for (const benefit of card.benefits || []) {
+      for (const rule of benefit.rules || []) {
+        if (!hasCriteria(rule)) {
+          excludedRuleIds.push(rule.id);
+          continue;
+        }
+        if (!rule.merchant_regex) continue;
+        if (!compiled.has(rule.merchant_regex)) {
+          try {
+            await assertValidRegex(rule.merchant_regex);
+            compiled.set(rule.merchant_regex, null);
+          } catch (err) {
+            // Only a parse failure is the rule's fault. Anything else (the
+            // database being unreachable, say) is this read failing, and it has
+            // to propagate rather than be mislabelled as a broken regex.
+            if (!err.invalidRegex) throw err;
+            compiled.set(rule.merchant_regex, err.message);
+          }
+        }
+        const message = compiled.get(rule.merchant_regex);
+        if (message) {
+          ruleErrors.push({ benefit_id: benefit.id, rule_id: rule.id, message });
+          excludedRuleIds.push(rule.id);
+        }
+      }
+    }
+  }
+  return { ruleErrors, excludedRuleIds };
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────────
@@ -205,15 +267,14 @@ export function registerBenefitsRoutes(app, requireAuth, requireApiKeyOrAuth) {
     const raw = amount === undefined || amount === null || amount === "" ? benefit.amount_limit ?? 0 : amount;
     const value = Number(raw);
     if (!Number.isFinite(value) || value < 0) return res.status(400).json({ error: "amount must be a non-negative number" });
-    await upsertUsage({
+    // cb_manual_marks is disjoint from anything automatic, so this cannot
+    // clobber a matched transaction and a matched transaction cannot clobber
+    // it. The mark reports confidence `manual`; a posted statement credit is a
+    // different kind of evidence and is never conflated with the owner's word.
+    await upsertManualMark({
       benefitId: benefit.id,
       periodKey: String(period_key),
       amount: value,
-      txnId: null,
-      source: "manual",
-      // Deliberately not confirmed: confirmed_at means "a posted statement
-      // credit said so". A manual mark reports confidence `manual` instead.
-      confirmedAt: null,
       note: note || null,
     });
     res.json({ ok: true });
@@ -222,7 +283,7 @@ export function registerBenefitsRoutes(app, requireAuth, requireApiKeyOrAuth) {
   app.post("/api/benefits/:id/unmark", requireAuth, async (req, res) => {
     const { period_key } = req.body || {};
     if (!String(period_key || "").trim()) return res.status(400).json({ error: "period_key required" });
-    await deleteManualUsage(Number(req.params.id), String(period_key));
+    await deleteManualMark(Number(req.params.id), String(period_key));
     res.json({ ok: true });
   });
 }

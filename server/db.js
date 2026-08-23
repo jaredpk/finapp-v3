@@ -8,7 +8,39 @@ import { groupDuplicates, isImportedId, sameSignedAmount } from "./transactionMa
 const { Pool } = pg;
 
 const connectionString = process.env.DATABASE_URL?.replace(/([?&])sslmode=[^&]*/g, '$1').replace(/[?&]$/, '');
-const pool = new Pool({ connectionString, ssl: { rejectUnauthorized: false } });
+
+// Production's DATABASE_URL is a remote pooler that requires TLS and presents a
+// certificate this app does not pin, hence `rejectUnauthorized: false` — that
+// behaviour is unchanged for every remote host.
+//
+// A LOCAL server (the test/dev Postgres on 127.0.0.1) is a different case: it
+// speaks no TLS at all, and a Pool that insists on it cannot connect, which is
+// what made the benefits SQL untestable outside production. So SSL is switched
+// off for a loopback connection string only. This narrows nothing remote: the
+// host has to literally be localhost / 127.0.0.1 / ::1, and anything the regex
+// cannot read (an unset URL, a socket path, a hostname that merely contains the
+// word "local") falls through to the SSL branch rather than out of it.
+//
+// PGSSLMODE=disable is honoured as an explicit escape hatch for a non-loopback
+// dev database — opt-in, env-only, never the default.
+function isLocalConnectionString(url) {
+  if (!url) return false;
+  try {
+    const host = new URL(url).hostname.replace(/^\[|\]$/g, "");
+    return host === "localhost" || host === "127.0.0.1" || host === "::1";
+  } catch {
+    return false;
+  }
+}
+
+const disableSsl =
+  String(process.env.PGSSLMODE || "").toLowerCase() === "disable" ||
+  isLocalConnectionString(connectionString);
+
+const pool = new Pool({
+  connectionString,
+  ssl: disableSsl ? false : { rejectUnauthorized: false },
+});
 
 export async function initDb() {
   await pool.query(`

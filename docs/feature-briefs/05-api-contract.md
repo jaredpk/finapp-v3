@@ -9,6 +9,16 @@ and `POST /api/alerts/run`, which use `requireApiKeyOrAuth`.
 
 `GET /api/benefits/status?as_of=YYYY-MM-DD` (`as_of` optional, defaults today)
 
+This route is READ-ONLY: it writes nothing, to any table. Everything automatic —
+matched charges, matched credits, which credit settles which charge, the period
+totals — is derived from `transactions` + the match rules on each read and
+thrown away again (`server/benefits/derive.js`). The only usage this app stores
+is the owner's own manual mark. An earlier design ran a full match-and-record
+sync inside every GET; two concurrent reads raced each other over the rows they
+were both rewriting, and the stored state drifted from the truth as rules,
+transactions and periods changed. Callers may issue this request as often as
+they like, concurrently, in any order.
+
 ```json
 {
   "as_of": "2026-08-23",
@@ -54,29 +64,48 @@ and `POST /api/alerts/run`, which use `requireApiKeyOrAuth`.
 `confidence` ∈ `confirmed | unconfirmed | manual | none`
 
 `insufficient-history` is returned whenever `period_start` precedes the card's
-`history_start`. `rule-error` is returned whenever one of the benefit's match
-rules failed to run during the evaluation — an owner-entered regex that no
-longer parses, typically — and it carries `rule_error`, a human-readable
-`rule <id>: <parse error>` naming the rule to fix (`null` otherwise). The client
-must render both as their own state, never as "available": claiming a benefit is
-unused over a window we cannot see, or one we never managed to evaluate, is the
-failure mode this whole field exists to prevent. Neither is ever chased with an
-expiry nudge; `rule-error` gets one alert of its own per period saying a rule is
-broken.
+`history_start`. `rule-error` is returned whenever the benefit could not be
+evaluated, for either of two reasons, and carries `rule_error`, a
+human-readable explanation (`null` otherwise):
+
+- one of the benefit's match rules failed to compile — an owner-entered regex
+  that no longer parses, typically — in which case `rule_error` is
+  `rule <id>: <parse error>`, naming the rule to go fix;
+- a rule matches more transactions in the evaluation window than the
+  credit-to-charge pairing pass will hold (`PAIRING_ROW_LIMIT` in
+  `server/benefits/derive.js`), in which case `rule_error` says so and asks for
+  the rule to be narrowed. Pairing over a subset of the candidates would
+  misclassify standalone-vs-paired credits, which inflates `amount_used` and
+  suppresses an expiry alert, so the cap announces itself rather than degrading.
+
+The client must render both statuses as their own state, never as "available":
+claiming a benefit is unused over a window we cannot see, or one we never
+managed to evaluate, is the failure mode this whole field exists to prevent.
+Neither is ever chased with an expiry nudge; `rule-error` gets one alert of its
+own per period saying a rule is broken.
+
+`confidence: "confirmed"` means EVERY dollar counted in `amount_used` has a
+posted statement credit behind it — not merely that some credit exists in the
+period. Three $100 charges settled by a single $100 credit are `amount_used`
+300 with `confidence: "unconfirmed"`, because $200 of that is still only a
+charge waiting on a statement.
 
 `period_key` encodes the period's SHAPE as well as its window
 (`cal:month:1:2026-08`, `anniv:year:1:2025-09-14`, `anchor:months_n:48:none`).
 `year × 1`, `half × 2`, `quarter × 4` and `month × 12` all resolve to the same
-calendar year, and the key is the idempotency key for `cb_usage` and `cb_alerts`
-— without the shape in it, changing a benefit's period through
-`PATCH /api/benefits/benefits/:id` would silently hand the old usage rows to the
-new window.
+calendar year, and the key is the idempotency key for `cb_manual_marks` and
+`cb_alerts` — without the shape in it, changing a benefit's period through
+`PATCH /api/benefits/benefits/:id` would silently hand the old marks to the new
+window.
 
 `matches` is a bounded sample of the transactions behind `amount_used`, not
 necessarily all of them: `matches_truncated` is `true` when a match rule hit
-more transactions than the server records individually. `amount_used` is always
+more transactions than the server lists individually. `amount_used` is always
 the exact total for the period regardless — it is summed in SQL, never from the
-rows that happen to be listed.
+rows that happen to be listed. `matches` may also include a posted statement
+credit whose money belongs to an EARLIER period (see the last section): it is
+listed as evidence for the period it landed in, but contributes nothing to that
+period's `amount_used`.
 
 `carryover` is stored, returned and rendered, but NOTHING applies it yet: every
 period is evaluated against the full `amount_limit` whatever the previous period
@@ -135,6 +164,23 @@ elite status, anniversary miles) live entirely on this path and report
 `manual-only`.
 
 A posted statement credit is attached to the period of the CHARGE it confirms,
-not to the period it landed in — it sets `confirmed_at` on that charge's usage
-row rather than becoming usage of the following period. Only a credit with no
-charge to confirm is recorded under its own period.
+not to the period it landed in — it confirms that charge rather than becoming
+usage of the following period. This holds whether or not the two amounts match:
+a $50 credit against a $100 charge confirms half of that charge and adds nothing
+to the period it posted in. (An earlier design paired only on an equal amount,
+so a mismatched credit was filed as fresh usage of its own landing period,
+consuming the next period's allowance — the feature's own named failure mode.)
+
+Only the part of a credit that no charge accounts for is recorded as usage of
+the period the credit landed in, and it is confirmed by nature: the statement
+credit itself is the evidence. That is the one path by which a credit counts as
+money, and it is what lets a benefit matched solely on its posted credit still
+report an amount.
+
+The charge a credit may settle is looked for across the current period and every
+preceding period in scope: everything reaching back into the last 120 days, and
+at minimum one whole preceding period however long the period is. Since those
+windows tile contiguously, "the window in which period P's credit posts" is
+simply the period after P, and is always in scope. The remaining blind spot,
+stated as the bound: a credit posting more than 120 days AND more than one full
+period after its charge.

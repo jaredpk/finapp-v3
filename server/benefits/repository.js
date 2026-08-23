@@ -4,6 +4,7 @@
 // server/property/ uses.
 import pool from "../db.js";
 import { fetchLimit, takeWithTruncation } from "../limits.js";
+import { PAIRING_ROW_LIMIT } from "./derive.js";
 
 // ── Catalog ───────────────────────────────────────────────────────────────────
 
@@ -129,113 +130,11 @@ export async function deleteRule(id) {
   return rowCount > 0;
 }
 
-// ── Usage ─────────────────────────────────────────────────────────────────────
-
-// Usage rows joined to the transaction that produced them, because the status
-// contract's `matches` carry the date and merchant and cb_usage stores neither
-// (duplicating them would let them drift from the row they describe). A manual
-// mark has no transaction, so it dates from when it was recorded.
-export async function listUsage(benefitIds) {
-  if (!benefitIds?.length) return [];
-  const { rows } = await pool.query(
-    `SELECT u.id, u.benefit_id, u.period_key, u.amount::float AS amount, u.txn_id, u.source,
-            u.confirmed_at, u.confirmed_txn_id, u.note,
-            COALESCE(TO_CHAR(t.date,'YYYY-MM-DD'), TO_CHAR(u.created_at,'YYYY-MM-DD')) AS date,
-            t.merchant
-     FROM cb_usage u
-     LEFT JOIN transactions t ON t.id = u.txn_id
-     WHERE u.benefit_id = ANY($1::int[])
-     ORDER BY u.benefit_id, date, u.id`,
-    [benefitIds]
-  );
-  return rows;
-}
-
-// Idempotent by construction, which is what lets the evaluation re-run on every
-// status read and on every cron tick without inflating anything:
-//
-//   - an automatic row keys on (benefit, period, txn) — the same transaction
-//     matched again updates one row instead of adding a second,
-//   - a manual row keys on (benefit, period) through the partial unique index
-//     (schema.js), since NULL txn_ids do not collide under a plain constraint.
-//
-// The two key spaces are disjoint, so automatic matching can never overwrite a
-// manual mark. confirmed_at is sticky on update: once a posted credit has
-// confirmed a period, a later re-match of the charge must not un-confirm it.
-export async function upsertUsage({ benefitId, periodKey, amount = 0, txnId = null, source = "auto", confirmedAt = null, note = null }) {
-  if (txnId === null || txnId === undefined) {
-    const { rows } = await pool.query(
-      `INSERT INTO cb_usage (benefit_id, period_key, amount, txn_id, source, confirmed_at, note)
-       VALUES ($1, $2, $3, NULL, $4, $5, $6)
-       ON CONFLICT (benefit_id, period_key) WHERE txn_id IS NULL
-       DO UPDATE SET amount = EXCLUDED.amount, source = EXCLUDED.source,
-                     confirmed_at = EXCLUDED.confirmed_at, note = EXCLUDED.note
-       RETURNING id`,
-      [benefitId, periodKey, amount, source, confirmedAt, note]
-    );
-    return rows[0];
-  }
-  const { rows } = await pool.query(
-    `INSERT INTO cb_usage (benefit_id, period_key, amount, txn_id, source, confirmed_at, note)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
-     ON CONFLICT (benefit_id, period_key, txn_id)
-     DO UPDATE SET amount = EXCLUDED.amount,
-                   confirmed_at = COALESCE(cb_usage.confirmed_at, EXCLUDED.confirmed_at)
-     RETURNING id`,
-    [benefitId, periodKey, amount, txnId, source, confirmedAt, note]
-  );
-  return rows[0];
-}
-
-// Confirms ONE recorded charge with the posted statement credit that settled
-// it. This is the other half of the lag the brief describes: the credit posts a
-// cycle after the charge, so it belongs to the charge's period, not to its own
-// — inserting it as fresh usage where it landed would consume the NEXT period's
-// allowance before a cent of it was spent (see benefits/sync.js).
-//
-// Both columns are sticky (COALESCE), so a re-run cannot re-confirm a row with
-// a different credit, and `confirmed_txn_id` is what makes the pairing
-// idempotent across runs: the next sync sees that this credit has already been
-// spent confirming something and leaves it alone instead of filing it again.
-export async function confirmUsage({ usageId, confirmedAt = new Date(), confirmedTxnId = null }) {
-  const { rowCount } = await pool.query(
-    `UPDATE cb_usage
-        SET confirmed_at = COALESCE(confirmed_at, $2),
-            confirmed_txn_id = COALESCE(confirmed_txn_id, $3)
-      WHERE id = $1`,
-    [usageId, confirmedAt, confirmedTxnId]
-  );
-  return rowCount > 0;
-}
-
-// Removes one automatic row by its key. Used for rollup rows only (see
-// findMatches): a rollup that has dropped to zero has to GO, because a
-// zero-amount usage row would make an untouched period look partially used
-// instead of available.
-export async function deleteUsage(benefitId, periodKey, txnId) {
-  const { rowCount } = await pool.query(
-    `DELETE FROM cb_usage WHERE benefit_id = $1 AND period_key = $2 AND txn_id = $3`,
-    [benefitId, periodKey, txnId]
-  );
-  return rowCount > 0;
-}
-
-// "Unmark" removes only the owner's own row. An automatic match is evidence
-// from the transaction feed and is not the owner's to delete here — it comes
-// back on the next evaluation anyway.
-export async function deleteManualUsage(benefitId, periodKey) {
-  const { rowCount } = await pool.query(
-    `DELETE FROM cb_usage WHERE benefit_id = $1 AND period_key = $2 AND txn_id IS NULL`,
-    [benefitId, periodKey]
-  );
-  return rowCount > 0;
-}
-
 // ── History coverage ──────────────────────────────────────────────────────────
 
 // Earliest transaction date per account: the line before which this app knows
-// nothing and must not claim a benefit went unused. Same exclusions as the
-// matching query below, so "covered" means "covered by rows matching could
+// nothing and must not claim a benefit went unused. Same three exclusions as
+// the match queries below, so "covered" means "covered by rows matching could
 // actually have seen".
 export async function getHistoryStartByAccount() {
   const { rows } = await pool.query(
@@ -249,9 +148,9 @@ export async function getHistoryStartByAccount() {
   return Object.fromEntries(rows.map((r) => [r.account, r.history_start]));
 }
 
-// ── Matching ──────────────────────────────────────────────────────────────────
+// ── Match-rule tester ─────────────────────────────────────────────────────────
 
-// Rows a tester or a match run may consider. The three exclusions are lifted
+// Rows the tester may consider. The three exclusions are lifted
 // verbatim from getSpendingByCategory (db.js) so "which transactions count"
 // means one thing across the app: nothing pending (a pending row's amount and
 // merchant both still move), nothing hidden, nothing on a hidden account.
@@ -261,7 +160,7 @@ export async function getHistoryStartByAccount() {
 // `original_description` carry the raw descriptor the match rules are actually
 // written against. COALESCE because `NULL ~* x` is NULL, which would quietly
 // drop every row with an empty column instead of failing the one comparison.
-function matchConditions({ accountId, startDate, endDate, merchantRegex, amountMin, amountMax, category, direction, excludeTxnIds }) {
+function matchConditions({ accountId, startDate, endDate, merchantRegex, amountMin, amountMax, category, direction }) {
   const conditions = [
     "status != 'pending'",
     "(hidden IS NOT TRUE)",
@@ -292,12 +191,6 @@ function matchConditions({ accountId, startDate, endDate, merchantRegex, amountM
   if (category) {
     conditions.push(`(plaid_category = $${i} OR primary_category = $${i})`);
     params.push(category); i++;
-  }
-  // Transactions already recorded as their own cb_usage row, excluded so
-  // sumMatches returns only what is NOT accounted for row by row.
-  if (excludeTxnIds?.length) {
-    conditions.push(`id <> ALL($${i++}::text[])`);
-    params.push(excludeTxnIds);
   }
   return { where: conditions.join(" AND "), params };
 }
@@ -362,55 +255,153 @@ export async function matchTest({ accountId, merchantRegex, amountMin, amountMax
   return { count: rows.length, truncated, sample: rows };
 }
 
-// The rows one match rule selects inside one window, oldest first. Same
-// conditions as the tester plus the rule's direction, so what the tester
-// previews is what the evaluation records.
+// ── Deriving usage (Brief 05, derive-on-read) ─────────────────────────────────
+
+// The two transaction queries behind GET /api/benefits/status, and the CTE they
+// share.
 //
-// This is the RECORDING path, and it is bounded like every other query here —
-// but the bound is on the ROWS, never on the money. What comes back is a
-// sample: `truncated` says whether the rule hit more transactions than the
-// sample holds, and the caller settles the difference with sumMatches below.
-// A cap that silently swallowed the rest would under-count `amount_used` and
-// report a spent credit as partially-used, or as available, which is the exact
-// failure this whole feature exists to prevent.
-export async function findMatches(params) {
-  let result;
-  const { where, params: values } = matchConditions(params);
-  try {
-    result = await pool.query(
-      `SELECT ${MATCH_SELECT} FROM transactions WHERE ${where}
-       ORDER BY date, id LIMIT $${values.length + 1}`,
-      [...values, fetchLimit(MATCH_SAMPLE_LIMIT)]
-    );
-  } catch (err) {
-    throw rethrowRegexError(err);
-  }
-  const { rows, truncated } = takeWithTruncation(result.rows, MATCH_SAMPLE_LIMIT);
-  return { rows, truncated };
+// Nothing here writes. Matched charges, matched credits, their pairing and the
+// totals that come out of it are all recomputed per read (benefits/derive.js);
+// the only usage this app persists is the owner's own manual mark. That is what
+// removed the whole class of drift bugs the stored model kept producing.
+//
+// The windows are computed in JS — dozens of (benefit, period, start, end)
+// tuples — and shipped as four parallel arrays for `unnest` to turn back into
+// rows. Two scans of `transactions` total, whatever the size of the catalog.
+//
+// The three exclusions are lifted verbatim from getSpendingByCategory (db.js)
+// so "which transactions count" means one thing across the app: nothing
+// pending (a pending row's amount and merchant both still move), nothing
+// hidden, nothing on a hidden account. Same set getHistoryStartByAccount uses,
+// so "covered" means "covered by rows this query could actually have seen".
+//
+// SELECT DISTINCT on t.id is load-bearing: it is what makes a transaction
+// matched by two overlapping rules of the same benefit (`DOORDASH` and `DOOR`)
+// count ONCE per period, structurally, rather than relying on per-rule
+// bookkeeping to subtract it again.
+const MATCH_CTE = `
+  WITH w AS (
+    SELECT * FROM unnest($1::int[], $2::text[], $3::date[], $4::date[])
+         AS w(benefit_id, period_key, start_date, end_date)
+  ),
+  m AS (
+    SELECT DISTINCT w.benefit_id, w.period_key, t.id AS txn_id,
+           TO_CHAR(t.date,'YYYY-MM-DD') AS date, t.merchant,
+           ABS(t.amount)::float AS amount, (t.amount < 0) AS is_credit
+    FROM w
+    JOIN cb_benefits b    ON b.id = w.benefit_id
+    JOIN cb_cards c       ON c.id = b.card_id AND c.account_id IS NOT NULL
+    JOIN cb_match_rules r ON r.benefit_id = b.id AND NOT (r.id = ANY($5::int[]))
+    JOIN transactions t
+      ON t.account = c.account_id
+     AND t.date >= w.start_date AND t.date <= w.end_date
+     AND t.status != 'pending' AND (t.hidden IS NOT TRUE)
+     AND t.account NOT IN (SELECT account_id FROM hidden_accounts)
+     AND ((r.direction = 'charge' AND t.amount > 0) OR (r.direction = 'credit' AND t.amount < 0))
+     AND (r.merchant_regex IS NULL OR COALESCE(t.merchant,'') ~* r.merchant_regex
+          OR COALESCE(t.name,'') ~* r.merchant_regex
+          OR COALESCE(t.original_description,'') ~* r.merchant_regex)
+     AND (r.amount_min IS NULL OR ABS(t.amount) >= r.amount_min)
+     AND (r.amount_max IS NULL OR ABS(t.amount) <= r.amount_max)
+     AND (r.category IS NULL OR t.plaid_category = r.category OR t.primary_category = r.category)
+  )`;
+
+// The four parallel arrays + the broken-rule exclusion list, in $1..$5 order.
+// `unnest` with several arguments stops at the longest, so they have to be
+// exactly the same length; they are built from one loop over one list.
+function windowParams(windows, excludedRuleIds = []) {
+  return [
+    windows.map((w) => w.benefit_id),
+    windows.map((w) => w.period_key),
+    windows.map((w) => w.start_date),
+    windows.map((w) => w.end_date),
+    (excludedRuleIds || []).map((id) => Number(id)).filter(Number.isInteger),
+  ];
 }
 
-// COUNT and SUM over the matching set, computed in Postgres and bounded by
-// nothing. `excludeTxnIds` drops the transactions the caller has already
-// recorded as individual cb_usage rows, so what comes back is exactly the money
-// no row accounts for — the amount a rollup row has to carry for the period's
-// total to be right.
-//
-// A pure aggregate on purpose: it scans as many rows as the rule matches but
-// materialises none of them, so the exact figure costs the 256 MB VM (see the
-// reasoning at the top of limits.js) two numbers rather than an unbounded array.
-export async function sumMatches(params) {
-  const { where, params: values } = matchConditions(params);
-  try {
-    const { rows } = await pool.query(
-      `SELECT COUNT(*)::int AS count, COALESCE(SUM(ABS(amount)), 0)::float AS total
-       FROM transactions WHERE ${where}`,
-      values
-    );
-    return { count: rows[0]?.count ?? 0, total: rows[0]?.total ?? 0 };
-  } catch (err) {
-    throw rethrowRegexError(err);
-  }
+// Q-aggregate: exact money per (benefit, period, direction). Unbounded on
+// purpose and materialising nothing — the same house pattern as
+// getSpendingByCategory — because `amount_used` must be the total for the
+// period, never "whatever fitted in a sample". This is what the rollup row used
+// to persist, now computed and thrown away.
+export async function fetchUsageAggregates(windows = [], excludedRuleIds = []) {
+  if (!windows.length) return [];
+  const { rows } = await pool.query(
+    `${MATCH_CTE}
+     SELECT benefit_id, period_key, is_credit,
+            SUM(amount)::float AS total, COUNT(*)::int AS count, MAX(date) AS last_date
+     FROM m GROUP BY 1, 2, 3`,
+    windowParams(windows, excludedRuleIds)
+  );
+  return rows;
 }
+
+// Q-rows: the individual transactions, for pairing and for `matches`.
+//
+// Bounded per (benefit, direction) rather than overall, so one chatty benefit
+// cannot starve the pairing of another, and fetched with limit + 1 — limits.js'
+// idiom — so "did we hit the cap?" has an exact answer instead of the ambiguous
+// rows.length === limit. derive.js turns an overflow into `rule-error`: pairing
+// over a subset of the candidates would misclassify standalone-vs-paired
+// credits, which inflates amount_used and suppresses an expiry alert.
+export async function fetchMatchRows(windows = [], excludedRuleIds = [], limit = PAIRING_ROW_LIMIT) {
+  if (!windows.length) return [];
+  const { rows } = await pool.query(
+    `${MATCH_CTE}
+     SELECT txn_id, benefit_id, period_key, date, merchant, amount, is_credit FROM (
+       SELECT m.*, ROW_NUMBER() OVER (PARTITION BY benefit_id, is_credit
+                                      ORDER BY date DESC, txn_id DESC) AS rn
+       FROM m
+     ) x WHERE rn <= $6`,
+    [...windowParams(windows, excludedRuleIds), fetchLimit(limit)]
+  );
+  return rows;
+}
+
+// ── Manual marks ──────────────────────────────────────────────────────────────
+
+// The one piece of usage this app stores, because it is the one piece nothing
+// can derive: the owner saying "I used this". Disjoint from everything
+// automatic, so automatic matching cannot clobber a mark and a mark cannot be
+// mistaken for a matched transaction.
+export async function listManualMarks(benefitIds) {
+  if (!benefitIds?.length) return [];
+  const { rows } = await pool.query(
+    `SELECT benefit_id, period_key, amount::float AS amount, note,
+            TO_CHAR(created_at,'YYYY-MM-DD') AS created_at
+     FROM cb_manual_marks
+     WHERE benefit_id = ANY($1::int[])
+     ORDER BY benefit_id, period_key`,
+    [benefitIds]
+  );
+  return rows;
+}
+
+// One mark per (benefit, period): a plain UNIQUE constraint, so a double click
+// updates the row it already wrote instead of counting the benefit twice.
+export async function upsertManualMark({ benefitId, periodKey, amount = 0, note = null }) {
+  const { rows } = await pool.query(
+    `INSERT INTO cb_manual_marks (benefit_id, period_key, amount, note)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (benefit_id, period_key)
+     DO UPDATE SET amount = EXCLUDED.amount, note = EXCLUDED.note
+     RETURNING id`,
+    [benefitId, periodKey, amount, note]
+  );
+  return rows[0];
+}
+
+// "Unmark" removes only the owner's own row. An automatic match is evidence
+// from the transaction feed and is not the owner's to delete — and there is no
+// longer any row for it to delete anyway.
+export async function deleteManualMark(benefitId, periodKey) {
+  const { rowCount } = await pool.query(
+    `DELETE FROM cb_manual_marks WHERE benefit_id = $1 AND period_key = $2`,
+    [benefitId, periodKey]
+  );
+  return rowCount > 0;
+}
+
 
 // ── Alert bookkeeping ─────────────────────────────────────────────────────────
 

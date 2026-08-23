@@ -56,43 +56,29 @@ export async function initBenefitsSchema(pool) {
     );
     CREATE INDEX IF NOT EXISTS cb_match_rules_benefit_idx ON cb_match_rules (benefit_id);
 
-    CREATE TABLE IF NOT EXISTS cb_usage (
+    -- The ONE piece of usage this app persists (Brief 05, derive-on-read).
+    -- Everything automatic — matched charges, matched credits, their pairing,
+    -- the period totals and the confirmation state — is derived on every read
+    -- from the transactions table + cb_match_rules and thrown away again
+    -- (benefits/derive.js). The predecessor table, cb_usage, stored all of it
+    -- and then had to keep it consistent as rules, transactions and periods
+    -- changed; it could not, and every defect that model shipped was a flavour
+    -- of that drift. A manual mark is the one fact nothing can derive: the
+    -- owner saying "I used this".
+    CREATE TABLE IF NOT EXISTS cb_manual_marks (
       id SERIAL PRIMARY KEY,
       benefit_id INTEGER NOT NULL REFERENCES cb_benefits(id) ON DELETE CASCADE,
       period_key TEXT NOT NULL,      -- from periods.js resolvePeriod().key
       amount NUMERIC(12,2) NOT NULL DEFAULT 0,
-      -- NULL for a manual "mark as used"; a transaction id for a matched row;
-      -- and 'rollup:rule:<id>' for the one synthetic row per rule per period
-      -- that carries whatever a rule matched BEYOND the bounded sample of
-      -- transactions recorded individually (benefits/sync.js). The rollup keeps
-      -- amount_used exact without recording an unbounded number of rows.
-      txn_id TEXT,
-      source TEXT NOT NULL DEFAULT 'auto' CHECK (source IN ('auto','manual')),
-      confirmed_at TIMESTAMPTZ,      -- set when a POSTED CREDIT settled this charge
-      -- The transaction id of that posted credit. A statement credit arrives a
-      -- cycle after the charge it confirms, so it is spent confirming THIS row
-      -- rather than filed as usage of its own (later) period; recording which
-      -- credit did it is what stops the next sync from finding the same credit
-      -- and counting it a second time.
-      confirmed_txn_id TEXT,
       note TEXT,
       created_at TIMESTAMPTZ DEFAULT NOW(),
-      -- Re-evaluation is idempotent: matching the same transaction into the
-      -- same period twice updates one row instead of accumulating usage.
-      UNIQUE (benefit_id, period_key, txn_id)
+      -- A plain UNIQUE, not the partial index cb_usage needed: with no txn_id
+      -- column there are no NULLs to defeat it, so a double click updates one
+      -- row instead of counting the benefit twice, and it is the ON CONFLICT
+      -- target upsertManualMark names explicitly.
+      UNIQUE (benefit_id, period_key)
     );
-    -- ...except that the UNIQUE constraint above does NOT cover the manual case.
-    -- In SQL two NULLs are never equal, so every manual mark (txn_id IS NULL)
-    -- would satisfy the constraint and a double click would count the benefit
-    -- twice. A partial unique index is the one thing that constrains it, and it
-    -- is also the ON CONFLICT target upsertUsage infers for manual rows.
-    CREATE UNIQUE INDEX IF NOT EXISTS cb_usage_manual_uniq
-      ON cb_usage (benefit_id, period_key) WHERE txn_id IS NULL;
-    CREATE INDEX IF NOT EXISTS cb_usage_benefit_idx ON cb_usage (benefit_id);
-    -- CREATE TABLE IF NOT EXISTS skips a table that already exists, columns and
-    -- all, so a database created before this column existed needs it added the
-    -- same way db.js adds columns to its own tables.
-    ALTER TABLE cb_usage ADD COLUMN IF NOT EXISTS confirmed_txn_id TEXT;
+    CREATE INDEX IF NOT EXISTS cb_manual_marks_benefit_idx ON cb_manual_marks (benefit_id);
 
     CREATE TABLE IF NOT EXISTS cb_alerts (
       id SERIAL PRIMARY KEY,
@@ -105,4 +91,26 @@ export async function initBenefitsSchema(pool) {
       UNIQUE (benefit_id, period_key, tier)
     );
   `);
+
+  // ── Migration off cb_usage ──────────────────────────────────────────────────
+  // Conditional, because CREATE TABLE IF NOT EXISTS above says nothing about a
+  // table that has to GO. Manual marks are carried across; automatic rows are
+  // dropped with no migration, by definition — they are reproducible from
+  // `transactions` + the match rules, which is the entire point of the rebuild.
+  //
+  // Dropping them also fixes the legacy-row problem for free: the pre-fix
+  // confirmed-credit rows that blocked a period from healing itself simply
+  // cease to exist.
+  //
+  // to_regclass returns NULL rather than raising for a table that is not there,
+  // so this is safe on a fresh database and a no-op on the second run.
+  const { rows } = await pool.query(`SELECT to_regclass('public.cb_usage') AS t`);
+  if (rows[0]?.t) {
+    await pool.query(`
+      INSERT INTO cb_manual_marks (benefit_id, period_key, amount, note, created_at)
+      SELECT benefit_id, period_key, amount, note, created_at FROM cb_usage
+      WHERE source = 'manual' AND txn_id IS NULL
+      ON CONFLICT (benefit_id, period_key) DO NOTHING`);
+    await pool.query(`DROP TABLE cb_usage`);
+  }
 }
