@@ -833,3 +833,117 @@ export async function fetchTransactionsForMonth(monthKey) {
   const body = await r.json();
   return { ...body, ...readTruncation(r) };
 }
+
+// ── Card benefits ─────────────────────────────────────────────────────────────
+// Every route below is phase 2 and may not be deployed on the server the client
+// is talking to, so these helpers report the HTTP status alongside the message
+// instead of handing back a half-parsed body: the Benefits view turns a 404
+// into "not available yet" rather than a blank panel, and the match-rule tester
+// turns the 400 from an invalid regex into an inline validation message. Same
+// thrown-error shape as askAi (err.status), just shared across the group
+// because eleven routes need identical treatment.
+async function benefitsJson(r) {
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    const err = new Error(body.error || `Benefits request failed: ${r.status}`);
+    err.status = r.status;
+    throw err;
+  }
+  return r.json();
+}
+
+export async function fetchBenefitStatus(asOf) {
+  const qs = asOf ? `?as_of=${encodeURIComponent(asOf)}` : "";
+  const r = await fetch(`${BASE}/benefits/status${qs}`, { headers: await authHeaders() });
+  return benefitsJson(r);
+}
+
+export async function fetchBenefitCatalog() {
+  const r = await fetch(`${BASE}/benefits/catalog`, { headers: await authHeaders() });
+  return benefitsJson(r);
+}
+
+// POST creates, PATCH updates — the id decides which, and is never sent in the
+// body because the route carries it.
+export async function saveBenefitCard(card) {
+  const { id, ...fields } = card;
+  const r = await fetch(`${BASE}/benefits/cards${id ? `/${id}` : ""}`, {
+    method: id ? "PATCH" : "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify(fields),
+  });
+  return benefitsJson(r);
+}
+
+export async function deleteBenefitCard(id) {
+  const r = await fetch(`${BASE}/benefits/cards/${id}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+  });
+  return benefitsJson(r);
+}
+
+export async function saveBenefit(benefit) {
+  const { id, ...fields } = benefit;
+  const r = await fetch(`${BASE}/benefits/benefits${id ? `/${id}` : ""}`, {
+    method: id ? "PATCH" : "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify(fields),
+  });
+  return benefitsJson(r);
+}
+
+export async function deleteBenefit(id) {
+  const r = await fetch(`${BASE}/benefits/benefits/${id}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+  });
+  return benefitsJson(r);
+}
+
+export async function saveMatchRule(rule) {
+  const r = await fetch(`${BASE}/benefits/rules`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify(rule),
+  });
+  return benefitsJson(r);
+}
+
+export async function deleteMatchRule(id) {
+  const r = await fetch(`${BASE}/benefits/rules/${id}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+  });
+  return benefitsJson(r);
+}
+
+// { account_id, merchant_regex, amount_min, amount_max, category, start_date,
+// end_date } → { count, truncated, sample }. An invalid regex is a 400 carrying
+// the parse error, which the caller shows against the field.
+export async function testMatchRule(params) {
+  const r = await fetch(`${BASE}/benefits/match-test`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify(params),
+  });
+  return benefitsJson(r);
+}
+
+export async function markBenefitUsed(id, body) {
+  const r = await fetch(`${BASE}/benefits/${id}/mark-used`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify(body),
+  });
+  return benefitsJson(r);
+}
+
+export async function unmarkBenefitUsed(id, body) {
+  const r = await fetch(`${BASE}/benefits/${id}/unmark`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify(body),
+  });
+  return benefitsJson(r);
+}

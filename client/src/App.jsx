@@ -6,6 +6,7 @@ import Accounts from "./views/Accounts.jsx";
 import Transactions from "./views/Transactions.jsx";
 import Categories from "./views/Categories.jsx";
 import Budget from "./views/Budget.jsx";
+import Benefits from "./views/Benefits.jsx";
 import CashFlow from "./views/CashFlow.jsx";
 import Reports from "./views/Reports.jsx";
 import AskAI from "./views/AskAI.jsx";
@@ -171,6 +172,7 @@ function AuthenticatedApp({ user }) {
     transactions: Transactions,
     categories: Categories,
     budget: Budget,
+    benefits: Benefits,
     cashflow: CashFlow,
     reports: Reports,
     askai: AskAI,
