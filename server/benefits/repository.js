@@ -139,7 +139,7 @@ export async function listUsage(benefitIds) {
   if (!benefitIds?.length) return [];
   const { rows } = await pool.query(
     `SELECT u.id, u.benefit_id, u.period_key, u.amount::float AS amount, u.txn_id, u.source,
-            u.confirmed_at, u.note,
+            u.confirmed_at, u.confirmed_txn_id, u.note,
             COALESCE(TO_CHAR(t.date,'YYYY-MM-DD'), TO_CHAR(u.created_at,'YYYY-MM-DD')) AS date,
             t.merchant
      FROM cb_usage u
@@ -187,6 +187,39 @@ export async function upsertUsage({ benefitId, periodKey, amount = 0, txnId = nu
   return rows[0];
 }
 
+// Confirms ONE recorded charge with the posted statement credit that settled
+// it. This is the other half of the lag the brief describes: the credit posts a
+// cycle after the charge, so it belongs to the charge's period, not to its own
+// — inserting it as fresh usage where it landed would consume the NEXT period's
+// allowance before a cent of it was spent (see benefits/sync.js).
+//
+// Both columns are sticky (COALESCE), so a re-run cannot re-confirm a row with
+// a different credit, and `confirmed_txn_id` is what makes the pairing
+// idempotent across runs: the next sync sees that this credit has already been
+// spent confirming something and leaves it alone instead of filing it again.
+export async function confirmUsage({ usageId, confirmedAt = new Date(), confirmedTxnId = null }) {
+  const { rowCount } = await pool.query(
+    `UPDATE cb_usage
+        SET confirmed_at = COALESCE(confirmed_at, $2),
+            confirmed_txn_id = COALESCE(confirmed_txn_id, $3)
+      WHERE id = $1`,
+    [usageId, confirmedAt, confirmedTxnId]
+  );
+  return rowCount > 0;
+}
+
+// Removes one automatic row by its key. Used for rollup rows only (see
+// findMatches): a rollup that has dropped to zero has to GO, because a
+// zero-amount usage row would make an untouched period look partially used
+// instead of available.
+export async function deleteUsage(benefitId, periodKey, txnId) {
+  const { rowCount } = await pool.query(
+    `DELETE FROM cb_usage WHERE benefit_id = $1 AND period_key = $2 AND txn_id = $3`,
+    [benefitId, periodKey, txnId]
+  );
+  return rowCount > 0;
+}
+
 // "Unmark" removes only the owner's own row. An automatic match is evidence
 // from the transaction feed and is not the owner's to delete here — it comes
 // back on the next evaluation anyway.
@@ -228,7 +261,7 @@ export async function getHistoryStartByAccount() {
 // `original_description` carry the raw descriptor the match rules are actually
 // written against. COALESCE because `NULL ~* x` is NULL, which would quietly
 // drop every row with an empty column instead of failing the one comparison.
-function matchConditions({ accountId, startDate, endDate, merchantRegex, amountMin, amountMax, category, direction }) {
+function matchConditions({ accountId, startDate, endDate, merchantRegex, amountMin, amountMax, category, direction, excludeTxnIds }) {
   const conditions = [
     "status != 'pending'",
     "(hidden IS NOT TRUE)",
@@ -260,6 +293,12 @@ function matchConditions({ accountId, startDate, endDate, merchantRegex, amountM
     conditions.push(`(plaid_category = $${i} OR primary_category = $${i})`);
     params.push(category); i++;
   }
+  // Transactions already recorded as their own cb_usage row, excluded so
+  // sumMatches returns only what is NOT accounted for row by row.
+  if (excludeTxnIds?.length) {
+    conditions.push(`id <> ALL($${i++}::text[])`);
+    params.push(excludeTxnIds);
+  }
   return { where: conditions.join(" AND "), params };
 }
 
@@ -277,6 +316,21 @@ function rethrowRegexError(err) {
     return tagged;
   }
   return err;
+}
+
+// Cheapest possible parse check for an owner-entered pattern: Postgres compiles
+// the regex and throws 2201B if it cannot, without touching a table. Called
+// when a match rule is SAVED, so a typo'd bracket is a 400 at the moment it is
+// typed rather than a rule that silently stops matching months later — the
+// failure that leaves a benefit with rules, no usage, and a confident
+// "available".
+export async function assertValidRegex(regex) {
+  if (!regex) return;
+  try {
+    await pool.query(`SELECT $1::text ~* $2::text`, ["", regex]);
+  } catch (err) {
+    throw rethrowRegexError(err);
+  }
 }
 
 // Bounded for the same reason every other list query in this app is (limits.js):
@@ -308,18 +362,51 @@ export async function matchTest({ accountId, merchantRegex, amountMin, amountMax
   return { count: rows.length, truncated, sample: rows };
 }
 
-// The rows one match rule selects inside one period. Same conditions as the
-// tester plus the rule's direction, so what the tester previews is what the
-// evaluation records.
+// The rows one match rule selects inside one window, oldest first. Same
+// conditions as the tester plus the rule's direction, so what the tester
+// previews is what the evaluation records.
+//
+// This is the RECORDING path, and it is bounded like every other query here —
+// but the bound is on the ROWS, never on the money. What comes back is a
+// sample: `truncated` says whether the rule hit more transactions than the
+// sample holds, and the caller settles the difference with sumMatches below.
+// A cap that silently swallowed the rest would under-count `amount_used` and
+// report a spent credit as partially-used, or as available, which is the exact
+// failure this whole feature exists to prevent.
 export async function findMatches(params) {
+  let result;
+  const { where, params: values } = matchConditions(params);
+  try {
+    result = await pool.query(
+      `SELECT ${MATCH_SELECT} FROM transactions WHERE ${where}
+       ORDER BY date, id LIMIT $${values.length + 1}`,
+      [...values, fetchLimit(MATCH_SAMPLE_LIMIT)]
+    );
+  } catch (err) {
+    throw rethrowRegexError(err);
+  }
+  const { rows, truncated } = takeWithTruncation(result.rows, MATCH_SAMPLE_LIMIT);
+  return { rows, truncated };
+}
+
+// COUNT and SUM over the matching set, computed in Postgres and bounded by
+// nothing. `excludeTxnIds` drops the transactions the caller has already
+// recorded as individual cb_usage rows, so what comes back is exactly the money
+// no row accounts for — the amount a rollup row has to carry for the period's
+// total to be right.
+//
+// A pure aggregate on purpose: it scans as many rows as the rule matches but
+// materialises none of them, so the exact figure costs the 256 MB VM (see the
+// reasoning at the top of limits.js) two numbers rather than an unbounded array.
+export async function sumMatches(params) {
   const { where, params: values } = matchConditions(params);
   try {
     const { rows } = await pool.query(
-      `SELECT ${MATCH_SELECT} FROM transactions WHERE ${where}
-       ORDER BY date, id LIMIT $${values.length + 1}`,
-      [...values, MATCH_SAMPLE_LIMIT]
+      `SELECT COUNT(*)::int AS count, COALESCE(SUM(ABS(amount)), 0)::float AS total
+       FROM transactions WHERE ${where}`,
+      values
     );
-    return rows;
+    return { count: rows[0]?.count ?? 0, total: rows[0]?.total ?? 0 };
   } catch (err) {
     throw rethrowRegexError(err);
   }

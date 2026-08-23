@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { resolvePeriod, evaluateBenefits, alertTiers, periodMonths } from "../benefits/periods.js";
+import { resolvePeriod, recentPeriods, evaluateBenefits, alertTiers, periodMonths } from "../benefits/periods.js";
 
 // The I/O-free half of card-benefit tracking: which window a benefit is in,
 // what its usage adds up to, and which nudge is due. No pg, no express, no
@@ -44,7 +44,7 @@ const benefit = (over = {}) => ({
 
 const usage = (over = {}) => ({
   benefit_id: 10,
-  period_key: "2026-08",
+  period_key: "cal:month:1:2026-08",
   amount: 15,
   txn_id: "txn-a",
   source: "auto",
@@ -61,7 +61,7 @@ const evalOne = ({ cards, usageRows = [], historyByAccount = { "acct-1": "2019-0
 
 test("calendar month periods start on the 1st and end on the last day, whatever its length", () => {
   assert.deepEqual(resolvePeriod({ unit: "month", basis: "calendar" }, "2026-08-23"), {
-    key: "2026-08", start: "2026-08-01", end: "2026-08-31", daysLeft: 8,
+    key: "cal:month:1:2026-08", start: "2026-08-01", end: "2026-08-31", daysLeft: 8,
   });
   // February in a leap year and in a common year, from the same code path.
   assert.deepEqual(resolvePeriod({ unit: "month", basis: "calendar" }, "2024-02-10").end, "2024-02-29");
@@ -76,35 +76,35 @@ test("Dec 31 and Jan 1 land in different periods, at every calendar unit", () =>
 
   const decMonth = resolvePeriod({ unit: "month", basis: "calendar" }, dec31);
   const janMonth = resolvePeriod({ unit: "month", basis: "calendar" }, jan1);
-  assert.deepEqual(decMonth, { key: "2026-12", start: "2026-12-01", end: "2026-12-31", daysLeft: 0 });
-  assert.deepEqual(janMonth, { key: "2027-01", start: "2027-01-01", end: "2027-01-31", daysLeft: 30 });
+  assert.deepEqual(decMonth, { key: "cal:month:1:2026-12", start: "2026-12-01", end: "2026-12-31", daysLeft: 0 });
+  assert.deepEqual(janMonth, { key: "cal:month:1:2027-01", start: "2027-01-01", end: "2027-01-31", daysLeft: 30 });
 
-  assert.equal(resolvePeriod({ unit: "quarter", basis: "calendar" }, dec31).key, "2026-Q4");
-  assert.equal(resolvePeriod({ unit: "quarter", basis: "calendar" }, jan1).key, "2027-Q1");
-  assert.equal(resolvePeriod({ unit: "half", basis: "calendar" }, dec31).key, "2026-H2");
-  assert.equal(resolvePeriod({ unit: "half", basis: "calendar" }, jan1).key, "2027-H1");
-  assert.equal(resolvePeriod({ unit: "year", basis: "calendar" }, dec31).key, "2026");
-  assert.equal(resolvePeriod({ unit: "year", basis: "calendar" }, jan1).key, "2027");
+  assert.equal(resolvePeriod({ unit: "quarter", basis: "calendar" }, dec31).key, "cal:quarter:1:2026-Q4");
+  assert.equal(resolvePeriod({ unit: "quarter", basis: "calendar" }, jan1).key, "cal:quarter:1:2027-Q1");
+  assert.equal(resolvePeriod({ unit: "half", basis: "calendar" }, dec31).key, "cal:half:1:2026-H2");
+  assert.equal(resolvePeriod({ unit: "half", basis: "calendar" }, jan1).key, "cal:half:1:2027-H1");
+  assert.equal(resolvePeriod({ unit: "year", basis: "calendar" }, dec31).key, "cal:year:1:2026");
+  assert.equal(resolvePeriod({ unit: "year", basis: "calendar" }, jan1).key, "cal:year:1:2027");
 });
 
 test("calendar quarters are the calendar's quarters, and halves are Jan-Jun / Jul-Dec", () => {
   assert.deepEqual(resolvePeriod({ unit: "quarter", basis: "calendar" }, "2026-08-23"), {
-    key: "2026-Q3", start: "2026-07-01", end: "2026-09-30", daysLeft: 38,
+    key: "cal:quarter:1:2026-Q3", start: "2026-07-01", end: "2026-09-30", daysLeft: 38,
   });
   assert.equal(resolvePeriod({ unit: "quarter", basis: "calendar" }, "2026-03-31").end, "2026-03-31");
   assert.equal(resolvePeriod({ unit: "quarter", basis: "calendar" }, "2026-04-01").start, "2026-04-01");
 
   assert.deepEqual(resolvePeriod({ unit: "half", basis: "calendar" }, "2026-06-30"), {
-    key: "2026-H1", start: "2026-01-01", end: "2026-06-30", daysLeft: 0,
+    key: "cal:half:1:2026-H1", start: "2026-01-01", end: "2026-06-30", daysLeft: 0,
   });
   assert.deepEqual(resolvePeriod({ unit: "half", basis: "calendar" }, "2026-07-01"), {
-    key: "2026-H2", start: "2026-07-01", end: "2026-12-31", daysLeft: 183,
+    key: "cal:half:1:2026-H2", start: "2026-07-01", end: "2026-12-31", daysLeft: 183,
   });
 });
 
 test("a calendar year runs Jan 1 to Dec 31", () => {
   assert.deepEqual(resolvePeriod({ unit: "year", basis: "calendar" }, "2026-08-23"), {
-    key: "2026", start: "2026-01-01", end: "2026-12-31", daysLeft: 130,
+    key: "cal:year:1:2026", start: "2026-01-01", end: "2026-12-31", daysLeft: 130,
   });
 });
 
@@ -119,7 +119,7 @@ test("an anniversary-basis year resets on the account anniversary, not on Jan 1"
     "2026-08-23"
   );
   assert.deepEqual(period, {
-    key: "anniv:2025-09-14", start: "2025-09-14", end: "2026-09-13", daysLeft: 21,
+    key: "anniv:year:1:2025-09-14", start: "2025-09-14", end: "2026-09-13", daysLeft: 21,
   });
   // The same date on a calendar basis is a completely different window — which
   // is exactly why the basis has to be stored per benefit.
@@ -128,9 +128,9 @@ test("an anniversary-basis year resets on the account anniversary, not on Jan 1"
 
 test("the anniversary period flips on the anniversary date itself, not the day after", () => {
   const args = { unit: "year", basis: "anniversary", anniversaryDate: "2019-09-14" };
-  assert.equal(resolvePeriod(args, "2026-09-13").key, "anniv:2025-09-14");
+  assert.equal(resolvePeriod(args, "2026-09-13").key, "anniv:year:1:2025-09-14");
   assert.equal(resolvePeriod(args, "2026-09-13").daysLeft, 0);
-  assert.equal(resolvePeriod(args, "2026-09-14").key, "anniv:2026-09-14");
+  assert.equal(resolvePeriod(args, "2026-09-14").key, "anniv:year:1:2026-09-14");
   assert.equal(resolvePeriod(args, "2026-09-14").end, "2027-09-13");
 });
 
@@ -138,10 +138,10 @@ test("a Feb 29 anniversary clamps to Feb 28 in a common year without drifting", 
   const args = { unit: "year", basis: "anniversary", anniversaryDate: "2020-02-29" };
   // 2027 is not a leap year: the boundary clamps back one day.
   assert.deepEqual(resolvePeriod(args, "2027-03-01"), {
-    key: "anniv:2027-02-28", start: "2027-02-28", end: "2028-02-28", daysLeft: 364,
+    key: "anniv:year:1:2027-02-28", start: "2027-02-28", end: "2028-02-28", daysLeft: 364,
   });
   // ...and the day before that boundary is still the previous cardmember year.
-  assert.equal(resolvePeriod(args, "2027-02-27").key, "anniv:2026-02-28");
+  assert.equal(resolvePeriod(args, "2027-02-27").key, "anniv:year:1:2026-02-28");
   // The clamp must not accumulate: 2028 IS a leap year, and because every
   // boundary is computed from the original Feb 29 base the anniversary comes
   // back to the 29th instead of staying stuck on the 28th forever.
@@ -152,7 +152,7 @@ test("a Jan 31 anniversary + 1 month is the end of February, never March 3rd", (
   // JavaScript's Date.setMonth() overflows here; the period math clamps.
   const args = { unit: "month", basis: "anniversary", anniversaryDate: "2025-01-31" };
   assert.deepEqual(resolvePeriod(args, "2025-02-15"), {
-    key: "anniv:2025-01-31", start: "2025-01-31", end: "2025-02-27", daysLeft: 12,
+    key: "anniv:month:1:2025-01-31", start: "2025-01-31", end: "2025-02-27", daysLeft: 12,
   });
   assert.equal(resolvePeriod(args, "2025-03-01").start, "2025-02-28");
   // March has a 31st, so the anniversary day returns — no permanent drift.
@@ -161,7 +161,7 @@ test("a Jan 31 anniversary + 1 month is the end of February, never March 3rd", (
 
 test("an anniversary basis with no anniversary on file falls back to the calendar", () => {
   const period = resolvePeriod({ unit: "year", basis: "anniversary", anniversaryDate: null }, "2026-08-23");
-  assert.equal(period.key, "2026");
+  assert.equal(period.key, "cal:year:1:2026");
   assert.equal(period.start, "2026-01-01");
 });
 
@@ -173,13 +173,13 @@ test("months_n runs from the last use, not from a calendar boundary", () => {
     "2026-08-23"
   );
   assert.deepEqual(period, {
-    key: "anchor:2024-03-15", start: "2024-03-15", end: "2028-03-14", daysLeft: 569,
+    key: "anchor:months_n:48:2024-03-15", start: "2024-03-15", end: "2028-03-14", daysLeft: 569,
   });
 });
 
 test("with no anchor a months_n benefit is available and has nothing to expire", () => {
   const period = resolvePeriod({ unit: "months_n", count: 48 }, "2026-08-23");
-  assert.equal(period.key, "anchor:none");
+  assert.equal(period.key, "anchor:months_n:48:none");
   assert.equal(period.end, null);
   assert.equal(period.daysLeft, null);
   // `start` is the trailing 48 months we would have had to see to say "not used
@@ -192,7 +192,7 @@ test("a lapsed anchor reads as available again, not as an expired period", () =>
     { unit: "months_n", count: 48, anchorDate: "2020-01-01" },
     "2026-08-23"
   );
-  assert.equal(period.key, "anchor:none");
+  assert.equal(period.key, "anchor:months_n:48:none");
   assert.equal(period.daysLeft, null);
 });
 
@@ -201,9 +201,9 @@ test("months_n usage is counted by date, so the anchoring use stays inside its o
   // key, and then BECOMES the anchor — at which point the key changes. Counting
   // by key would lose the very row that defined the period.
   const cards = [card({ benefits: [benefit({ id: 20, name: "Global Entry", amount_limit: 120, period_unit: "months_n", period_count: 48 })] })];
-  const usageRows = [usage({ benefit_id: 20, period_key: "anchor:none", amount: 120, txn_id: "ge-1", date: "2024-03-15" })];
+  const usageRows = [usage({ benefit_id: 20, period_key: "anchor:months_n:48:none", amount: 120, txn_id: "ge-1", date: "2024-03-15" })];
   const result = evalOne({ cards, usageRows }, "2026-08-23");
-  assert.equal(result.period_key, "anchor:2024-03-15");
+  assert.equal(result.period_key, "anchor:months_n:48:2024-03-15");
   assert.equal(result.amount_used, 120);
   assert.equal(result.status, "used-unconfirmed");
 });
@@ -231,6 +231,67 @@ test("period keys are stable across calls and distinct between adjacent periods"
   // ...and an anchored cycle deliberately keeps its key while the anchor stands.
   const anchored = { unit: "months_n", count: 48, anchorDate: "2024-03-15" };
   assert.equal(resolvePeriod(anchored, "2026-08-23").key, resolvePeriod(anchored, "2027-08-23").key);
+});
+
+test("two period shapes that resolve to the same window still get different keys", () => {
+  // year x1, half x2, quarter x4 and month x12 are all Jan 1 - Dec 31. The key
+  // is the idempotency key for cb_usage, and PATCH can change a benefit's shape,
+  // so a key that did not encode the shape would let the old rows be silently
+  // adopted by the new window — a credit reported spent that never was.
+  const day = "2026-08-23";
+  const calendar = [
+    { unit: "year", count: 1, basis: "calendar" },
+    { unit: "half", count: 2, basis: "calendar" },
+    { unit: "quarter", count: 4, basis: "calendar" },
+    { unit: "month", count: 12, basis: "calendar" },
+  ].map((shape) => resolvePeriod(shape, day));
+  for (const period of calendar) {
+    assert.equal(period.start, "2026-01-01");
+    assert.equal(period.end, "2026-12-31");
+  }
+  assert.equal(new Set(calendar.map((p) => p.key)).size, calendar.length);
+
+  // Same trap on the anniversary basis, where every shape below is one
+  // cardmember year starting 2025-09-14.
+  const anniversary = [
+    { unit: "year", count: 1 },
+    { unit: "half", count: 2 },
+    { unit: "month", count: 12 },
+  ].map((shape) => resolvePeriod({ ...shape, basis: "anniversary", anniversaryDate: "2019-09-14" }, day));
+  for (const period of anniversary) {
+    assert.equal(period.start, "2025-09-14");
+    assert.equal(period.end, "2026-09-13");
+  }
+  assert.equal(new Set(anniversary.map((p) => p.key)).size, anniversary.length);
+});
+
+test("recentPeriods returns the current period plus everything inside the lookback", () => {
+  // The window a lagging statement credit is hunted over: without the preceding
+  // periods a sync can only ever see the current one, and the charge a credit
+  // confirms is by definition in an earlier one.
+  assert.deepEqual(
+    recentPeriods({ unit: "month", basis: "calendar" }, "2026-09-05", 120).map((p) => p.key),
+    [
+      "cal:month:1:2026-09", "cal:month:1:2026-08", "cal:month:1:2026-07",
+      "cal:month:1:2026-06", "cal:month:1:2026-05",
+    ]
+  );
+  // No lookback asked for, no history revisited.
+  assert.deepEqual(
+    recentPeriods({ unit: "month", basis: "calendar" }, "2026-09-05").map((p) => p.key),
+    ["cal:month:1:2026-09"]
+  );
+  // A period that already covers the whole lookback needs no predecessor.
+  assert.deepEqual(
+    recentPeriods({ unit: "year", basis: "calendar" }, "2026-09-05", 120).map((p) => p.key),
+    ["cal:year:1:2026"]
+  );
+  // An anchored cycle has exactly one window at a time — "the period before it"
+  // is not something an anchor can express.
+  assert.equal(
+    recentPeriods({ unit: "months_n", count: 48, anchorDate: "2024-03-15" }, "2026-09-05", 120).length,
+    1
+  );
 });
 
 test("period length in months covers every unit, and junk counts fall back to 1", () => {
@@ -349,9 +410,68 @@ test("usage accumulates within the period and reports partially-used in between"
   assert.equal(both.amount_remaining, 0);
 });
 
+test("a manual mark outranks an automatic match instead of stacking on top of it", () => {
+  // The owner marking the credit used and the matcher finding the charge are two
+  // views of ONE $100 use. Summing them reported $200 against a $100 limit and
+  // dragged confidence from `manual` down to `unconfirmed`.
+  const cards = [card({ benefits: [benefit({ amount_limit: 100 })] })];
+  const usageRows = [
+    usage({ amount: 100, txn_id: "txn-charge", date: "2026-08-04" }),
+    usage({ amount: 100, txn_id: null, source: "manual", merchant: null, date: "2026-08-05" }),
+  ];
+  const result = evalOne({ cards, usageRows }, "2026-08-23");
+  assert.equal(result.amount_used, 100);
+  assert.equal(result.amount_remaining, 0);
+  assert.equal(result.confidence, "manual");
+  assert.equal(result.status, "used");
+  // The automatic row is still recorded and still shown — it is the evidence
+  // the mark is checked against, it just does not add to the amount.
+  assert.equal(result.matches.length, 2);
+});
+
+test("a rollup row carries the money the sample does not, and says the list is a sample", () => {
+  // A rule matching more transactions than the recorded sample holds parks the
+  // rest on one rollup row, so a fully-used credit cannot report itself as
+  // partially-used just because the row cap was hit.
+  const cards = [card({ benefits: [benefit({ amount_limit: 500 })] })];
+  const usageRows = [
+    usage({ amount: 120, txn_id: "txn-a" }),
+    usage({ amount: 380, txn_id: "rollup:rule:1", merchant: null, date: "2026-08-31" }),
+  ];
+  const result = evalOne({ cards, usageRows }, "2026-08-23");
+  assert.equal(result.amount_used, 500);
+  assert.equal(result.amount_remaining, 0);
+  assert.equal(result.status, "used-unconfirmed");
+  // `matches` lists real transactions only, and says so rather than looking whole.
+  assert.deepEqual(result.matches.map((m) => m.txn_id), ["txn-a"]);
+  assert.equal(result.matches_truncated, true);
+  // ...and an ordinary period does not claim to be a sample.
+  assert.equal(evalOne({ cards, usageRows: [usage({ amount: 120, txn_id: "txn-a" })] }, "2026-08-23").matches_truncated, false);
+});
+
+test("a match rule that failed to run reports rule-error, never available", () => {
+  // A stored regex that stops parsing leaves the benefit with rules and no
+  // usage, which fell through to `available` — a credit reported unused forever
+  // because of one unbalanced bracket.
+  const cards = [card({ benefits: [benefit()] })];
+  const ruleErrors = [{ benefit_id: 10, rule_id: 1, message: "invalid regular expression: brackets [] not balanced" }];
+  const evaluate = (usageRows) =>
+    evaluateBenefits({ cards, usageRows, historyByAccount: { "acct-1": "2019-01-01" }, ruleErrors }, "2026-08-23")[0].benefits[0];
+
+  const empty = evaluate([]);
+  assert.equal(empty.status, "rule-error");
+  assert.equal(empty.rule_error, "rule 1: invalid regular expression: brackets [] not balanced");
+
+  // Even with something recorded, the figure is a floor and not a total: the
+  // rule that did not run might have found more.
+  assert.equal(evaluate([usage({ amount: 4.12 })]).status, "rule-error");
+  // A benefit with no failing rule is unaffected.
+  assert.equal(evalOne({ cards, usageRows: [] }, "2026-08-23").rule_error, null);
+});
+
 test("usage in a different period does not count against this one", () => {
   const cards = [card({ benefits: [benefit()] })];
-  const result = evalOne({ cards, usageRows: [usage({ period_key: "2026-07", date: "2026-07-04" })] }, "2026-08-23");
+  const result = evalOne({ cards, usageRows: [usage({ period_key: "cal:month:1:2026-07", date: "2026-07-04" })] }, "2026-08-23");
   assert.equal(result.status, "available");
   assert.equal(result.amount_used, 0);
   assert.deepEqual(result.matches, []);
@@ -366,7 +486,7 @@ test("the evaluated card carries the contract's fields", () => {
   assert.equal(evaluated.history_start, "2024-01-03");
   assert.equal(evaluated.annual_fee, 895);
   assert.deepEqual(evaluated.benefits[0].period, { unit: "month", count: 1, basis: "calendar" });
-  assert.equal(evaluated.benefits[0].period_key, "2026-08");
+  assert.equal(evaluated.benefits[0].period_key, "cal:month:1:2026-08");
   assert.equal(evaluated.benefits[0].days_left, 8);
   assert.deepEqual(evaluated.benefits[0].matches, [
     { txn_id: "txn-a", date: "2026-08-04", merchant: "UBER *TRIP", amount: 4.12, source: "auto" },
@@ -422,6 +542,26 @@ test("nothing is ever alerted on used, used-unconfirmed or insufficient-history"
   for (const status of ["available", "partially-used", "manual-only"]) {
     assert.deepEqual(alertTiers(tierArgs({ daysLeft: 3, status })), ["expiring-7d"], status);
   }
+});
+
+test("a broken match rule gets one tier of its own, and no expiry nudges", () => {
+  // The only status in the never-alert set that still says something: a benefit
+  // nobody can evaluate is worth exactly one message per period (cb_alerts keys
+  // on benefit + period + tier), and no "expiring" nudge, because the figure it
+  // would quote was never computed.
+  assert.deepEqual(alertTiers(tierArgs({ daysLeft: 30, status: "rule-error" })), ["rule-error"]);
+  assert.deepEqual(alertTiers(tierArgs({ daysLeft: 3, status: "rule-error" })), ["rule-error"]);
+  assert.deepEqual(alertTiers(tierArgs({ daysLeft: null, status: "rule-error" })), ["rule-error"]);
+});
+
+test("only a finite number of days left can fire a tier", () => {
+  // Number(false), Number([]), Number("") and Number(null) are all 0, and a 0
+  // would read as "expires today" and fire every tier the benefit has.
+  // days_left is a number or null in the contract, so anything else is junk.
+  for (const daysLeft of [null, undefined, "", false, true, [], {}, NaN, "3"]) {
+    assert.deepEqual(alertTiers(tierArgs({ daysLeft })), [], JSON.stringify(daysLeft) ?? String(daysLeft));
+  }
+  assert.deepEqual(alertTiers(tierArgs({ daysLeft: 3 })), ["expiring-7d"]);
 });
 
 test("a benefit with no expiry is never nagged", () => {

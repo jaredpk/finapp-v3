@@ -164,7 +164,7 @@ export default function CatalogEditor({
                       <p style={styles.benefitSub}>
                         {fmt(b.amount_limit)} · {periodLabel({ unit: b.period_unit, count: b.period_count })} ·{" "}
                         <span title={BASIS_HELP[b.period_basis] || ""} style={styles.basisTag}>{b.period_basis}</span>
-                        {b.carryover ? " · carryover" : ""}
+                        {b.carryover ? " · carryover (not applied)" : ""}
                       </p>
                       <p style={{ ...styles.verified, color: ver.stale ? "var(--amber, #f59e0b)" : "var(--muted)" }}>
                         {ver.stale ? "⚠ " : ""}{ver.label}{ver.stale && ver.days != null ? ` · ${ver.days} days ago` : ""}
@@ -360,10 +360,13 @@ function BenefitForm({ value, onChange, busy, error, isMobile, onSubmit, onCance
         <Field label="Notes">
           <input style={styles.input} value={value.notes} onChange={(e) => set({ notes: e.target.value })} placeholder="Enrollment required" />
         </Field>
-        <Field label="Carryover" hint="Unused amount rolls into the next period instead of expiring.">
+        {/* Stored and shown, but nothing applies it: the evaluation gives every
+            period the full amount_limit regardless (see periods.js). A checkbox
+            that silently does nothing is worse than one that says so. */}
+        <Field label="Carryover" hint="Recorded for a later phase only. Nothing in the app carries an unused amount into the next period yet — every period still starts at the full limit.">
           <label style={styles.checkRow}>
             <input type="checkbox" checked={!!value.carryover} onChange={(e) => set({ carryover: e.target.checked })} />
-            <span style={styles.checkLabel}>Unused amount carries over</span>
+            <span style={styles.checkLabel}>Unused amount carries over (not yet applied)</span>
           </label>
         </Field>
       </div>

@@ -308,7 +308,11 @@ function BenefitRow({ benefit, card, isMobile, busy, error, onMarkUsed, onUnmark
             {basis && (
               <span title={BASIS_HELP[basis] || ""} style={styles.basisTag}>{basis}</span>
             )}
-            {benefit.carryover && <span style={styles.basisTag}>carryover</span>}
+            {benefit.carryover && (
+              <span style={styles.basisTag} title="Captured for a later phase — carryover is not applied to any figure here.">
+                carryover (not applied)
+              </span>
+            )}
           </p>
         </div>
         <span
@@ -323,8 +327,9 @@ function BenefitRow({ benefit, card, isMobile, busy, error, onMarkUsed, onUnmark
         </span>
       </div>
 
-      {/* Progress. An insufficient-history window is hatched and muted so it can
-          never be mistaken for an untouched (green) credit. */}
+      {/* Progress. A window we cannot see (insufficient-history) or could not
+          evaluate (rule-error) is hatched rather than filled, so neither can be
+          mistaken for an untouched (green) credit. */}
       <div style={styles.barTrack}>
         <div
           style={{
@@ -340,8 +345,8 @@ function BenefitRow({ benefit, card, isMobile, busy, error, onMarkUsed, onUnmark
 
       <div style={styles.amountRow}>
         <span style={styles.amountMain}>
-          {meta.hatched ? (
-            <>{fmt(used)} seen of {fmt(limit)} — window not covered</>
+          {meta.amountCaption ? (
+            <>{fmt(used)} seen of {fmt(limit)} — {meta.amountCaption}</>
           ) : (
             <>{fmt(used)} of {fmt(limit)} used{limit > 0 ? ` · ${fmt(benefit.amount_remaining)} left` : ""}</>
           )}
@@ -359,6 +364,9 @@ function BenefitRow({ benefit, card, isMobile, busy, error, onMarkUsed, onUnmark
           {benefit.status === "insufficient-history" && card.history_start
             ? ` History on this card starts ${fmtDay(card.history_start)}; this period starts ${fmtDay(benefit.period_start)}.`
             : ""}
+          {/* Which rule broke, verbatim from Postgres, so the owner fixes that
+              one instead of hunting through the catalog. */}
+          {benefit.rule_error ? ` ${benefit.rule_error}` : ""}
         </p>
       )}
 
@@ -376,7 +384,10 @@ function BenefitRow({ benefit, card, isMobile, busy, error, onMarkUsed, onUnmark
 
       <div style={styles.actions}>
         <button style={styles.linkBtn} onClick={() => setShowMatches((v) => !v)}>
-          {showMatches ? "▾" : "▸"} {matches.length} matched transaction{matches.length === 1 ? "" : "s"}
+          {/* A sample says so: the server lists a bounded number of matches and
+              rolls the rest into the amount (see matches_truncated). */}
+          {showMatches ? "▾" : "▸"} {matches.length}{benefit.matches_truncated ? "+" : ""} matched
+          {" "}transaction{matches.length === 1 && !benefit.matches_truncated ? "" : "s"}
         </button>
         {!marking && (
           <button style={styles.smallBtn} onClick={() => setMarking(true)} disabled={busy}>

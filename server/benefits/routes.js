@@ -6,11 +6,12 @@ import {
   getCatalog, createCard, updateCard, getCard, deleteCard,
   createBenefit, updateBenefit, getBenefit, deleteBenefit,
   createRule, deleteRule,
-  listUsage, upsertUsage, deleteManualUsage,
-  getHistoryStartByAccount, findMatches, matchTest,
+  listUsage, upsertUsage, confirmUsage, deleteUsage, deleteManualUsage,
+  getHistoryStartByAccount, findMatches, sumMatches, matchTest, assertValidRegex,
   CARD_FIELDS, BENEFIT_FIELDS, RULE_FIELDS,
 } from "./repository.js";
-import { resolvePeriod, evaluateBenefits, toDateString } from "./periods.js";
+import { evaluateBenefits, toDateString } from "./periods.js";
+import { syncUsage } from "./sync.js";
 import { DATE_PARAM_RE, validateDateRange } from "../limits.js";
 
 const PERIOD_UNITS = ["month", "quarter", "half", "year", "months_n"];
@@ -43,88 +44,10 @@ function invalidEnum(values) {
 
 // ── Matching ──────────────────────────────────────────────────────────────────
 
-// Runs every benefit's match rules over its CURRENT period and records what
-// they hit in cb_usage. Safe to call on every status read: upsertUsage keys on
-// (benefit, period, transaction), so re-running re-writes the same rows rather
-// than accumulating usage.
-//
-// Returns the number of rows written, so the caller only re-reads usage when
-// something actually changed.
-async function syncUsage(cards, usageRows, today) {
-  // An anchored cycle (months_n) is measured from the last recorded use, so the
-  // anchor has to come out of the existing usage rows before its period can be
-  // resolved at all.
-  const lastUseByBenefit = new Map();
-  for (const row of usageRows) {
-    const date = toDateString(row.date);
-    if (!date) continue;
-    const current = lastUseByBenefit.get(row.benefit_id);
-    if (!current || date > current) lastUseByBenefit.set(row.benefit_id, date);
-  }
-
-  let written = 0;
-  for (const card of cards) {
-    // No linked Plaid account means no transactions to match against. The
-    // benefit still evaluates — as insufficient-history, since we can see
-    // nothing — it just cannot match automatically.
-    if (!card.account_id) continue;
-    for (const benefit of card.benefits) {
-      if (!benefit.rules?.length) continue;
-      let period;
-      try {
-        period = resolvePeriod({
-          unit: benefit.period_unit,
-          count: benefit.period_count,
-          basis: benefit.period_basis,
-          anniversaryDate: card.anniversary_date,
-          anchorDate: benefit.period_unit === "months_n" ? lastUseByBenefit.get(benefit.id) || null : null,
-        }, today);
-      } catch (err) {
-        console.error(`benefits: benefit ${benefit.id} period unresolved:`, err.message);
-        continue;
-      }
-      for (const rule of benefit.rules) {
-        // A rule with no criteria at all matches the entire statement, which
-        // would silently mark every benefit used. Skipped rather than obeyed.
-        if (!rule.merchant_regex && rule.amount_min == null && rule.amount_max == null && !rule.category) continue;
-        let matches;
-        try {
-          matches = await findMatches({
-            accountId: card.account_id,
-            startDate: period.start,
-            // An anchored cycle that is available again has no end; everything
-            // up to today is in scope.
-            endDate: period.end || today,
-            merchantRegex: rule.merchant_regex,
-            amountMin: rule.amount_min,
-            amountMax: rule.amount_max,
-            category: rule.category,
-            direction: rule.direction || "charge",
-          });
-        } catch (err) {
-          // A stored regex that no longer parses must not take down the status
-          // read for every other benefit on the card.
-          console.error(`benefits: rule ${rule.id} skipped:`, err.message);
-          continue;
-        }
-        for (const txn of matches) {
-          await upsertUsage({
-            benefitId: benefit.id,
-            periodKey: period.key,
-            amount: Math.abs(Number(txn.amount) || 0),
-            txnId: txn.id,
-            source: "auto",
-            // A credit-direction match IS the posted statement credit, the
-            // authoritative half of the pair, so it stamps the confirmation.
-            confirmedAt: rule.direction === "credit" ? new Date() : null,
-          });
-          written++;
-        }
-      }
-    }
-  }
-  return written;
-}
+// The database half of the sync. sync.js owns the decisions and takes its I/O
+// through this object, so the matching logic can be exercised without a
+// database (test/benefitSync.test.js).
+const SYNC_IO = { findMatches, sumMatches, upsertUsage, confirmUsage, deleteUsage };
 
 // The whole of GET /api/benefits/status, exported because POST /api/alerts/run
 // (index.js) needs exactly the same picture before it can decide what is due.
@@ -133,9 +56,13 @@ export async function getBenefitsStatus(today) {
   const cards = await getCatalog();
   const benefitIds = cards.flatMap((card) => card.benefits.map((b) => b.id));
   let usageRows = await listUsage(benefitIds);
-  if (await syncUsage(cards, usageRows, asOf)) usageRows = await listUsage(benefitIds);
+  // ruleErrors travels with the evaluation: a rule that could not run means the
+  // benefit's usage is unknown, and `rule-error` is how the contract says so
+  // instead of letting it fall through to `available`.
+  const { written, ruleErrors } = await syncUsage(cards, usageRows, asOf, SYNC_IO);
+  if (written) usageRows = await listUsage(benefitIds);
   const historyByAccount = await getHistoryStartByAccount();
-  return { as_of: asOf, cards: evaluateBenefits({ cards, usageRows, historyByAccount }, asOf) };
+  return { as_of: asOf, cards: evaluateBenefits({ cards, usageRows, historyByAccount, ruleErrors }, asOf) };
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────────
@@ -219,6 +146,18 @@ export function registerBenefitsRoutes(app, requireAuth, requireApiKeyOrAuth) {
     const enumError = invalidEnum(values);
     if (enumError) return res.status(400).json({ error: enumError });
     if (!(await getBenefit(Number(values.benefit_id)))) return res.status(404).json({ error: "benefit not found" });
+    // The regex is validated HERE, at the moment it is saved, exactly as
+    // match-test validates the one being typed. A pattern that does not parse
+    // is a rule that silently stops matching, and a benefit with rules and no
+    // usage reads as `available` — a credit reported unused forever because of
+    // one unbalanced bracket.
+    try {
+      await assertValidRegex(values.merchant_regex);
+    } catch (err) {
+      if (err.invalidRegex) return res.status(400).json({ error: err.message });
+      console.error("benefits rule validation failed:", err.message);
+      return res.status(500).json({ error: err.message });
+    }
     res.json({ rule: await createRule(values) });
   });
 

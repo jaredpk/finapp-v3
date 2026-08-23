@@ -84,9 +84,15 @@ const isAfter = (a, b) => iso(a) > iso(b);
 // { unit: "month", count: 2 }); for `months_n` the count IS the month span.
 const UNIT_MONTHS = { month: 1, quarter: 3, half: 6, year: 12 };
 
-export function periodMonths({ unit, count } = {}) {
+// A junk or missing count is 1, never NaN: a NaN span would make every period
+// boundary NaN and the key with it.
+const periodCount = (count) => {
   const n = Number(count);
-  const multiplier = Number.isFinite(n) && n > 0 ? Math.floor(n) : 1;
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1;
+};
+
+export function periodMonths({ unit, count } = {}) {
+  const multiplier = periodCount(count);
   if (unit === "months_n") return multiplier;
   return (UNIT_MONTHS[unit] ?? 1) * multiplier;
 }
@@ -94,18 +100,30 @@ export function periodMonths({ unit, count } = {}) {
 // ── Period keys ───────────────────────────────────────────────────────────────
 // The key is the idempotency key for BOTH cb_usage and cb_alerts, so it has to
 // be (a) stable — the same period must produce the same string on every run, no
-// clock, no locale, no rounding involved — and (b) collision-free between two
-// periods of the same benefit. Every form below is derived from the period's
-// start date, which satisfies both by construction.
-function calendarKey(unit, len, start) {
-  if (unit === "month" && len === 1) return `${String(start.y).padStart(4, "0")}-${String(start.m).padStart(2, "0")}`;
-  if (unit === "quarter" && len === 3) return `${start.y}-Q${Math.floor((start.m - 1) / 3) + 1}`;
-  if (unit === "half" && len === 6) return `${start.y}-H${start.m <= 6 ? 1 : 2}`;
-  if (unit === "year" && len === 12) return String(start.y);
+// clock, no locale, no rounding involved — (b) collision-free between two
+// periods of the same benefit, and (c) collision-free between two SHAPES of the
+// same benefit.
+//
+// (c) is why every key carries `unit:count` as well as the window. A key built
+// from the window alone is ambiguous: year×1, half×2, quarter×4 and month×12 all
+// resolve to Jan 1 – Dec 31, and an anniversary key built from the start date
+// alone is produced identically by all four. PATCH /api/benefits/benefits/:id can
+// change a benefit's period shape, and without the shape in the key the old
+// cb_usage rows would be silently adopted by the new window — a credit reported
+// spent that never was. There is no production data on this format yet, so it
+// encodes the shape from the start.
+const shape = (unit, count) => `${String(unit || "month")}:${periodCount(count)}`;
+
+function calendarKey(unit, count, len, start) {
+  const prefix = `cal:${shape(unit, count)}`;
+  if (unit === "month" && len === 1) return `${prefix}:${String(start.y).padStart(4, "0")}-${String(start.m).padStart(2, "0")}`;
+  if (unit === "quarter" && len === 3) return `${prefix}:${start.y}-Q${Math.floor((start.m - 1) / 3) + 1}`;
+  if (unit === "half" && len === 6) return `${prefix}:${start.y}-H${start.m <= 6 ? 1 : 2}`;
+  if (unit === "year" && len === 12) return `${prefix}:${start.y}`;
   // Any other span (a 2-month or 5-month credit) has no conventional name, so
   // the start date stands in. Still start-derived, so still distinct between
   // adjacent periods.
-  return `cal:${iso(start)}`;
+  return `${prefix}:${iso(start)}`;
 }
 
 // ── resolvePeriod ─────────────────────────────────────────────────────────────
@@ -120,7 +138,7 @@ export function resolvePeriod({ unit, count, basis, anniversaryDate, anchorDate 
   // months_n is anchored to LAST USE, not to any calendar or anniversary line —
   // a Global Entry credit's 48 months start the day it was redeemed — so
   // `basis` does not apply to it.
-  if (unit === "months_n") return resolveAnchored(len, anchorDate, now);
+  if (unit === "months_n") return resolveAnchored(unit, count, len, anchorDate, now);
 
   if (basis === "anniversary") {
     const base = parts(anniversaryDate);
@@ -128,9 +146,54 @@ export function resolvePeriod({ unit, count, basis, anniversaryDate, anchorDate 
     // Falling back to the calendar is the lesser wrong: it is visibly a
     // calendar period in the response (period_start is Jan 1) rather than a
     // made-up anniversary the owner would have no way to spot.
-    if (base) return resolveAnniversary(len, base, now);
+    if (base) return resolveAnniversary(unit, count, len, base, now);
   }
-  return resolveCalendar(unit, len, now);
+  return resolveCalendar(unit, count, len, now);
+}
+
+// ── recentPeriods ─────────────────────────────────────────────────────────────
+// The current period plus every preceding period that reaches back into the
+// last `lookbackDays`, newest first.
+//
+// This exists because a posted statement credit lands a cycle AFTER the charge
+// it confirms (see the note on resolveAnchored's neighbours below and
+// benefits/sync.js): a sync that only ever looks at the current period can
+// never confirm the charge that the credit belongs to, and would instead read
+// the credit as fresh usage of the NEW period — consuming an allowance nobody
+// has spent and suppressing the alert the owner actually needs.
+//
+// months_n is excluded on purpose: an anchored cycle has exactly one window at
+// a time (the one its anchor defines), and "the period before it" is not a
+// thing the anchor can express.
+const MAX_LOOKBACK_PERIODS = 24;
+
+export function recentPeriods(spec = {}, today, lookbackDays = 0) {
+  const current = resolvePeriod(spec, today);
+  const periods = [current];
+  if (spec.unit === "months_n") return periods;
+
+  const days = Number(lookbackDays);
+  const floor = iso(addDays(parts(today), -(Number.isFinite(days) && days > 0 ? Math.floor(days) : 0)));
+  let cursor = current;
+  // The cap is a guard, not a limit: a 120-day lookback is 5 monthly periods.
+  // It only exists so a spec that somehow fails to make progress cannot spin.
+  for (let i = 0; i < MAX_LOOKBACK_PERIODS; i++) {
+    if (!cursor.start || cursor.start <= floor) break;
+    const previous = resolvePeriod(spec, iso(addDays(parts(cursor.start), -1)));
+    if (!previous.start || previous.key === cursor.key) break;
+    periods.push(previous);
+    cursor = previous;
+  }
+  return periods;
+}
+
+// Day arithmetic on a YYYY-MM-DD string, for callers outside this module that
+// need a date offset without importing a second date library (sync.js extends a
+// period's end by the statement-credit grace period). UTC parts only, like
+// everything else here.
+export function addDaysIso(value, n) {
+  const base = parts(value);
+  return base ? iso(addDays(base, n)) : null;
 }
 
 // Calendar boundaries by tiling absolute month numbers into `len`-month blocks.
@@ -138,12 +201,12 @@ export function resolvePeriod({ unit, count, basis, anniversaryDate, anchorDate 
 // quarters, len 6 on Jan–Jun and Jul–Dec, and len 12 on Jan 1 – Dec 31, with no
 // special cases and no year-rollover branch: Dec 31 and Jan 1 differ by one
 // month index and therefore fall in different blocks by construction.
-function resolveCalendar(unit, len, now) {
+function resolveCalendar(unit, count, len, now) {
   const block = Math.floor(monthIndex(now) / len);
   const start = monthStart(block * len);
   const nextStart = monthStart((block + 1) * len);
   const end = addDays(nextStart, -1);
-  return { key: calendarKey(unit, len, start), start: iso(start), end: iso(end), daysLeft: daysBetween(now, end) };
+  return { key: calendarKey(unit, count, len, start), start: iso(start), end: iso(end), daysLeft: daysBetween(now, end) };
 }
 
 // Cardmember-year boundaries: the Venture X travel credit resets on the account
@@ -154,7 +217,7 @@ function resolveCalendar(unit, len, now) {
 //
 // The month-index estimate can be off by one in either direction because it
 // ignores the day of month, so it is corrected by stepping rather than trusted.
-function resolveAnniversary(len, base, now) {
+function resolveAnniversary(unit, count, len, base, now) {
   let k = Math.floor((monthIndex(now) - monthIndex(base)) / len);
   let start = addMonths(base, k * len);
   while (isAfter(start, now)) {
@@ -168,7 +231,10 @@ function resolveAnniversary(len, base, now) {
     next = addMonths(base, (k + 1) * len);
   }
   const end = addDays(next, -1);
-  return { key: `anniv:${iso(start)}`, start: iso(start), end: iso(end), daysLeft: daysBetween(now, end) };
+  return {
+    key: `anniv:${shape(unit, count)}:${iso(start)}`,
+    start: iso(start), end: iso(end), daysLeft: daysBetween(now, end),
+  };
 }
 
 // Multi-year cycles anchored to last use. Two states:
@@ -184,20 +250,21 @@ function resolveAnniversary(len, base, now) {
 // the last `len` months" honestly. evaluateBenefits measures history coverage
 // against it, so a card linked six months ago reports insufficient-history for
 // a 48-month benefit instead of a confident "available".
-function resolveAnchored(len, anchorDate, now) {
+function resolveAnchored(unit, count, len, anchorDate, now) {
+  const prefix = `anchor:${shape(unit, count)}`;
   const anchor = parts(anchorDate);
   if (anchor) {
     const next = addMonths(anchor, len);
     const end = addDays(next, -1);
     if (!isAfter(now, end)) {
-      return { key: `anchor:${iso(anchor)}`, start: iso(anchor), end: iso(end), daysLeft: daysBetween(now, end) };
+      return { key: `${prefix}:${iso(anchor)}`, start: iso(anchor), end: iso(end), daysLeft: daysBetween(now, end) };
     }
     // Lapsed — fall through to the available shape below.
   }
   // +1 day so a use exactly `len` months ago (whose cycle ended yesterday)
   // falls outside the trailing window rather than on its edge.
   const trailingStart = addDays(addMonths(now, -len), 1);
-  return { key: "anchor:none", start: iso(trailingStart), end: null, daysLeft: null };
+  return { key: `${prefix}:none`, start: iso(trailingStart), end: null, daysLeft: null };
 }
 
 // ── Evaluation ────────────────────────────────────────────────────────────────
@@ -224,7 +291,23 @@ const rowDate = (r) => toDateString(r.date ?? r.created_at ?? null);
 // evaluating rows it just matched in memory carries the rule's `direction`.
 const isConfirming = (r) => Boolean(r.confirmed_at) || r.direction === "credit";
 
-const NEVER_ALERT = new Set(["used", "used-unconfirmed", "insufficient-history"]);
+// A ROLLUP row carries the money a match rule found beyond the bounded sample
+// of transactions we record individually (see benefits/sync.js and the note on
+// findMatches in repository.js). It exists because `amount_used` must be the
+// exact SQL total for the period, not "whatever fitted in the sample" — a rule
+// hitting more transactions than the sample holds would otherwise report a
+// fully-used credit as partially-used, or as available. It has no transaction
+// behind it, so it counts toward the amount and is deliberately left OUT of
+// `matches`, which lists real transactions only; `matches_truncated` is how the
+// response says that the list is a sample rather than the whole set.
+export const ROLLUP_TXN_PREFIX = "rollup:";
+export const isRollupRow = (r) => typeof r?.txn_id === "string" && r.txn_id.startsWith(ROLLUP_TXN_PREFIX);
+
+// `rule-error` is here for the same reason `used` is — chasing the owner about
+// a benefit they cannot act on trains the mailbox to ignore this sender — but
+// alertTiers gives it its own tier instead of pure silence, because a benefit
+// whose rule no longer runs is worth exactly one message per period.
+const NEVER_ALERT = new Set(["used", "used-unconfirmed", "insufficient-history", "rule-error"]);
 
 // cards → the `cards` array of GET /api/benefits/status.
 //
@@ -234,9 +317,22 @@ const NEVER_ALERT = new Set(["used", "used-unconfirmed", "insufficient-history"]
 //   usageRows        cb_usage rows, joined to their transaction for date and
 //                    merchant
 //   historyByAccount { [plaid account_id]: earliest transaction date }
-export function evaluateBenefits({ cards = [], usageRows = [], historyByAccount = {} } = {}, today) {
+//   ruleErrors       { benefit_id, rule_id, message } for every match rule that
+//                    FAILED to run during this sync (an owner-entered regex that
+//                    no longer parses, typically). A benefit with one of these
+//                    has an unknown amount of usage, not zero.
+export function evaluateBenefits({ cards = [], usageRows = [], historyByAccount = {}, ruleErrors = [] } = {}, today) {
   const asOf = toDateString(today);
   if (!asOf) throw new Error("evaluateBenefits requires today as YYYY-MM-DD");
+
+  // First error per benefit: one broken rule is enough to make the whole
+  // benefit unevaluatable, and naming one rule the owner can go fix beats a
+  // list they have to read.
+  const errorByBenefit = new Map();
+  for (const err of ruleErrors) {
+    const key = String(err.benefit_id);
+    if (!errorByBenefit.has(key)) errorByBenefit.set(key, err);
+  }
 
   const byBenefit = new Map();
   for (const row of usageRows) {
@@ -257,13 +353,16 @@ export function evaluateBenefits({ cards = [], usageRows = [], historyByAccount 
       annual_fee: numOrNull(card.annual_fee),
       history_start: historyStart,
       benefits: (card.benefits || []).map((benefit) =>
-        evaluateBenefit(benefit, card, byBenefit.get(String(benefit.id)) || [], historyStart, asOf)
+        evaluateBenefit(
+          benefit, card, byBenefit.get(String(benefit.id)) || [], historyStart, asOf,
+          errorByBenefit.get(String(benefit.id)) || null
+        )
       ),
     };
   });
 }
 
-function evaluateBenefit(benefit, card, rows, historyStart, today) {
+function evaluateBenefit(benefit, card, rows, historyStart, today, ruleError) {
   const unit = benefit.period_unit;
   const count = Number(benefit.period_count) || 1;
   const basis = benefit.period_basis || "calendar";
@@ -300,14 +399,24 @@ function evaluateBenefit(benefit, card, rows, historyStart, today) {
   // matched solely on its posted credit still gets an amount from that credit.
   const confirming = inPeriod.filter(isConfirming);
   const charged = inPeriod.filter((r) => !isConfirming(r));
-  const counted = charged.length ? charged : confirming;
+  // A manual mark is the owner telling us what they did with this period, and
+  // it OUTRANKS whatever matching inferred: a mark of the full $100 plus a
+  // matched $100 charge is one $100 use seen twice, not $200 of spend. The
+  // automatic rows are still recorded and still listed in `matches` — they are
+  // evidence, and hiding them would make the mark impossible to check — they
+  // just do not add to the amount, and confidence stays `manual` rather than
+  // being dragged down to `unconfirmed` by the row the owner already overrode.
+  const manual = inPeriod.filter((r) => r.source === "manual");
+  const counted = manual.length ? manual : charged.length ? charged : confirming;
   const amountUsed = round2(counted.reduce((sum, r) => sum + Math.abs(num(r.amount)), 0));
 
   const ruleCount = Array.isArray(benefit.rules) ? benefit.rules.length : Number(benefit.rule_count) || 0;
-  const allManual = inPeriod.length > 0 && inPeriod.every((r) => r.source === "manual");
   // 0.005 rather than exact equality: amounts are NUMERIC(12,2) round-tripped
   // through floats, and a credit short by half a cent is not "partially used".
   const fullyUsed = inPeriod.length > 0 && (oneShot || amountUsed + 0.005 >= limit);
+
+  // Real transactions only — a rollup carries money, not a transaction.
+  const listed = inPeriod.filter((r) => !isRollupRow(r));
 
   let status;
   let confidence;
@@ -323,19 +432,31 @@ function evaluateBenefit(benefit, card, rows, historyStart, today) {
     else if (!historyStart || (period.start && period.start < historyStart)) status = "insufficient-history";
     else status = "available";
   } else {
-    confidence = confirming.length ? "confirmed" : allManual ? "manual" : "unconfirmed";
+    confidence = manual.length ? "manual" : confirming.length ? "confirmed" : "unconfirmed";
     // A charge-only match is optimistic — the qualifying charge posted, the
     // statement credit has not — so it reports used-unconfirmed and is never
     // alerted on. An owner's manual mark needs no confirmation.
-    if (fullyUsed) status = confirming.length || allManual ? "used" : "used-unconfirmed";
+    if (fullyUsed) status = confirming.length || manual.length ? "used" : "used-unconfirmed";
     else status = "partially-used";
   }
+
+  // A match rule that could not RUN leaves a hole in the evidence, so every
+  // figure above is a floor rather than a total — and the one thing this
+  // feature may never do is let that hole read as `available`. A benefit whose
+  // regex stopped parsing would otherwise report an unused credit forever, in
+  // green, with no indication that nothing was ever evaluated.
+  if (ruleError) status = "rule-error";
 
   return {
     id: benefit.id,
     name: benefit.name,
     amount_limit: numOrNull(benefit.amount_limit),
     period: { unit, count, basis },
+    // Captured for a later phase and returned as stored: NOTHING below applies
+    // it. An unused amount does not roll into the next period — every period's
+    // allowance is `amount_limit`, whatever the previous period left on the
+    // table. The catalog editor labels the control as not yet applied so the
+    // checkbox cannot quietly imply arithmetic that does not happen.
     carryover: Boolean(benefit.carryover),
     verified_on: toDateString(benefit.verified_on),
     notes: benefit.notes ?? null,
@@ -347,7 +468,13 @@ function evaluateBenefit(benefit, card, rows, historyStart, today) {
     amount_remaining: round2(Math.max(0, limit - amountUsed)),
     status,
     confidence,
-    matches: inPeriod
+    // Which rule broke, so the owner can go fix that one rather than hunt.
+    rule_error: ruleError ? `rule ${ruleError.rule_id}: ${ruleError.message}` : null,
+    // `matches` is a bounded sample whenever a rollup row is present; saying so
+    // is mandatory here for the same reason it is in limits.js — a capped list
+    // that looks complete is worse than a short one.
+    matches_truncated: inPeriod.length !== listed.length,
+    matches: listed
       .map((r) => ({
         txn_id: r.txn_id ?? null,
         date: rowDate(r),
@@ -373,13 +500,21 @@ function evaluateBenefit(benefit, card, rows, historyStart, today) {
 // spent, or already charged and merely waiting on the statement, trains the
 // mailbox to ignore this sender — and never on `insufficient-history`, because
 // alerting on a window we cannot see is exactly the confidently-wrong nudge the
-// status exists to prevent.
+// status exists to prevent. `rule-error` gets no expiry nudge either, for the
+// same reason: the figure one would quote was never computed. It gets a tier of
+// its own instead, because a benefit nobody can evaluate is worth saying once.
 export function alertTiers({ benefit, daysLeft, status } = {}) {
+  // The one exception to the never-alert set: a benefit whose match rule no
+  // longer runs cannot be evaluated at all, and silence about it is how a
+  // broken regex goes unnoticed for a year. One tier, so cb_alerts caps it at
+  // one message per period rather than one per day.
+  if (status === "rule-error") return ["rule-error"];
   if (NEVER_ALERT.has(status)) return [];
   const tiers = [];
-  // Number(null) is 0, not NaN — a benefit with no expiry would otherwise read
-  // as "expires today" and fire every tier it has.
-  const days = daysLeft === null || daysLeft === undefined || daysLeft === "" ? NaN : Number(daysLeft);
+  // An explicit finite-number check, not a null guard: Number(null), Number(""),
+  // Number(false) and Number([]) are all 0, and a benefit with no expiry that
+  // read as "expires today" would fire every tier it has.
+  const days = Number.isFinite(daysLeft) ? daysLeft : NaN;
   const start = parts(benefit?.period_start);
   const end = parts(benefit?.period_end);
 

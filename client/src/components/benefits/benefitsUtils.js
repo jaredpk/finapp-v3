@@ -18,7 +18,13 @@ export const todayIso = () => new Date().toISOString().slice(0, 10);
 // returns it when the period starts before the card's history begins, so the
 // honest statement is "we cannot see this window", not "unused".
 // `used-unconfirmed` is amber and dashed so a charge that matched but whose
-// statement credit has not posted never reads as settled.
+// statement credit has not posted never reads as settled. `rule-error` is the
+// same principle turned up: a benefit whose match rule stopped running has an
+// unknown amount of usage, so it renders as a fault to go fix — red, hatched,
+// never green and never "available".
+//
+// `amountCaption` replaces the "$x of $y used" line for the two states where
+// that sentence would be a claim we cannot make.
 export const STATUS_META = {
   "available": {
     label: "Available",
@@ -52,7 +58,18 @@ export const STATUS_META = {
     glyph: "◌",
     dashed: true,
     hatched: true,
+    amountCaption: "window not covered",
     note: "Transaction history for this card does not reach back to the start of this period, so we cannot tell whether the credit was used. Not the same as unused.",
+    alwaysShowNote: true,
+  },
+  "rule-error": {
+    label: "Rule error",
+    color: "var(--red)",
+    glyph: "!",
+    dashed: true,
+    hatched: true,
+    amountCaption: "usage not evaluated",
+    note: "A match rule for this benefit could not run, so nothing was evaluated this period. Whatever is shown is a floor, not a total — fix the rule in the Catalog tab.",
     alwaysShowNote: true,
   },
   "manual-only": {

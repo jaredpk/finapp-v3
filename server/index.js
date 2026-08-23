@@ -893,12 +893,16 @@ app.post("/api/alerts/run", requireApiKeyOrAuth, async (req, res) => {
           if (!(await wasBenefitAlertSent(benefit.id, benefit.period_key, tier))) unsent.push(tier);
         }
         if (unsent.length === 0) continue;
+        // The rule-error tier is not an expiry nudge: the benefit could not be
+        // evaluated at all, so the line says that rather than quoting a figure
+        // that was never computed. cb_alerts caps it at one per period.
+        const broken = benefit.status === "rule-error";
         due.push({
           benefitId: benefit.id,
           periodKey: benefit.period_key,
           tiers: unsent,
           item: {
-            benefit: benefit.name,
+            benefit: broken ? `${benefit.name} — a match rule is broken, usage cannot be evaluated` : benefit.name,
             card: card.nickname,
             amountRemaining: benefit.amount_remaining,
             periodEnds: benefit.period_end,

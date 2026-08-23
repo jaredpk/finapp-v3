@@ -30,6 +30,11 @@ export async function initBenefitsSchema(pool) {
       period_count INTEGER NOT NULL DEFAULT 1,
       period_basis TEXT NOT NULL DEFAULT 'calendar'
         CHECK (period_basis IN ('calendar','anniversary')),
+      -- CAPTURED FOR A LATER PHASE, NOT APPLIED. Nothing reads this to move an
+      -- unused amount into the next period: periods.js hands every period the
+      -- full amount_limit regardless, and the catalog editor labels the control
+      -- as not yet applied so the checkbox cannot imply arithmetic that does
+      -- not happen.
       carryover BOOLEAN NOT NULL DEFAULT FALSE,
       notes TEXT,
       verified_on DATE,              -- when the owner last checked this against the benefits guide
@@ -56,9 +61,20 @@ export async function initBenefitsSchema(pool) {
       benefit_id INTEGER NOT NULL REFERENCES cb_benefits(id) ON DELETE CASCADE,
       period_key TEXT NOT NULL,      -- from periods.js resolvePeriod().key
       amount NUMERIC(12,2) NOT NULL DEFAULT 0,
-      txn_id TEXT,                   -- NULL for a manual "mark as used"
+      -- NULL for a manual "mark as used"; a transaction id for a matched row;
+      -- and 'rollup:rule:<id>' for the one synthetic row per rule per period
+      -- that carries whatever a rule matched BEYOND the bounded sample of
+      -- transactions recorded individually (benefits/sync.js). The rollup keeps
+      -- amount_used exact without recording an unbounded number of rows.
+      txn_id TEXT,
       source TEXT NOT NULL DEFAULT 'auto' CHECK (source IN ('auto','manual')),
-      confirmed_at TIMESTAMPTZ,      -- set when the row came from a POSTED CREDIT, not the charge
+      confirmed_at TIMESTAMPTZ,      -- set when a POSTED CREDIT settled this charge
+      -- The transaction id of that posted credit. A statement credit arrives a
+      -- cycle after the charge it confirms, so it is spent confirming THIS row
+      -- rather than filed as usage of its own (later) period; recording which
+      -- credit did it is what stops the next sync from finding the same credit
+      -- and counting it a second time.
+      confirmed_txn_id TEXT,
       note TEXT,
       created_at TIMESTAMPTZ DEFAULT NOW(),
       -- Re-evaluation is idempotent: matching the same transaction into the
@@ -73,6 +89,10 @@ export async function initBenefitsSchema(pool) {
     CREATE UNIQUE INDEX IF NOT EXISTS cb_usage_manual_uniq
       ON cb_usage (benefit_id, period_key) WHERE txn_id IS NULL;
     CREATE INDEX IF NOT EXISTS cb_usage_benefit_idx ON cb_usage (benefit_id);
+    -- CREATE TABLE IF NOT EXISTS skips a table that already exists, columns and
+    -- all, so a database created before this column existed needs it added the
+    -- same way db.js adds columns to its own tables.
+    ALTER TABLE cb_usage ADD COLUMN IF NOT EXISTS confirmed_txn_id TEXT;
 
     CREATE TABLE IF NOT EXISTS cb_alerts (
       id SERIAL PRIMARY KEY,
