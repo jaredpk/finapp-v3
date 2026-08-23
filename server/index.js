@@ -65,6 +65,9 @@ import {
   buildExportInfoRows, exportInfoSheetName, exportFilename,
 } from "./limits.js";
 import { registerPropertyFinanceRoutes } from "./property/routes.js";
+import { registerBenefitsRoutes, getBenefitsStatus } from "./benefits/routes.js";
+import { alertTiers } from "./benefits/periods.js";
+import { wasBenefitAlertSent, recordBenefitAlert } from "./benefits/repository.js";
 
 dotenv.config();
 
@@ -329,6 +332,7 @@ async function requireApiKeyOrAuth(req, res, next) {
 }
 
 registerPropertyFinanceRoutes(app, requireAuth);
+registerBenefitsRoutes(app, requireAuth, requireApiKeyOrAuth);
 
 // ── User API key management ───────────────────────────────────────────────────
 app.get("/api/user/api-key", requireAuth, async (req, res) => {
@@ -845,9 +849,9 @@ app.post("/api/receipts/scan", requireAuth, async (req, res) => {
   }
 });
 
-// ── Benefit alerts (Brief 05, phase 1) ────────────────────────────────────────
-// The delivery channel and its scheduler only. The benefits catalog, the period
-// math and the Benefits view are phase 2.
+// ── Benefit alerts (Brief 05) ─────────────────────────────────────────────────
+// The delivery channel and its scheduler. What is worth saying comes from
+// benefits/periods.js; the catalog and the matching come from benefits/.
 app.post("/api/alerts/test", requireAuth, async (req, res) => {
   if (!(await gmailConnected()))
     return res.status(503).json({ error: "Gmail is not connected — connect it in Settings first" });
@@ -863,8 +867,9 @@ app.post("/api/alerts/test", requireAuth, async (req, res) => {
 });
 
 // The daily job entrypoint, called by .github/workflows/benefits-alerts.yml
-// with an API key. Phase 1 has no catalog, so the evaluated item list is empty
-// and the honest answer is "nothing due" — it never sends on the real path.
+// with an API key. It evaluates the catalog as of today, asks periods.js which
+// alert tiers are due, drops the ones cb_alerts says have already fired for
+// this period, and sends what is left as one digest.
 //
 // Responses here are deliberately coarse — counts and a reason, never benefit
 // or transaction detail. The caller is a GitHub Actions run in a PUBLIC repo,
@@ -873,20 +878,50 @@ app.post("/api/alerts/run", requireApiKeyOrAuth, async (req, res) => {
   try {
     const today = new Date().toISOString().slice(0, 10);
 
-    // ── Phase 2 plugs in here ─────────────────────────────────────────────────
-    // Replace with evaluateBenefits(catalog, transactions, today) → the items
-    // that are due for an alert tier. Everything below already works against
-    // that shape and needs no further change.
-    let items = [];
+    // One item per benefit, not one per tier: an annual credit that has never
+    // been nudged is due at both 45 and 14 days at once, and saying so twice in
+    // the same email is noise. The most urgent tier labels the item and every
+    // tier it superseded is recorded alongside it, so a passed threshold cannot
+    // fire again later in the same period.
+    const { cards } = await getBenefitsStatus(today);
+    const due = [];
+    for (const card of cards) {
+      for (const benefit of card.benefits) {
+        const tiers = alertTiers({ benefit, daysLeft: benefit.days_left, status: benefit.status });
+        const unsent = [];
+        for (const tier of tiers) {
+          if (!(await wasBenefitAlertSent(benefit.id, benefit.period_key, tier))) unsent.push(tier);
+        }
+        if (unsent.length === 0) continue;
+        due.push({
+          benefitId: benefit.id,
+          periodKey: benefit.period_key,
+          tiers: unsent,
+          item: {
+            benefit: benefit.name,
+            card: card.nickname,
+            amountRemaining: benefit.amount_remaining,
+            periodEnds: benefit.period_end,
+            daysLeft: benefit.days_left,
+            tier: unsent[0],
+          },
+        });
+      }
+    }
+    // Most urgent first. buildDigestEmail preserves the caller's order on
+    // purpose, so this is where "most urgent" gets decided. A benefit with no
+    // expiry (an anchored cycle that is available again) sorts last.
+    due.sort((a, b) => (a.item.daysLeft ?? Infinity) - (b.item.daysLeft ?? Infinity));
+    let items = due.map((d) => d.item);
 
-    // ?force=1 composes and sends a digest from a placeholder item so the
-    // scheduled path (Action → API key → Gmail) can be proven end to end before
-    // any of phase 2 exists. Its alert_key is date-stamped, so a forced run is
-    // idempotent per day like every other alert.
+    // ?force=1 sends even when nothing is due, so the scheduled path (Action →
+    // API key → Gmail) stays provable end to end from an empty catalog. Its
+    // alert_key is date-stamped, so a forced run is idempotent per day like
+    // every other alert.
     const forced = req.query.force === "1" || req.query.force === "true";
-    if (forced) {
+    if (forced && items.length === 0) {
       items = [{
-        benefit: "Placeholder benefit (phase 1 test)",
+        benefit: "Placeholder benefit (forced test)",
         card: "Test card",
         amountRemaining: 50,
         periodEnds: today,
@@ -905,6 +940,15 @@ app.post("/api/alerts/run", requireApiKeyOrAuth, async (req, res) => {
       text: email.text,
       html: email.html,
     });
+    // Recorded only after Gmail accepted the message, and only then — a tier
+    // marked sent on a failed send would never be retried. Nothing is recorded
+    // when the digest was suppressed as already-sent, so a benefit that came
+    // due later the same day still gets its nudge on the next run.
+    if (result.sent) {
+      for (const entry of due) {
+        for (const tier of entry.tiers) await recordBenefitAlert(entry.benefitId, entry.periodKey, tier);
+      }
+    }
     // Counts only — no subject, no message id, nothing about a card.
     res.json({ ok: true, sent: result.sent, reason: result.reason || null, items: items.length });
   } catch (err) {
