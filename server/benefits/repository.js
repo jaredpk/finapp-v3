@@ -364,11 +364,22 @@ export async function fetchMatchRows(windows = [], excludedRuleIds = [], limit =
 // can derive: the owner saying "I used this". Disjoint from everything
 // automatic, so automatic matching cannot clobber a mark and a mark cannot be
 // mistaken for a matched transaction.
+//
+// `created_at` is a TIMESTAMPTZ and is rendered in UTC EXPLICITLY. TO_CHAR on a
+// TIMESTAMPTZ formats it in the session's TimeZone, node-postgres never issues
+// a SET TimeZone, so without the AT TIME ZONE the day this returns is whatever
+// the database server's timezone GUC happens to be. That is not cosmetic here:
+// a months_n benefit takes its anchor from the latest mark date that is `<=
+// asOf`, so on a UTC+14 server a mark created at 15:30Z reads as tomorrow,
+// drops out of that filter, and the anchored cycle loses its anchor — which
+// changes `period_key`, and `period_key` is the idempotency key for both
+// cb_manual_marks and cb_alerts. Every other date this module renders is a
+// DATE column, which has no timezone to be read in.
 export async function listManualMarks(benefitIds) {
   if (!benefitIds?.length) return [];
   const { rows } = await pool.query(
     `SELECT benefit_id, period_key, amount::float AS amount, note,
-            TO_CHAR(created_at,'YYYY-MM-DD') AS created_at
+            TO_CHAR(created_at AT TIME ZONE 'UTC','YYYY-MM-DD') AS created_at
      FROM cb_manual_marks
      WHERE benefit_id = ANY($1::int[])
      ORDER BY benefit_id, period_key`,

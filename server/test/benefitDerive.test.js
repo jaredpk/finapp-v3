@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  buildWindows, deriveBenefitStats, pairCreditsToCharges, hasCriteria,
-  PAIRING_ROW_LIMIT, MATCHES_DISPLAY_LIMIT,
+  buildWindows, deriveBenefitStats, pairCreditsToCharges,
+  PAIRING_ROW_LIMIT, MATCHES_DISPLAY_LIMIT, PAIR_DATE_SKEW_DAYS,
 } from "../benefits/derive.js";
-import { evaluateBenefits, alertTiers } from "../benefits/periods.js";
+import { evaluateBenefits, alertTiers, hasCriteria } from "../benefits/periods.js";
 
 // The derive half of card-benefit tracking: which transactions fall in which
 // window, which posted credit settles which qualifying charge, and what that
@@ -288,7 +288,7 @@ test("pairing is deterministic: shuffling the input cannot change the answer", (
   })), expected);
 });
 
-test("a credit never settles a charge that had not happened yet", () => {
+test("a credit never settles a charge dated far beyond it", () => {
   const { charges, credits } = pairCreditsToCharges({
     charges: [{ txn_id: "later", date: "2026-08-20", amount: 50 }],
     credits: [{ txn_id: "earlier", date: "2026-08-01", amount: 50 }],
@@ -297,6 +297,90 @@ test("a credit never settles a charge that had not happened yet", () => {
   // With nothing to settle, the credit is standalone usage of its own period —
   // the only path by which a credit counts as money.
   assert.equal(credits[0].standalone, 50);
+});
+
+test("a credit dated one day BEFORE its charge still settles it", () => {
+  // REGRESSION. Pairing used to require charge.date <= credit.date exactly, so
+  // a credit that posted a day ahead of its charge could never pair: the charge
+  // counted in full AND the credit fell through to residue as standalone usage
+  // of the same period. $100 of spend refunded by $100 reported as $200 used.
+  //
+  // The two dates come from different clocks (statement date vs post date), so
+  // a one-day inversion is an artefact, not a second use.
+  const cards = [card({ benefits: [benefit({
+    amount_limit: 100,
+    rules: [
+      { id: 1, merchant_regex: "SAKS", direction: "charge" },
+      { id: 2, merchant_regex: "SAKS", direction: "credit" },
+    ],
+  })] })];
+  const txns = [
+    txn({ txn_id: "credit-1", date: "2026-08-01", merchant: "SAKS CREDIT", amount: -100 }),
+    txn({ txn_id: "charge-1", date: "2026-08-02", merchant: "SAKS FIFTH AVE", amount: 100 }),
+  ];
+  const result = one({ cards, txns }, "2026-08-23");
+  assert.equal(result.amount_used, 100);
+  assert.equal(result.amount_remaining, 0);
+  assert.equal(result.confidence, "confirmed");
+  assert.equal(result.status, "used");
+});
+
+test("the skew window is a few days wide and stops dead at its edge", () => {
+  // A reach FORWARD in time has to stay short: a credit that could reach far
+  // enough forward would confirm a genuinely later, unrelated charge.
+  const pair = (chargeDate) => pairCreditsToCharges({
+    charges: [{ txn_id: "a", date: chargeDate, amount: 50 }],
+    credits: [{ txn_id: "r", date: "2026-08-01", amount: 50 }],
+  });
+
+  assert.equal(PAIR_DATE_SKEW_DAYS, 5);
+  // Just inside: the last day the credit can reach.
+  const inside = pair("2026-08-06");
+  assert.equal(inside.charges[0].confirmed, 50);
+  assert.equal(inside.credits[0].standalone, 0);
+  // Just outside: no pairing at all, and the credit is standalone usage again.
+  const outside = pair("2026-08-07");
+  assert.equal(outside.charges[0].confirmed, 0);
+  assert.equal(outside.credits[0].standalone, 50);
+});
+
+test("pairing stays deterministic when charges and credits are date-inverted", () => {
+  // The skew window widens which charges a credit MAY settle; it must not make
+  // the choice depend on the order the rows arrived in. Same total order on
+  // (date, txn_id), same answer.
+  const charges = [
+    { txn_id: "c2", date: "2026-08-04", amount: 40 },
+    { txn_id: "c1", date: "2026-08-03", amount: 40 },
+    { txn_id: "c3", date: "2026-08-05", amount: 25 },
+  ];
+  const credits = [
+    { txn_id: "r2", date: "2026-08-02", amount: 40 },
+    { txn_id: "r1", date: "2026-08-01", amount: 40 },
+  ];
+  const byId = (a, b) => String(a.txn_id).localeCompare(String(b.txn_id));
+  const fingerprint = (result) => JSON.stringify({
+    charges: [...result.charges].sort(byId).map((c) => [c.txn_id, c.confirmed]),
+    credits: [...result.credits].sort(byId).map((c) => [c.txn_id, c.standalone]),
+  });
+
+  const expected = fingerprint(pairCreditsToCharges({ charges, credits }));
+  // Both charges are settled — neither credit is money of its own — and the
+  // $25 charge outside either credit's reach is untouched.
+  assert.equal(expected, JSON.stringify({
+    charges: [["c1", 40], ["c2", 40], ["c3", 0]],
+    credits: [["r1", 0], ["r2", 0]],
+  }));
+  for (let i = 0; i < charges.length; i++) {
+    for (let j = 0; j < credits.length; j++) {
+      const rotate = (xs, n) => [...xs.slice(n), ...xs.slice(0, n)];
+      assert.equal(fingerprint(pairCreditsToCharges({
+        charges: rotate(charges, i), credits: rotate(credits, j),
+      })), expected, `rotation ${i}/${j}`);
+    }
+  }
+  assert.equal(fingerprint(pairCreditsToCharges({
+    charges: [...charges].reverse(), credits: [...credits].reverse(),
+  })), expected);
 });
 
 test("the exact pass runs before the partial pass, so an exact match is not eaten piecemeal", () => {
@@ -431,6 +515,47 @@ test("a period that opens before the card's history is insufficient-history, nev
   assert.equal(one({ cards, historyByAccount: {} }, "2026-08-23").status, "insufficient-history");
   const unlinked = [card({ account_id: null, benefits: [benefit()] })];
   assert.equal(one({ cards: unlinked }, "2026-08-23").status, "insufficient-history");
+});
+
+test("a benefit whose only rule has no criteria is manual-only, never available", () => {
+  // The same honesty gate. A rule with no regex, no amount bounds and no
+  // category is skipped by the scan, so a benefit holding nothing else can
+  // never match automatically — and counting it as a rule reported the benefit
+  // as `available`, in green, meaning "nothing has matched this period yet"
+  // about a benefit where nothing ever could.
+  //
+  // Not `rule-error` either: an unfinished row in the editor is not a broken
+  // regex, and saying a rule failed would send the owner hunting for a fault
+  // that is not there. It is a benefit with no automatic footprint, which is
+  // exactly what manual-only means.
+  const cards = [card({ benefits: [benefit({ rules: [{ id: 1, direction: "charge" }] })] })];
+  const result = one({ cards }, "2026-08-23");
+  assert.equal(result.status, "manual-only");
+  assert.equal(result.confidence, "none");
+  assert.equal(result.rule_error, null);
+});
+
+test("one usable rule alongside a criteria-less one still evaluates normally", () => {
+  // The criteria-less rule is simply not there as far as evaluation goes; the
+  // benefit is judged on the rule that can actually match.
+  const cards = [card({ benefits: [benefit({
+    amount_limit: 100,
+    rules: [
+      { id: 1, merchant_regex: "SAKS", direction: "charge" },
+      { id: 2, direction: "charge" },
+    ],
+  })] })];
+  // Nothing matched yet, and the history covers the window: available, as it
+  // would be with the usable rule on its own.
+  const idle = one({ cards }, "2026-08-23");
+  assert.equal(idle.status, "available");
+  assert.equal(idle.rule_error, null);
+
+  const txns = [txn({ txn_id: "chg", date: "2026-08-04", merchant: "SAKS FIFTH AVE", amount: 100 })];
+  const used = one({ cards, txns }, "2026-08-23");
+  assert.equal(used.amount_used, 100);
+  assert.equal(used.status, "used-unconfirmed");
+  assert.equal(used.rule_error, null);
 });
 
 // ── Windows ───────────────────────────────────────────────────────────────────

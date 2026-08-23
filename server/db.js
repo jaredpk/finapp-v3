@@ -17,17 +17,53 @@ const connectionString = process.env.DATABASE_URL?.replace(/([?&])sslmode=[^&]*/
 // speaks no TLS at all, and a Pool that insists on it cannot connect, which is
 // what made the benefits SQL untestable outside production. So SSL is switched
 // off for a loopback connection string only. This narrows nothing remote: the
-// host has to literally be localhost / 127.0.0.1 / ::1, and anything the regex
-// cannot read (an unset URL, a socket path, a hostname that merely contains the
-// word "local") falls through to the SSL branch rather than out of it.
+// host has to literally be localhost / 127.0.0.1 / ::1, and anything this
+// function cannot read (an unset URL, a hostname that merely contains the word
+// "local") falls through to the SSL branch rather than out of it.
+//
+// The `?host=` / `?hostaddr=` check is the load-bearing part. node-postgres
+// parses the DSN with pg-connection-string, which follows libpq: a `host=`
+// QUERY PARAMETER overrides the URL authority entirely, so
+// `postgres://u:p@localhost:5432/db?host=remote.example.com` connects to
+// remote.example.com even though `new URL(...).hostname` reads `localhost`.
+// Deciding from the authority alone would therefore disable TLS and then send
+// the password and every row to a REMOTE host in cleartext. So the loopback
+// branch is only reachable when the host actually used for the connection is
+// loopback: a parameter that is present must itself be loopback (or a unix
+// socket path, which carries no TLS to downgrade in the first place), and
+// anything else keeps SSL.
+//
+// `hostaddr` is included even though node-postgres dials `host` today and
+// leaves `hostaddr` unused: it is libpq's "connect to THIS address", so a DSN
+// carrying a non-loopback one is ambiguous about where it lands, and ambiguous
+// means SSL.
 //
 // PGSSLMODE=disable is honoured as an explicit escape hatch for a non-loopback
 // dev database — opt-in, env-only, never the default.
-function isLocalConnectionString(url) {
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+
+function isLoopbackHost(value) {
+  const host = String(value ?? "").trim().replace(/^\[|\]$/g, "");
+  // A unix socket path (libpq's `host=/var/run/postgresql`) never leaves the
+  // machine, so there is no cleartext hop to protect.
+  if (host.startsWith("/")) return true;
+  return LOOPBACK_HOSTS.has(host.toLowerCase());
+}
+
+export function isLocalConnectionString(url) {
   if (!url) return false;
   try {
-    const host = new URL(url).hostname.replace(/^\[|\]$/g, "");
-    return host === "localhost" || host === "127.0.0.1" || host === "::1";
+    const parsed = new URL(url);
+    // libpq accepts a comma-separated list of hosts to try in order, and
+    // `hostaddr` can name the address while `host` only names it for
+    // verification — so every value present has to be loopback before this
+    // connection can be called local.
+    const overrides = ["hostaddr", "host"]
+      .map((key) => parsed.searchParams.get(key))
+      .filter((value) => value !== null);
+    // Present at all: they win over the authority, exactly as libpq does.
+    if (overrides.length) return overrides.every((v) => v.split(",").every(isLoopbackHost));
+    return isLoopbackHost(parsed.hostname);
   } catch {
     return false;
   }
@@ -340,6 +376,20 @@ export async function initDb() {
       ADD COLUMN IF NOT EXISTS logo_url               TEXT,
       ADD COLUMN IF NOT EXISTS original_description   TEXT,
       ADD COLUMN IF NOT EXISTS suggested_category     TEXT;
+  `);
+
+  // Every transaction scan behind card-benefit tracking is bounded by account
+  // AND date — the match CTE in benefits/repository.js joins on
+  // `t.account = c.account_id AND t.date BETWEEN w.start_date AND w.end_date`
+  // for each of the dozens of (benefit, period) windows a status read builds,
+  // and getHistoryStartByAccount takes MIN(date) GROUP BY account over the
+  // whole table. Measured on this shape: a status read goes 131ms → 94ms at
+  // 50k rows and 568ms → 345ms at 200k. Plain CREATE INDEX, not CONCURRENTLY:
+  // at this app's ~40k rows it costs ~536 KB and ~44ms of SHARE lock, where
+  // CONCURRENTLY would double the work and add the INVALID-index failure mode
+  // for nothing.
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS transactions_account_date_idx ON transactions (account, date);
   `);
 
   // Migrate: rename clerk_user_id → user_ref in tables that still use a user identifier

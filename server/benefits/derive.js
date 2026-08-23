@@ -19,7 +19,7 @@
 // own — so the two things most likely to be wrong (which credit settles which
 // charge, and what that adds up to) are unit-testable without a database
 // (test/benefitDerive.test.js).
-import { resolvePeriod, recentPeriods, toDateString } from "./periods.js";
+import { resolvePeriod, recentPeriods, toDateString, addDaysIso, hasCriteria } from "./periods.js";
 
 // How far back a read looks for the charge a lagging statement credit settles.
 //
@@ -57,6 +57,24 @@ export const MATCHES_DISPLAY_LIMIT = 200;
 // while staying far too small to conflate two genuinely different charges.
 export const PAIR_AMOUNT_TOLERANCE = 0.02;
 
+// How far a charge may be dated AFTER the credit that settles it and still be
+// considered the charge that credit belongs to.
+//
+// A credit lags its charge by a cycle, so the ordinary case is charge first.
+// But the two dates come from different clocks: `t.date` is whatever the issuer
+// stamped on the row, and a charge often carries its STATEMENT date while the
+// credit carries its POST date (or the reverse), so a small inversion — a
+// credit posting a day or two before the charge it refunds — is a normal
+// artefact rather than evidence they are unrelated. With a strict
+// charge <= credit test that credit can never pair, and it falls through to
+// residue as standalone usage of its own period: $100 of charge plus $100 of
+// credit reported as $200 used, the exact double-count pairing exists to stop.
+//
+// Deliberately a few days and not more. The window is a reach FORWARD in time,
+// and a credit that can reach far enough forward will pair with a genuinely
+// later, unrelated charge and silently confirm money nobody has been refunded.
+export const PAIR_DATE_SKEW_DAYS = 5;
+
 // Half a cent: below this there is no money left to attribute, and chasing
 // float residue would leave one-cent "standalone credits" behind every pairing.
 const EPSILON = 0.005;
@@ -66,14 +84,6 @@ const num = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
 };
-
-// A rule with no criteria at all matches the entire statement, which would
-// silently mark every benefit used. Skipped rather than obeyed — it is excluded
-// from the scan the same way a broken rule is, but it is not an ERROR: it is an
-// unfinished rule, and reporting rule-error for it would make a half-typed row
-// in the editor look like a broken regex.
-export const hasCriteria = (rule) =>
-  Boolean(rule?.merchant_regex) || rule?.amount_min != null || rule?.amount_max != null || Boolean(rule?.category);
 
 const periodSpec = (benefit, card, anchorDate = null) => ({
   unit: benefit.period_unit,
@@ -168,18 +178,24 @@ export function pairCreditsToCharges({ charges = [], credits = [] } = {}) {
   const chargeState = [...charges].sort(order).map((c) => ({ ...c, amount: Math.abs(num(c.amount)), confirmed: 0 }));
   const creditState = [...credits].sort(order).map((c) => ({ ...c, amount: Math.abs(num(c.amount)), standalone: 0 }));
 
-  const before = (charge, credit) => !credit.date || !charge.date || charge.date <= credit.date;
+  // Which charges a credit is allowed to settle: everything on or before the
+  // credit's own date, plus PAIR_DATE_SKEW_DAYS beyond it to absorb
+  // statement-date vs post-date inversion. A row with no date at all is left
+  // eligible, as it always was — the total order below still decides which one
+  // is picked, so the result stays deterministic.
+  const settles = (charge, credit) =>
+    !credit.date || !charge.date || charge.date <= addDaysIso(credit.date, PAIR_DATE_SKEW_DAYS);
 
   // Pass 1 — EXACT. For each credit oldest first, the latest untouched charge
-  // on or before it whose amount matches within tolerance. Run before the
-  // partial pass so a $15 credit that exactly settles a $15 charge takes that
-  // charge rather than being spread across a $4 and an $11 that happen to sit
-  // nearer the credit.
+  // it may settle (see `settles`) whose amount matches within tolerance. Run
+  // before the partial pass so a $15 credit that exactly settles a $15 charge
+  // takes that charge rather than being spread across a $4 and an $11 that
+  // happen to sit nearer the credit.
   const remaining = [];
   for (const credit of creditState) {
     let pick = null;
     for (const charge of chargeState) {
-      if (charge.confirmed > 0 || !before(charge, credit)) continue;
+      if (charge.confirmed > 0 || !settles(charge, credit)) continue;
       if (Math.abs(charge.amount - credit.amount) > PAIR_AMOUNT_TOLERANCE) continue;
       pick = charge; // ascending order, so the last qualifying charge is the latest
     }
@@ -192,7 +208,8 @@ export function pairCreditsToCharges({ charges = [], credits = [] } = {}) {
   }
 
   // Pass 2 — PARTIAL / AGGREGATE. What is left of each credit is spent against
-  // charges newest-first, taking each charge's still-unconfirmed remainder.
+  // the charges it may settle, newest-first, taking each charge's
+  // still-unconfirmed remainder.
   // This is what handles $50 of a $100 charge, and one $15 credit covering a $4
   // and an $11.
   //
@@ -205,7 +222,7 @@ export function pairCreditsToCharges({ charges = [], credits = [] } = {}) {
     let left = credit.amount;
     for (const charge of newestFirst) {
       if (left <= EPSILON) break;
-      if (!before(charge, credit)) continue;
+      if (!settles(charge, credit)) continue;
       const room = charge.amount - charge.confirmed;
       if (room <= EPSILON) continue;
       const take = Math.min(room, left);

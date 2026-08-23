@@ -296,6 +296,21 @@ const numOrNull = (v) => {
   return Number.isFinite(n) ? n : null;
 };
 
+// Whether a match rule can actually match anything.
+//
+// A rule with no criteria at all matches the entire statement, which would
+// silently mark every benefit used. Skipped rather than obeyed — derive.js
+// leaves it out of the scan the same way a broken rule is left out — but it is
+// not an ERROR: it is an unfinished rule, and reporting rule-error for it would
+// make a half-typed row in the editor look like a broken regex.
+//
+// It lives here rather than in derive.js because both halves need it and
+// derive.js already imports this module: buildWindows to decide which benefits
+// are worth scanning, evaluateBenefit to decide whether a benefit has any way
+// to match at all.
+export const hasCriteria = (rule) =>
+  Boolean(rule?.merchant_regex) || rule?.amount_min != null || rule?.amount_max != null || Boolean(rule?.category);
+
 // `rule-error` is here for the same reason `used` is — chasing the owner about
 // a benefit they cannot act on trains the mailbox to ignore this sender — but
 // alertTiers gives it its own tier instead of pure silence, because a benefit
@@ -394,7 +409,16 @@ function evaluateBenefit(benefit, card, stat, historyStart, today, ruleError) {
   const amountUsed = mark ? round2(Math.abs(num(mark.amount))) : round2(num(stat?.amountUsed));
   const confirmedTotal = round2(num(stat?.confirmedTotal));
 
-  const ruleCount = Array.isArray(benefit.rules) ? benefit.rules.length : Number(benefit.rule_count) || 0;
+  // USABLE rules, not rules. A rule with no regex, no amount bounds and no
+  // category is skipped by the scan (hasCriteria), so counting it here would
+  // report a benefit that can never match automatically as `available` — "nothing
+  // has matched this period yet", in green — which is exactly the confidently-
+  // wrong answer the honesty gate below exists to prevent. A benefit whose only
+  // rules are unfinished has no automatic footprint at all, which is what
+  // `manual-only` means.
+  const ruleCount = Array.isArray(benefit.rules)
+    ? benefit.rules.filter(hasCriteria).length
+    : Number(benefit.rule_count) || 0;
 
   // A benefit that matched a transaction whose money belongs to an EARLIER
   // period (the January credit for a December charge) has evidence in this

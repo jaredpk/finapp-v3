@@ -11,8 +11,8 @@ import {
   matchTest, assertValidRegex,
   CARD_FIELDS, BENEFIT_FIELDS, RULE_FIELDS,
 } from "./repository.js";
-import { evaluateBenefits, toDateString } from "./periods.js";
-import { buildWindows, deriveBenefitStats, hasCriteria } from "./derive.js";
+import { evaluateBenefits, toDateString, hasCriteria } from "./periods.js";
+import { buildWindows, deriveBenefitStats } from "./derive.js";
 import { DATE_PARAM_RE, validateDateRange } from "../limits.js";
 
 const PERIOD_UNITS = ["month", "quarter", "half", "year", "months_n"];

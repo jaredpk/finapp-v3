@@ -163,6 +163,18 @@ the manual entry alone. Benefits with no transaction footprint (lounge access,
 elite status, anniversary miles) live entirely on this path and report
 `manual-only`.
 
+So does a benefit whose match rules are all unusable. A rule with no regex, no
+amount bounds and no category is skipped rather than obeyed — it would match the
+entire statement and mark every benefit used — so it does not count as a rule
+when deciding whether a benefit can be evaluated automatically, and a benefit
+holding nothing else reports `manual-only` rather than `available`. Reporting
+`available` would claim nothing has matched this period yet about a benefit
+where nothing ever could, which is what the `insufficient-history` /
+`manual-only` distinction exists to prevent. It is NOT `rule-error`: a
+half-filled row in the editor is not a broken rule, and `rule_error` stays
+`null`. A benefit with one usable rule and one criteria-less one is evaluated
+normally on the usable rule.
+
 A posted statement credit is attached to the period of the CHARGE it confirms,
 not to the period it landed in — it confirms that charge rather than becoming
 usage of the following period. This holds whether or not the two amounts match:
@@ -170,6 +182,14 @@ a $50 credit against a $100 charge confirms half of that charge and adds nothing
 to the period it posted in. (An earlier design paired only on an equal amount,
 so a mismatched credit was filed as fresh usage of its own landing period,
 consuming the next period's allowance — the feature's own named failure mode.)
+
+A credit ordinarily follows its charge, but it may also settle a charge dated up
+to a few days AFTER it (`PAIR_DATE_SKEW_DAYS` in `server/benefits/derive.js`):
+the two dates come from different clocks — a statement date against a post date
+— so a one- or two-day inversion is an artefact, not a second use, and refusing
+to pair across it double-counts the charge and the credit both. The window is
+deliberately only days wide, because a longer reach forward would let a credit
+confirm a genuinely later, unrelated charge.
 
 Only the part of a credit that no charge accounts for is recorded as usage of
 the period the credit landed in, and it is confirmed by nature: the statement
