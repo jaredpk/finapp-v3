@@ -1,0 +1,33 @@
+# Daily card-benefit alert run (Brief 05). The Fly VM sleeps
+# (min_machines_running = 0), so an in-process timer would not fire reliably —
+# this request wakes it via auto_start_machines.
+#
+# Requires two repo secrets:
+#   FINAPP_URL     — https origin of the deployed app, no trailing slash
+#   FINAPP_API_KEY — Settings → API key in the app (requireApiKeyOrAuth)
+name: Benefits alerts
+on:
+  schedule:
+    - cron: "0 16 * * *"
+  workflow_dispatch:
+jobs:
+  run-alerts:
+    runs-on: ubuntu-latest
+    steps:
+      # THIS REPOSITORY IS PUBLIC AND SO ARE ITS ACTIONS LOGS. The response body
+      # is discarded to /dev/null and never echoed: it comes from an endpoint
+      # that reads this owner's financial data, and one future field added
+      # upstream would publish it to the world with no review step in between.
+      # Only the HTTP status code is printed — enough to see that the run
+      # succeeded, and nothing else.
+      - name: Trigger alert run
+        run: |
+          status=$(curl -sS -X POST \
+            -H "X-API-Key: ${{ secrets.FINAPP_API_KEY }}" \
+            -o /dev/null -w '%{http_code}' \
+            "${{ secrets.FINAPP_URL }}/api/alerts/run")
+          echo "HTTP $status"
+          case "$status" in
+            2*) ;;
+            *) echo "Alert run failed"; exit 1 ;;
+          esac

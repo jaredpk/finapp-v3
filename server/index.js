@@ -51,7 +51,8 @@ import {
   getGeminiUsageByFeature,
 } from "./db.js";
 import pool from "./db.js";
-import { gmailConfigured, getGmailAuthUrl, exchangeGmailAuthCode, gmailConnected } from "./gmail.js";
+import { gmailConfigured, getGmailAuthUrl, exchangeGmailAuthCode, gmailConnected, getGrantedScopes, canSendMail } from "./gmail.js";
+import { buildDigestEmail, sendAlert, sendTestEmail } from "./alertEmail.js";
 import { receiptScanConfigured, runReceiptScan } from "./receiptScan.js";
 import { askAiConfigured, runAskLoop, createGeminiGenerate, impl as askAiImpl, resolveAskModel } from "./askAi.js";
 import {
@@ -819,7 +820,12 @@ app.post("/api/gmail/auth-code", requireAuth, async (req, res) => {
 
 app.get("/api/gmail/status", requireAuth, async (req, res) => {
   try {
-    res.json({ connected: await gmailConnected() });
+    // `connected` stays exactly what it was (Settings and the scanner card read
+    // it); the grant detail is additive. canSend is reported separately because
+    // a re-consent can grant one scope and not the other, and the only place
+    // that is visible is here.
+    const [connected, scopes] = await Promise.all([gmailConnected(), getGrantedScopes()]);
+    res.json({ connected, scopes, canSend: connected && (await canSendMail()) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -835,6 +841,74 @@ app.post("/api/receipts/scan", requireAuth, async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error("Receipt scan failed:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Benefit alerts (Brief 05, phase 1) ────────────────────────────────────────
+// The delivery channel and its scheduler only. The benefits catalog, the period
+// math and the Benefits view are phase 2.
+app.post("/api/alerts/test", requireAuth, async (req, res) => {
+  if (!(await gmailConnected()))
+    return res.status(503).json({ error: "Gmail is not connected — connect it in Settings first" });
+  if (!(await canSendMail()))
+    return res.status(503).json({ error: "Gmail is connected without the send scope — reconnect Gmail in Settings to grant it" });
+  try {
+    const result = await sendTestEmail();
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error("Test alert failed:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// The daily job entrypoint, called by .github/workflows/benefits-alerts.yml
+// with an API key. Phase 1 has no catalog, so the evaluated item list is empty
+// and the honest answer is "nothing due" — it never sends on the real path.
+//
+// Responses here are deliberately coarse — counts and a reason, never benefit
+// or transaction detail. The caller is a GitHub Actions run in a PUBLIC repo,
+// so anything in this body is a candidate for a public log.
+app.post("/api/alerts/run", requireApiKeyOrAuth, async (req, res) => {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+
+    // ── Phase 2 plugs in here ─────────────────────────────────────────────────
+    // Replace with evaluateBenefits(catalog, transactions, today) → the items
+    // that are due for an alert tier. Everything below already works against
+    // that shape and needs no further change.
+    let items = [];
+
+    // ?force=1 composes and sends a digest from a placeholder item so the
+    // scheduled path (Action → API key → Gmail) can be proven end to end before
+    // any of phase 2 exists. Its alert_key is date-stamped, so a forced run is
+    // idempotent per day like every other alert.
+    const forced = req.query.force === "1" || req.query.force === "true";
+    if (forced) {
+      items = [{
+        benefit: "Placeholder benefit (phase 1 test)",
+        card: "Test card",
+        amountRemaining: 50,
+        periodEnds: today,
+        daysLeft: 7,
+        tier: "test",
+      }];
+    }
+
+    const email = buildDigestEmail({ items, today });
+    if (!email) return res.json({ ok: true, sent: false, reason: "nothing-due" });
+
+    const result = await sendAlert({
+      alertKey: `benefits-digest:${forced ? "forced:" : ""}${today}`,
+      kind: "benefits-digest",
+      subject: email.subject,
+      text: email.text,
+      html: email.html,
+    });
+    // Counts only — no subject, no message id, nothing about a card.
+    res.json({ ok: true, sent: result.sent, reason: result.reason || null, items: items.length });
+  } catch (err) {
+    console.error("Alert run failed:", err.message);
     res.status(500).json({ error: err.message });
   }
 });

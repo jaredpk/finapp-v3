@@ -616,6 +616,16 @@ export async function gmailAuthCode(code) {
   return r.json();
 }
 
+// Sends a fixed "alerting is working" email to the connected mailbox. Not
+// deduplicated server-side, so it can be re-run whenever the owner wants proof.
+export async function sendTestAlert() {
+  const r = await fetch(`${BASE}/alerts/test`, {
+    method: "POST",
+    headers: await authHeaders(),
+  });
+  return r.json();
+}
+
 // ── Splits ────────────────────────────────────────────────────────────────────
 export async function fetchSplits() {
   const r = await fetch(`${BASE}/splits`, { headers: await authHeaders() });

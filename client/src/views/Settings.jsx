@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { getApiKey, generateApiKey, analyzeSimplifi, importSimplifi, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi, setPropertyBaselineApi, fetchManualAccounts, saveManualAccount, deleteManualAccountApi, downloadXlsx, saveAccountNickname, deleteAccountNicknameApi, getLastAudit, uploadAuditSheet, insertAuditTransactions, completeAudit, fetchImportedAccounts, clearImportedTransactions, fetchVehicles, saveVehicle, deleteVehicleApi, setVehicleBaselineApi, syncVehiclesApi, fetchLinkedInstitutions, removeLinkedInstitution, replayBackfill, getBackfillStatus, gmailStatus, gmailAuthUrl, gmailAuthCode, scanReceipts, fetchGeminiUsage } from "../api.js";
+import { getApiKey, generateApiKey, analyzeSimplifi, importSimplifi, previewDuplicates, runDeduplication, debugDuplicates, fetchProperties, saveProperty, deletePropertyApi, syncPropertiesApi, setPropertyBaselineApi, fetchManualAccounts, saveManualAccount, deleteManualAccountApi, downloadXlsx, saveAccountNickname, deleteAccountNicknameApi, getLastAudit, uploadAuditSheet, insertAuditTransactions, completeAudit, fetchImportedAccounts, clearImportedTransactions, fetchVehicles, saveVehicle, deleteVehicleApi, setVehicleBaselineApi, syncVehiclesApi, fetchLinkedInstitutions, removeLinkedInstitution, replayBackfill, getBackfillStatus, gmailStatus, gmailAuthUrl, gmailAuthCode, scanReceipts, sendTestAlert, fetchGeminiUsage } from "../api.js";
 
 export default function Settings({ reloadData, user, accounts = [] }) {
   // Connected banks state
@@ -99,6 +99,11 @@ export default function Settings({ reloadData, user, accounts = [] }) {
   const [gmailResult, setGmailResult]       = useState(null);
   const [scanning, setScanning]             = useState(false);
   const [scanResult, setScanResult]         = useState(null);
+  // Alerting needs the send scope, which a re-consent can grant separately from
+  // readonly — so the card reports the grant rather than assuming it.
+  const [gmailCanSend, setGmailCanSend]     = useState(false);
+  const [testingAlert, setTestingAlert]     = useState(false);
+  const [testAlertResult, setTestAlertResult] = useState(null);
 
   // Gemini usage state
   const [geminiUsage, setGeminiUsage]       = useState(null); // null = loading
@@ -126,7 +131,9 @@ export default function Settings({ reloadData, user, accounts = [] }) {
     fetchVehicles().then((data) => { setVehicles(data.vehicles || []); setVehiclesLoading(false); });
     getLastAudit().then(({ log }) => setLastAudit(log || null)).catch(() => {});
     fetchLinkedInstitutions().then((data) => setInstitutions(data.institutions || [])).catch(() => {});
-    gmailStatus().then((data) => setGmailConnected(!!data.connected)).catch(() => setGmailConnected(false));
+    gmailStatus()
+      .then((data) => { setGmailConnected(!!data.connected); setGmailCanSend(!!data.canSend); })
+      .catch(() => { setGmailConnected(false); setGmailCanSend(false); });
     // A usage card that can't load is a footnote, not a failure — it reports
     // itself and leaves the rest of Settings alone.
     //
@@ -172,6 +179,10 @@ export default function Settings({ reloadData, user, accounts = [] }) {
       setGmailUrl(null);
       setGmailCode("");
       setGmailResult("Gmail connected. Receipts will also be scanned automatically each morning.");
+      // Which scopes were actually granted is the server's answer, not an
+      // assumption — a consent screen with a box unticked lands here too.
+      const status = await gmailStatus().catch(() => null);
+      setGmailCanSend(!!status?.canSend);
     } catch (err) {
       setGmailResult(`Error: ${err.message}`);
     } finally {
@@ -191,6 +202,20 @@ export default function Settings({ reloadData, user, accounts = [] }) {
       setScanResult(`Error: ${err.message}`);
     } finally {
       setScanning(false);
+    }
+  }
+
+  async function handleSendTestAlert() {
+    setTestingAlert(true);
+    setTestAlertResult(null);
+    try {
+      const res = await sendTestAlert();
+      if (res.error) { setTestAlertResult(`Error: ${res.error}`); return; }
+      setTestAlertResult("Test email sent — check your inbox.");
+    } catch (err) {
+      setTestAlertResult(`Error: ${err.message}`);
+    } finally {
+      setTestingAlert(false);
     }
   }
 
@@ -801,8 +826,22 @@ export default function Settings({ reloadData, user, accounts = [] }) {
             <p style={{ ...styles.muted, marginBottom: 12 }}>
               <span style={{ color: "var(--green, #22c55e)" }}>✓ Gmail connected</span> — receipts are scanned automatically each morning.
             </p>
+            {!gmailCanSend && (
+              <p style={{ ...styles.muted, marginBottom: 12, color: "var(--amber, #f59e0b)" }}>
+                Benefit alerting needs the Gmail <strong>send</strong> scope, which this connection
+                doesn't have. Run the consent flow again with <strong>Reconnect</strong> and approve
+                both boxes — read <em>and</em> send — on the Google screen.
+              </p>
+            )}
             <button style={styles.generateBtn} onClick={handleScanReceipts} disabled={scanning}>
               {scanning ? "Scanning… this can take a few minutes" : "Scan Now"}
+            </button>
+            <button
+              style={{ ...styles.generateBtn, marginLeft: 8, opacity: gmailCanSend ? 1 : 0.5 }}
+              onClick={handleSendTestAlert}
+              disabled={!gmailCanSend || testingAlert}
+            >
+              {testingAlert ? "Sending…" : "Send test email"}
             </button>
             <button
               style={{ ...styles.generateBtn, marginLeft: 8, opacity: 0.75 }}
@@ -859,6 +898,9 @@ export default function Settings({ reloadData, user, accounts = [] }) {
         )}
         {scanResult && (
           <p style={scanResult.startsWith("Error") ? styles.importError : styles.importSuccess}>{scanResult}</p>
+        )}
+        {testAlertResult && (
+          <p style={testAlertResult.startsWith("Error") ? styles.importError : styles.importSuccess}>{testAlertResult}</p>
         )}
       </section>
 

@@ -230,6 +230,25 @@ export async function initDb() {
     );
   `);
 
+  // The scopes Google actually granted, space-separated as Google returns them.
+  // Nullable: rows written before this column existed carry no record of what
+  // was consented to, and "unknown" must not read as "can send" (gmail.js).
+  await pool.query(`ALTER TABLE gmail_tokens ADD COLUMN IF NOT EXISTS scopes TEXT;`);
+
+  // Outbound alert idempotency (Brief 05). One row per alert actually sent,
+  // keyed by a caller-composed alert_key — the daily job is a cron that can
+  // re-run, and re-running it must not re-send. Written only after a successful
+  // send, so a failed run retries on the next one.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS alert_log (
+      id SERIAL PRIMARY KEY,
+      alert_key TEXT UNIQUE NOT NULL,
+      kind TEXT NOT NULL,
+      subject TEXT,
+      sent_at TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+
   // Gemini token accounting. One row per completed Gemini call from either
   // caller, priced by geminiUsage.js at insert time — the rate table lives in
   // code and moves, so the dollar figure is frozen into the row rather than
@@ -2086,12 +2105,12 @@ export async function upsertAssignment(transactionId, categoryId) {
 }
 
 // ── Review state & Gmail receipt scanning ─────────────────────────────────────
-export async function saveGmailRefreshToken(refreshToken) {
+export async function saveGmailRefreshToken(refreshToken, scopes = null) {
   await pool.query(
-    `INSERT INTO gmail_tokens (id, refresh_token, updated_at)
-     VALUES ('default', $1, NOW())
-     ON CONFLICT (id) DO UPDATE SET refresh_token = $1, updated_at = NOW()`,
-    [refreshToken]
+    `INSERT INTO gmail_tokens (id, refresh_token, scopes, updated_at)
+     VALUES ('default', $1, $2, NOW())
+     ON CONFLICT (id) DO UPDATE SET refresh_token = $1, scopes = $2, updated_at = NOW()`,
+    [refreshToken, scopes]
   );
 }
 
@@ -2100,6 +2119,37 @@ export async function getGmailRefreshToken() {
     `SELECT refresh_token FROM gmail_tokens WHERE id = 'default'`
   );
   return rows[0]?.refresh_token || null;
+}
+
+// The whole grant, for callers that need to know what was consented to and not
+// just whether a token exists (gmail.js canSendMail, /api/gmail/status).
+export async function getGmailGrant() {
+  const { rows } = await pool.query(
+    `SELECT refresh_token, scopes FROM gmail_tokens WHERE id = 'default'`
+  );
+  if (!rows[0]?.refresh_token) return null;
+  return { refreshToken: rows[0].refresh_token, scopes: rows[0].scopes || null };
+}
+
+// ── Outbound alerts (Brief 05) ────────────────────────────────────────────────
+export async function wasAlertSent(alertKey) {
+  const { rowCount } = await pool.query(
+    `SELECT 1 FROM alert_log WHERE alert_key = $1`,
+    [alertKey]
+  );
+  return rowCount > 0;
+}
+
+// DO NOTHING rather than DO UPDATE: the first send is the one that happened,
+// and a second caller racing in on the same key must not refresh sent_at and
+// make a duplicate look like the original.
+export async function recordAlertSent(alertKey, kind, subject) {
+  await pool.query(
+    `INSERT INTO alert_log (alert_key, kind, subject)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (alert_key) DO NOTHING`,
+    [alertKey, kind, subject || null]
+  );
 }
 
 // Approves transactions: sets reviewed_at and, when the scanner suggested a
