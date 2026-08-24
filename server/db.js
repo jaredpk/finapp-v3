@@ -58,9 +58,11 @@ export function isLocalConnectionString(url) {
     // `hostaddr` can name the address while `host` only names it for
     // verification — so every value present has to be loopback before this
     // connection can be called local.
+    // getAll, not get: a URL may carry the parameter more than once, and which
+    // repeat libpq honours is not something to bet TLS on. Every value present
+    // has to be loopback, so a repeat can only ever narrow this, never widen it.
     const overrides = ["hostaddr", "host"]
-      .map((key) => parsed.searchParams.get(key))
-      .filter((value) => value !== null);
+      .flatMap((key) => parsed.searchParams.getAll(key));
     // Present at all: they win over the authority, exactly as libpq does.
     if (overrides.length) return overrides.every((v) => v.split(",").every(isLoopbackHost));
     return isLoopbackHost(parsed.hostname);

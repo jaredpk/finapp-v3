@@ -76,3 +76,14 @@ test("only a connection that really lands on loopback may drop TLS", () => {
     assert.equal(isLocalConnectionString(dsn), expected, `${why}: ${String(dsn)}`);
   }
 });
+
+// searchParams.get() returns only the FIRST value, so a repeated host
+// parameter could disable TLS on the strength of a loopback value that libpq
+// might not be the one to honour. Which repeat wins is not worth betting TLS
+// on; every value present must be loopback.
+test("a repeated host parameter cannot disable TLS on its first value alone", () => {
+  assert.equal(isLocalConnectionString("postgres://u:p@localhost:5432/db?host=127.0.0.1&host=evil.com"), false);
+  assert.equal(isLocalConnectionString("postgres://u:p@localhost:5432/db?host=evil.com&host=127.0.0.1"), false);
+  assert.equal(isLocalConnectionString("postgres://u:p@localhost:5432/db?host=127.0.0.1&hostaddr=evil.com"), false);
+  assert.equal(isLocalConnectionString("postgres://u:p@localhost:5432/db?host=127.0.0.1&host=::1"), true);
+});
