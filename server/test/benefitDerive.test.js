@@ -641,3 +641,52 @@ test("a months_n mark anchors the cycle even though its key no longer matches", 
   assert.equal(result.confidence, "manual");
   assert.equal(result.status, "used");
 });
+
+// The skew window that lets a credit settle a slightly-later charge must never
+// become a peer of the ordinary "the charge came first" case. Selection takes
+// the LATEST qualifying charge, so while forward charges were equal candidates
+// an unrelated later charge outranked the true earlier one, and a credit could
+// reach across a period boundary to confirm the next period's spend. The whole
+// suite passed while that was live, hence these.
+test("a credit settles the charge that preceded it, not a later lookalike", () => {
+  const { charges } = pairCreditsToCharges({
+    charges: [
+      { txn_id: "true",  date: "2026-08-01", amount: 100, period_key: "2026-08" },
+      { txn_id: "decoy", date: "2026-08-12", amount: 100, period_key: "2026-08" },
+    ],
+    credits: [{ txn_id: "cr", date: "2026-08-10", amount: 100, period_key: "2026-08" }],
+  });
+  const by = Object.fromEntries(charges.map((c) => [c.txn_id, c.confirmed]));
+  assert.equal(by.true, 100, "the charge the credit actually reimbursed");
+  assert.equal(by.decoy, 0, "a charge three days later did not earn this credit");
+});
+
+test("a charge on both sides of a credit settles from the earlier one", () => {
+  const { charges } = pairCreditsToCharges({
+    charges: [
+      { txn_id: "before", date: "2026-08-05", amount: 50, period_key: "2026-08" },
+      { txn_id: "after",  date: "2026-08-08", amount: 50, period_key: "2026-08" },
+    ],
+    credits: [{ txn_id: "cr", date: "2026-08-06", amount: 50, period_key: "2026-08" }],
+  });
+  const by = Object.fromEntries(charges.map((c) => [c.txn_id, c.confirmed]));
+  assert.equal(by.before, 50);
+  assert.equal(by.after, 0);
+});
+
+test("the skew window still settles a charge that posts after its own credit", () => {
+  // Nothing precedes, so the fallback is the only candidate — which is exactly
+  // what the window is for. Statement date and post date come off different
+  // clocks and small inversions are real.
+  const inside = pairCreditsToCharges({
+    charges: [{ txn_id: "ch", date: "2026-08-06", amount: 100, period_key: "2026-08" }],
+    credits: [{ txn_id: "cr", date: "2026-08-01", amount: 100, period_key: "2026-08" }],
+  });
+  assert.equal(inside.charges[0].confirmed, 100, `pairs at exactly +${PAIR_DATE_SKEW_DAYS} days`);
+
+  const outside = pairCreditsToCharges({
+    charges: [{ txn_id: "ch", date: "2026-08-07", amount: 100, period_key: "2026-08" }],
+    credits: [{ txn_id: "cr", date: "2026-08-01", amount: 100, period_key: "2026-08" }],
+  });
+  assert.equal(outside.charges[0].confirmed, 0, "one day past the window does not pair");
+});

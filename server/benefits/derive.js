@@ -178,12 +178,25 @@ export function pairCreditsToCharges({ charges = [], credits = [] } = {}) {
   const chargeState = [...charges].sort(order).map((c) => ({ ...c, amount: Math.abs(num(c.amount)), confirmed: 0 }));
   const creditState = [...credits].sort(order).map((c) => ({ ...c, amount: Math.abs(num(c.amount)), standalone: 0 }));
 
-  // Which charges a credit is allowed to settle: everything on or before the
-  // credit's own date, plus PAIR_DATE_SKEW_DAYS beyond it to absorb
-  // statement-date vs post-date inversion. A row with no date at all is left
-  // eligible, as it always was — the total order below still decides which one
-  // is picked, so the result stays deterministic.
-  const settles = (charge, credit) =>
+  // A charge settles a credit when the charge came FIRST — that is the normal
+  // direction, and the credit is its reimbursement. The skew window exists only
+  // because the two dates come off different clocks (statement date vs post
+  // date), so a charge dated a little AFTER its credit can still be the same
+  // event.
+  //
+  // The window is a FALLBACK, never a peer. Selection below takes the latest
+  // qualifying charge, so admitting forward charges as equal candidates let an
+  // unrelated later charge outrank the true earlier one, and let a credit reach
+  // across a period boundary to confirm the next period's spend — the
+  // mis-attribution this whole model exists to prevent. Preceding charges are
+  // therefore always exhausted first, and the window is consulted only when
+  // nothing precedes.
+  //
+  // A row with no date at all stays eligible, as it always was; the total order
+  // still decides which is picked, so the result stays deterministic.
+  const precedes = (charge, credit) =>
+    !credit.date || !charge.date || charge.date <= credit.date;
+  const withinSkew = (charge, credit) =>
     !credit.date || !charge.date || charge.date <= addDaysIso(credit.date, PAIR_DATE_SKEW_DAYS);
 
   // Pass 1 — EXACT. For each credit oldest first, the latest untouched charge
@@ -193,12 +206,17 @@ export function pairCreditsToCharges({ charges = [], credits = [] } = {}) {
   // happen to sit nearer the credit.
   const remaining = [];
   for (const credit of creditState) {
-    let pick = null;
-    for (const charge of chargeState) {
-      if (charge.confirmed > 0 || !settles(charge, credit)) continue;
-      if (Math.abs(charge.amount - credit.amount) > PAIR_AMOUNT_TOLERANCE) continue;
-      pick = charge; // ascending order, so the last qualifying charge is the latest
-    }
+    const pickFrom = (eligible) => {
+      let found = null;
+      for (const charge of chargeState) {
+        if (charge.confirmed > 0 || !eligible(charge, credit)) continue;
+        if (Math.abs(charge.amount - credit.amount) > PAIR_AMOUNT_TOLERANCE) continue;
+        found = charge; // ascending order, so the last qualifying charge is the latest
+      }
+      return found;
+    };
+    // Preceding charges first; the skew window only if none precedes.
+    const pick = pickFrom(precedes) || pickFrom(withinSkew);
     if (pick) {
       // A credit settles the charge it followed, in full.
       pick.confirmed = pick.amount;
@@ -217,12 +235,21 @@ export function pairCreditsToCharges({ charges = [], credits = [] } = {}) {
   // through to residue and becomes standalone usage of ITS OWN period — which
   // is the annual bug (a January credit spending January's allowance for a
   // December charge) reintroduced through the side door.
-  const newestFirst = [...chargeState].reverse();
+  // Preceding charges newest-first (nearest the credit), then any the skew
+  // window admits, nearest-first — same fallback ordering as pass 1.
+  const candidatesFor = (credit) => {
+    const pre = [];
+    const skewed = [];
+    for (const charge of chargeState) {
+      if (precedes(charge, credit)) pre.push(charge);
+      else if (withinSkew(charge, credit)) skewed.push(charge);
+    }
+    return [...pre.reverse(), ...skewed];
+  };
   for (const credit of remaining) {
     let left = credit.amount;
-    for (const charge of newestFirst) {
+    for (const charge of candidatesFor(credit)) {
       if (left <= EPSILON) break;
-      if (!settles(charge, credit)) continue;
       const room = charge.amount - charge.confirmed;
       if (room <= EPSILON) continue;
       const take = Math.min(room, left);
@@ -263,7 +290,7 @@ export function deriveBenefitStats({ plans = [], aggregates = [], rows = [], mar
   const marksByBenefit = groupBy(marks, (m) => String(m.benefit_id));
   const aggIndex = new Map();
   for (const a of aggregates) {
-    aggIndex.set(`${a.benefit_id} ${a.period_key} ${a.is_credit ? "c" : "d"}`, a);
+    aggIndex.set(`${a.benefit_id}\x00${a.period_key}\x00${a.is_credit ? "c" : "d"}`, a);
   }
 
   const stats = {};
@@ -366,8 +393,8 @@ function deriveOne(plan, { rows, marks, aggIndex, asOf }) {
   // rows are a bounded sample and the aggregate is the exact total for the
   // period. This is the rollup concept, surviving as arithmetic with no stored
   // row left to orphan.
-  const chargeAgg = aggIndex.get(`${benefit.id} ${period.key} d`);
-  const creditAgg = aggIndex.get(`${benefit.id} ${period.key} c`);
+  const chargeAgg = aggIndex.get(`${benefit.id}\x00${period.key}\x00d`);
+  const creditAgg = aggIndex.get(`${benefit.id}\x00${period.key}\x00c`);
   // ...except for an anchored cycle, whose period is a slice of the scan window
   // chosen after the aggregate was computed, so no aggregate bucket describes
   // it. Its figure comes from the rows — sound here because the rows are the
