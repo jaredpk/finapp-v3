@@ -8,7 +8,8 @@ import useIsMobile from "../hooks/useIsMobile.js";
 import CatalogEditor from "../components/benefits/CatalogEditor.jsx";
 import MatchRuleTester from "../components/benefits/MatchRuleTester.jsx";
 import {
-  fmt, fmtDay, todayIso, statusMeta, periodLabel, verification, apiErrorMessage, BASIS_HELP,
+  fmt, fmtUnit, fmtUsedOf, unitFieldLabel, benefitUnit,
+  fmtDay, todayIso, statusMeta, periodLabel, verification, apiErrorMessage, BASIS_HELP,
 } from "../components/benefits/benefitsUtils.js";
 
 const TABS = [
@@ -297,6 +298,10 @@ function BenefitRow({ benefit, card, isMobile, busy, error, onMarkUsed, onUnmark
   const pct = limit > 0 ? Math.min(100, Math.max(0, Math.round((used / limit) * 100))) : 0;
   const ver = verification(benefit.verified_on);
   const basis = benefit.period?.basis;
+  // Every amount below is denominated in the BENEFIT's unit, not in dollars —
+  // three lounge visits are "3 of 10 visits", never "$3.00". (The matched
+  // transactions further down stay on `fmt`: those are real dollar amounts.)
+  const unit = benefitUnit(benefit.unit);
 
   return (
     <div style={{ ...styles.benefit, ...(meta.dashed ? styles.benefitDashed : {}) }}>
@@ -307,6 +312,17 @@ function BenefitRow({ benefit, card, isMobile, busy, error, onMarkUsed, onUnmark
             {periodLabel(benefit.period)}
             {basis && (
               <span title={BASIS_HELP[basis] || ""} style={styles.basisTag}>{basis}</span>
+            )}
+            {/* Which date the cycle actually counts from, when it is not the
+                card's anniversary. Otherwise a December-17 credit on a
+                September card looks like a period boundary bug. */}
+            {benefit.cycle_anchor && (
+              <span style={styles.basisTag} title="This benefit resets on its own cycle anchor, not on the card's anniversary date.">
+                anchor {fmtDay(benefit.cycle_anchor)}
+              </span>
+            )}
+            {unit !== "usd" && (
+              <span style={styles.basisTag} title="What this benefit's limit and usage are counted in.">{unit}</span>
             )}
             {benefit.carryover && (
               <span style={styles.basisTag} title="Captured for a later phase — carryover is not applied to any figure here.">
@@ -346,9 +362,9 @@ function BenefitRow({ benefit, card, isMobile, busy, error, onMarkUsed, onUnmark
       <div style={styles.amountRow}>
         <span style={styles.amountMain}>
           {meta.amountCaption ? (
-            <>{fmt(used)} seen of {fmt(limit)} — {meta.amountCaption}</>
+            <>{fmtUsedOf(used, limit, unit)} seen — {meta.amountCaption}</>
           ) : (
-            <>{fmt(used)} of {fmt(limit)} used{limit > 0 ? ` · ${fmt(benefit.amount_remaining)} left` : ""}</>
+            <>{fmtUsedOf(used, limit, unit)} used{limit > 0 ? ` · ${fmtUnit(benefit.amount_remaining, unit)} left` : ""}</>
           )}
         </span>
         <span style={styles.amountSub}>
@@ -404,6 +420,7 @@ function BenefitRow({ benefit, card, isMobile, busy, error, onMarkUsed, onUnmark
       {marking && (
         <MarkUsedForm
           benefit={benefit}
+          unit={unit}
           busy={busy}
           onCancel={() => setMarking(false)}
           onSubmit={async (body) => { await onMarkUsed(benefit, body); setMarking(false); }}
@@ -437,19 +454,23 @@ function BenefitRow({ benefit, card, isMobile, busy, error, onMarkUsed, onUnmark
   );
 }
 
-function MarkUsedForm({ benefit, busy, onCancel, onSubmit }) {
+function MarkUsedForm({ benefit, unit, busy, onCancel, onSubmit }) {
   const [amount, setAmount] = useState(
     benefit.amount_remaining != null ? String(benefit.amount_remaining) : String(benefit.amount_limit ?? "")
   );
   const [note, setNote] = useState("");
+  // The mark is recorded in the benefit's own unit, so the box says which one:
+  // "Visits", not "Amount", for a lounge allowance. Whole units step by 1 —
+  // half a visit is not a thing.
+  const counted = unit === "visits" || unit === "count";
 
   return (
     <div style={styles.markForm}>
-      <label style={styles.fieldLabel}>Amount</label>
+      <label style={styles.fieldLabel}>{unitFieldLabel(unit)}</label>
       <input
         style={{ ...styles.input, width: 100 }}
         type="number"
-        step="0.01"
+        step={counted ? "1" : "0.01"}
         value={amount}
         onChange={(e) => setAmount(e.target.value)}
       />

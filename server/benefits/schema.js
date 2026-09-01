@@ -30,6 +30,21 @@ export async function initBenefitsSchema(pool) {
       period_count INTEGER NOT NULL DEFAULT 1,
       period_basis TEXT NOT NULL DEFAULT 'calendar'
         CHECK (period_basis IN ('calendar','anniversary')),
+      -- This benefit's OWN reset date, overriding cb_cards.anniversary_date for
+      -- an anniversary-basis period. Real catalogs need it: a Venture X credit
+      -- renews December 17 whatever day the account was opened, and Platinum
+      -- Sky Club visits run February through January. NULL means "follow the
+      -- card", which is what every benefit did before this column existed.
+      cycle_anchor DATE,
+      -- What amount_limit and amount_used are DENOMINATED in, which also
+      -- decides how usage is measured (benefits/derive.js): usd sums matched
+      -- amounts, visits/count count matched transactions, and points cannot be
+      -- derived from transactions at all (dollars are not points) so it lives
+      -- on manual marks. CHECKed rather than free text for the same reason the
+      -- two period enums are: an unrecognised value would silently read as usd
+      -- and quietly turn a 10-visit allowance back into $10.
+      unit TEXT NOT NULL DEFAULT 'usd'
+        CHECK (unit IN ('usd','points','visits','count')),
       -- CAPTURED FOR A LATER PHASE, NOT APPLIED. Nothing reads this to move an
       -- unused amount into the next period: periods.js hands every period the
       -- full amount_limit regardless, and the catalog editor labels the control
@@ -90,6 +105,22 @@ export async function initBenefitsSchema(pool) {
       -- without re-nagging. Written only after the digest has actually gone out.
       UNIQUE (benefit_id, period_key, tier)
     );
+  `);
+
+  // ── Added columns ───────────────────────────────────────────────────────────
+  // CREATE TABLE IF NOT EXISTS says nothing about a table that already exists,
+  // so anything added after the first release is an idempotent ALTER as well as
+  // a line in the definition above (the audit_log pattern in db.js).
+  //
+  // The CHECK is dropped and re-added rather than guarded, because
+  // ADD CONSTRAINT has no IF NOT EXISTS: dropping first makes the pair a no-op
+  // on the second run and a repair on a database that somehow lost it.
+  await pool.query(`
+    ALTER TABLE cb_benefits ADD COLUMN IF NOT EXISTS cycle_anchor DATE;
+    ALTER TABLE cb_benefits ADD COLUMN IF NOT EXISTS unit TEXT NOT NULL DEFAULT 'usd';
+    ALTER TABLE cb_benefits DROP CONSTRAINT IF EXISTS cb_benefits_unit_check;
+    ALTER TABLE cb_benefits ADD CONSTRAINT cb_benefits_unit_check
+      CHECK (unit IN ('usd','points','visits','count'));
   `);
 
   // ── Migration off cb_usage ──────────────────────────────────────────────────

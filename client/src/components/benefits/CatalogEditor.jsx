@@ -1,7 +1,8 @@
 import React, { useState } from "react";
 import {
-  fmt, fmtDay, todayIso, periodLabel, verification, apiErrorMessage,
+  fmt, fmtUnit, fmtDay, todayIso, periodLabel, verification, apiErrorMessage,
   PERIOD_UNITS, PERIOD_BASES, BASIS_HELP,
+  BENEFIT_UNITS, UNIT_HELP, CYCLE_ANCHOR_HELP,
 } from "./benefitsUtils.js";
 
 // CRUD over the owner-maintained catalog: cards, their benefits, and the match
@@ -16,7 +17,8 @@ const emptyCard = () => ({
 
 const emptyBenefit = (card_id) => ({
   card_id, name: "", amount_limit: "", period_unit: "month", period_count: "1",
-  period_basis: "calendar", carryover: false, notes: "", verified_on: todayIso(),
+  period_basis: "calendar", cycle_anchor: "", unit: "usd",
+  carryover: false, notes: "", verified_on: todayIso(),
 });
 
 const numOrNull = (v) => (v === "" || v == null ? null : Number(v));
@@ -72,6 +74,8 @@ export default function CatalogEditor({
       period_unit: benefitForm.period_unit,
       period_count: numOrNull(benefitForm.period_count) ?? 1,
       period_basis: benefitForm.period_basis,
+      cycle_anchor: strOrNull(benefitForm.cycle_anchor),
+      unit: benefitForm.unit || "usd",
       carryover: !!benefitForm.carryover,
       notes: strOrNull(benefitForm.notes),
       verified_on: strOrNull(benefitForm.verified_on),
@@ -162,8 +166,14 @@ export default function CatalogEditor({
                     <div style={{ minWidth: 0, flex: 1 }}>
                       <p style={styles.benefitName}>{b.name}</p>
                       <p style={styles.benefitSub}>
-                        {fmt(b.amount_limit)} · {periodLabel({ unit: b.period_unit, count: b.period_count })} ·{" "}
+                        {fmtUnit(b.amount_limit, b.unit)} · {periodLabel({ unit: b.period_unit, count: b.period_count })} ·{" "}
                         <span title={BASIS_HELP[b.period_basis] || ""} style={styles.basisTag}>{b.period_basis}</span>
+                        {b.cycle_anchor ? (
+                          <>
+                            {" "}
+                            <span title={CYCLE_ANCHOR_HELP} style={styles.basisTag}>anchor {fmtDay(b.cycle_anchor)}</span>
+                          </>
+                        ) : ""}
                         {b.carryover ? " · carryover (not applied)" : ""}
                       </p>
                       <p style={{ ...styles.verified, color: ver.stale ? "var(--amber, #f59e0b)" : "var(--muted)" }}>
@@ -180,7 +190,8 @@ export default function CatalogEditor({
                           setBenefitForm({
                             id: b.id, card_id: card.id, name: b.name || "", amount_limit: b.amount_limit ?? "",
                             period_unit: b.period_unit || "month", period_count: String(b.period_count ?? 1),
-                            period_basis: b.period_basis || "calendar", carryover: !!b.carryover,
+                            period_basis: b.period_basis || "calendar", cycle_anchor: b.cycle_anchor || "",
+                            unit: b.unit || "usd", carryover: !!b.carryover,
                             notes: b.notes || "", verified_on: b.verified_on || "",
                           });
                         }}
@@ -341,6 +352,15 @@ function BenefitForm({ value, onChange, busy, error, isMobile, onSubmit, onCance
         <Field label="Amount limit">
           <input style={styles.input} type="number" step="0.01" value={value.amount_limit} onChange={(e) => set({ amount_limit: e.target.value })} placeholder="15" />
         </Field>
+        {/* The unit is not decoration: it decides how usage is MEASURED, not
+            only how it is printed. The hint spells the rule out per choice,
+            because "points is manual-only" is the one that would otherwise be
+            discovered as a benefit that never fills up. */}
+        <Field label="Unit" hint={UNIT_HELP[value.unit || "usd"]}>
+          <select style={styles.input} value={value.unit || "usd"} onChange={(e) => set({ unit: e.target.value })}>
+            {BENEFIT_UNITS.map((u) => <option key={u.value} value={u.value}>{u.label}</option>)}
+          </select>
+        </Field>
         <Field label="Period unit">
           <select style={styles.input} value={value.period_unit} onChange={(e) => set({ period_unit: e.target.value })}>
             {PERIOD_UNITS.map((u) => <option key={u.value} value={u.value}>{u.label}</option>)}
@@ -353,6 +373,9 @@ function BenefitForm({ value, onChange, busy, error, isMobile, onSubmit, onCance
           <select style={styles.input} value={value.period_basis} onChange={(e) => set({ period_basis: e.target.value })}>
             {PERIOD_BASES.map((b) => <option key={b.value} value={b.value}>{b.label}</option>)}
           </select>
+        </Field>
+        <Field label="Cycle anchor" hint={CYCLE_ANCHOR_HELP}>
+          <input style={styles.input} type="date" value={value.cycle_anchor || ""} onChange={(e) => set({ cycle_anchor: e.target.value })} />
         </Field>
         <Field label="Verified on" hint="The date you last checked this row against the card's benefits guide. Older than a year shows as stale.">
           <input style={styles.input} type="date" value={value.verified_on || ""} onChange={(e) => set({ verified_on: e.target.value })} />
@@ -373,7 +396,9 @@ function BenefitForm({ value, onChange, busy, error, isMobile, onSubmit, onCance
       <p style={styles.basisNote}>
         Getting the basis wrong silently corrupts every figure downstream: <b>calendar</b> credits reset on Jan 1
         (or on the calendar month/quarter boundary), <b>anniversary</b> credits reset on the card's account
-        anniversary.
+        anniversary — or on this benefit's own <b>cycle anchor</b>, if you set one. An anniversary benefit with
+        neither an anchor nor a card anniversary has no window to resolve at all, and the Status tab reports it
+        as <b>No cycle anchor</b> rather than pretending it is available.
       </p>
       {error && <p style={styles.formError}>{error}</p>}
       <div style={styles.formActions}>

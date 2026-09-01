@@ -13,7 +13,9 @@ const CARD_SELECT = `id, nickname, issuer, product, account_id,
   annual_fee::float AS annual_fee, created_at`;
 
 const BENEFIT_SELECT = `id, card_id, name, amount_limit::float AS amount_limit,
-  period_unit, period_count, period_basis, carryover, notes,
+  period_unit, period_count, period_basis,
+  TO_CHAR(cycle_anchor,'YYYY-MM-DD') AS cycle_anchor,
+  unit, carryover, notes,
   TO_CHAR(verified_on,'YYYY-MM-DD') AS verified_on, created_at`;
 
 const RULE_SELECT = `id, benefit_id, merchant_regex, amount_min::float AS amount_min,
@@ -47,7 +49,7 @@ export async function getCatalog() {
 export const CARD_FIELDS = ["nickname", "issuer", "product", "account_id", "anniversary_date", "annual_fee"];
 export const BENEFIT_FIELDS = [
   "card_id", "name", "amount_limit", "period_unit", "period_count",
-  "period_basis", "carryover", "notes", "verified_on",
+  "period_basis", "cycle_anchor", "unit", "carryover", "notes", "verified_on",
 ];
 export const RULE_FIELDS = ["benefit_id", "merchant_regex", "amount_min", "amount_max", "category", "direction"];
 

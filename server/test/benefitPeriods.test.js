@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { resolvePeriod, recentPeriods, evaluateBenefits, alertTiers, periodMonths } from "../benefits/periods.js";
+import {
+  resolvePeriod, recentPeriods, evaluateBenefits, alertTiers, periodMonths,
+  cycleAnchorFor, benefitUnit,
+} from "../benefits/periods.js";
 
 // The I/O-free half of card-benefit tracking: which window a benefit is in,
 // what its usage adds up to, and which nudge is due. No pg, no express, no
@@ -166,6 +169,166 @@ test("a Jan 31 anniversary + 1 month is the end of February, never March 3rd", (
   assert.equal(resolvePeriod(args, "2025-03-01").start, "2025-02-28");
   // March has a 31st, so the anniversary day returns — no permanent drift.
   assert.equal(resolvePeriod(args, "2025-04-02").start, "2025-03-31");
+});
+
+// ── Per-benefit cycle anchors ─────────────────────────────────────────────────
+// A benefit does not have to share its card's anniversary. Two real ones from
+// the owner's catalog: a Venture X credit that renews December 17, and Sky Club
+// visits on a cycle running February through January. The date math is
+// unchanged — resolveAnniversary already steps in whole months from an
+// arbitrary base — so what is under test is that the base comes from the
+// BENEFIT when it has one, and that both halves of the read agree about it.
+
+test("a December 17 annual anchor resolves the same window from either side of the year", () => {
+  const spec = { unit: "year", count: 1, basis: "anniversary", anniversaryDate: "2023-12-17" };
+  // Mid-cycle, from a January that is already inside the window that opened in
+  // the PREVIOUS calendar year, and from the following August.
+  for (const asOf of ["2026-01-05", "2026-08-23"]) {
+    assert.deepEqual(
+      { ...resolvePeriod(spec, asOf), daysLeft: undefined },
+      { key: "anniv:year:1:2025-12-17", start: "2025-12-17", end: "2026-12-16", daysLeft: undefined },
+      asOf
+    );
+  }
+  assert.equal(resolvePeriod(spec, "2026-01-05").daysLeft, 345);
+  assert.equal(resolvePeriod(spec, "2026-08-23").daysLeft, 115);
+});
+
+test("the December 17 cycle flips on the 17th itself, not on the 16th and not on Jan 1", () => {
+  const spec = { unit: "year", count: 1, basis: "anniversary", anniversaryDate: "2023-12-17" };
+  // The last day of the old period reads 0 days left, not -1 and not a new key.
+  assert.deepEqual(resolvePeriod(spec, "2026-12-16"), {
+    key: "anniv:year:1:2025-12-17", start: "2025-12-17", end: "2026-12-16", daysLeft: 0,
+  });
+  // And the next day is a different period, with a different key.
+  assert.deepEqual(resolvePeriod(spec, "2026-12-17"), {
+    key: "anniv:year:1:2026-12-17", start: "2026-12-17", end: "2027-12-16", daysLeft: 364,
+  });
+  // Jan 1 does nothing at all to an anchored cycle.
+  assert.equal(resolvePeriod(spec, "2026-12-31").key, resolvePeriod(spec, "2027-01-01").key);
+});
+
+test("a February-through-January cycle runs Feb 1 to Jan 31, whatever year it is read in", () => {
+  const spec = { unit: "year", count: 1, basis: "anniversary", anniversaryDate: "2024-02-01" };
+  assert.deepEqual(resolvePeriod(spec, "2026-08-23"), {
+    key: "anniv:year:1:2026-02-01", start: "2026-02-01", end: "2027-01-31", daysLeft: 161,
+  });
+  // January belongs to the cycle that opened LAST February, which is the whole
+  // point of the shape: a January visit is not the new year's allowance.
+  assert.deepEqual(resolvePeriod(spec, "2026-01-31"), {
+    key: "anniv:year:1:2025-02-01", start: "2025-02-01", end: "2026-01-31", daysLeft: 0,
+  });
+  assert.equal(resolvePeriod(spec, "2027-01-31").key, "anniv:year:1:2026-02-01");
+  assert.equal(resolvePeriod(spec, "2027-02-01").key, "anniv:year:1:2027-02-01");
+});
+
+test("the benefit's cycle anchor overrides the card's anniversary, and its absence falls back", () => {
+  // The one expression both halves of the read use, so buildWindows and
+  // evaluateBenefit cannot resolve two different windows for one benefit.
+  assert.equal(cycleAnchorFor({ cycle_anchor: "2023-12-17" }, { anniversary_date: "2019-09-14" }), "2023-12-17");
+  assert.equal(cycleAnchorFor({ cycle_anchor: null }, { anniversary_date: "2019-09-14" }), "2019-09-14");
+  assert.equal(cycleAnchorFor({}, {}), null);
+
+  // End to end: the card opened in September, the credit renews in December.
+  const anchored = evalOne({
+    cards: [card({ benefits: [benefit({ period_unit: "year", period_basis: "anniversary", cycle_anchor: "2023-12-17" })] })],
+  }, "2026-08-23");
+  assert.equal(anchored.period_key, "anniv:year:1:2025-12-17");
+  assert.equal(anchored.period_start, "2025-12-17");
+  assert.equal(anchored.cycle_anchor, "2023-12-17");
+
+  // Same benefit without the anchor follows the card's September anniversary.
+  const cardBased = evalOne({
+    cards: [card({ benefits: [benefit({ period_unit: "year", period_basis: "anniversary" })] })],
+  }, "2026-08-23");
+  assert.equal(cardBased.period_key, "anniv:year:1:2025-09-14");
+  assert.equal(cardBased.cycle_anchor, null);
+});
+
+test("an anniversary benefit with no anchor anywhere is never available", () => {
+  // THE HONESTY GATE, one level below insufficient-history. resolvePeriod falls
+  // back to a calendar window so there is still a key to mark against, but that
+  // window is this app's guess — reporting "nothing has matched this period
+  // yet" about it would be a claim over a period the owner never defined.
+  const cards = [card({
+    anniversary_date: null,
+    benefits: [benefit({ period_unit: "year", period_basis: "anniversary" })],
+  })];
+  const result = evalOne({ cards }, "2026-08-23");
+  assert.equal(result.status, "no-anchor");
+  assert.notEqual(result.status, "available");
+  // And it is not nagged about a deadline this app invented.
+  assert.deepEqual(alertTiers({ benefit: result, daysLeft: result.days_left, status: result.status }), []);
+
+  // Giving the benefit its own anchor is enough to fix it; so is giving the
+  // card one.
+  const fixedOnBenefit = evalOne({
+    cards: [card({ anniversary_date: null, benefits: [benefit({ period_unit: "year", period_basis: "anniversary", cycle_anchor: "2023-12-17" })] })],
+  }, "2026-08-23");
+  assert.equal(fixedOnBenefit.status, "available");
+  assert.equal(fixedOnBenefit.period_key, "anniv:year:1:2025-12-17");
+  assert.equal(evalOne({ cards: [card({ benefits: [benefit({ period_unit: "year", period_basis: "anniversary" })] })] }, "2026-08-23").status, "available");
+});
+
+test("a missing anchor outranks every other reading of the benefit", () => {
+  // Usage measured inside a guessed window is not a smaller problem than no
+  // usage in one: the figure describes a period nobody asked about either way.
+  const cards = [card({
+    anniversary_date: null,
+    benefits: [benefit({ period_unit: "year", period_basis: "anniversary" })],
+  })];
+  const used = evalOne({ cards, stats: { 10: stat({ amountUsed: 15, confirmedTotal: 15 }) } }, "2026-08-23");
+  assert.equal(used.status, "no-anchor");
+  // A calendar benefit on the same anniversary-less card is untouched.
+  const calendar = evalOne({
+    cards: [card({ anniversary_date: null, benefits: [benefit()] })],
+  }, "2026-08-23");
+  assert.equal(calendar.status, "available");
+  // months_n never had an anniversary to miss.
+  const anchoredCycle = evalOne({
+    cards: [card({ anniversary_date: null, benefits: [benefit({ period_unit: "months_n", period_count: 48, period_basis: "anniversary" })] })],
+    historyByAccount: { "acct-1": "2019-01-01" },
+  }, "2026-08-23");
+  assert.notEqual(anchoredCycle.status, "no-anchor");
+});
+
+// ── Units ─────────────────────────────────────────────────────────────────────
+
+test("a points benefit is manual-only until it is marked, however many rules it has", () => {
+  // Its usage cannot be derived at all — a transaction amount is dollars, and
+  // dollars are not points — so rules or no rules it has no automatic
+  // footprint, and `available` would promise an evaluation that never happens.
+  const cards = [card({ benefits: [benefit({ unit: "points", amount_limit: 25000 })] })];
+  const unmarked = evalOne({ cards, stats: { 10: stat() } }, "2026-08-23");
+  assert.equal(unmarked.status, "manual-only");
+  assert.equal(unmarked.unit, "points");
+  assert.equal(unmarked.amount_used, 0);
+
+  const marked = evalOne({
+    cards,
+    stats: { 10: stat({ manual: { amount: 10000, note: null, date: "2026-08-10" } }) },
+  }, "2026-08-23");
+  assert.equal(marked.amount_used, 10000);
+  assert.equal(marked.amount_remaining, 15000);
+  assert.equal(marked.confidence, "manual");
+  assert.equal(marked.status, "partially-used");
+});
+
+test("a benefit's unit reaches the response, and anything unrecognised reads as dollars", () => {
+  assert.equal(benefitUnit("visits"), "visits");
+  assert.equal(benefitUnit("USD"), "usd");
+  assert.equal(benefitUnit(undefined), "usd");
+  assert.equal(benefitUnit(null), "usd");
+  const visits = evalOne({
+    cards: [card({ benefits: [benefit({ unit: "visits", amount_limit: 10 })] })],
+    stats: { 10: stat({ amountUsed: 3 }) },
+  }, "2026-08-23");
+  assert.equal(visits.unit, "visits");
+  assert.equal(visits.amount_used, 3);
+  assert.equal(visits.amount_remaining, 7);
+  assert.equal(visits.status, "partially-used");
+  // A row from before the column existed still reads as dollars.
+  assert.equal(evalOne({ cards: [card({ benefits: [benefit()] })] }, "2026-08-23").unit, "usd");
 });
 
 test("an anniversary basis with no anniversary on file falls back to the calendar", () => {

@@ -12,10 +12,10 @@ import { buildDigestEmail } from "../alertEmail.js";
 // header encoding those messages go out with lives in gmail.js's sendMail for
 // the same reason — it can only be exercised against a real client.
 //
-// The item shape below — { benefit, card, amountRemaining, periodEnds,
-// daysLeft, tier } — is what phase 2's evaluation will emit. It is fixed here
+// The item shape below — { benefit, card, amountRemaining, unit, periodEnds,
+// daysLeft, tier } — is what phase 2's evaluation emits. It is fixed here
 // on purpose so the composition and the evaluation can be built against the
-// same contract.
+// same contract. `unit` is optional and means dollars when absent.
 
 const AMEX = {
   benefit: "Uber Cash",
@@ -109,6 +109,70 @@ test("the subject counts the items, totals what is unused and leads with the nea
   assert.equal(email.subject, "2 card benefits expiring — $315.00 unused, soonest in 8 days");
   assert.match(email.text, /Total unused: \$315\.00/);
   assert.match(email.html, /Total unused: \$315\.00/);
+});
+
+// ── Units ─────────────────────────────────────────────────────────────────────
+
+test("a benefit counted in visits is not reported in dollars", () => {
+  // "$3.00 remaining" for three lounge visits is not a rounding problem, it is
+  // the wrong sentence — and the whole point of an expiry nudge is that the
+  // reader can act on it.
+  const email = buildDigestEmail({
+    items: [{ ...AMEX, benefit: "Sky Club visits", amountRemaining: 3, unit: "visits" }],
+    today: "2026-08-23",
+  });
+  assert.equal(email.subject, "Card benefit expiring: Sky Club visits (3 visits) — in 8 days");
+  assert.match(email.text, /Sky Club visits: 3 visits left/);
+  assert.match(email.html, /3 visits left/);
+  assert.doesNotMatch(email.text, /\$3\.00/);
+
+  // One visit is singular; a plain count carries no noun at all.
+  assert.match(
+    buildDigestEmail({ items: [{ ...AMEX, amountRemaining: 1, unit: "visits" }], today: "2026-08-23" }).subject,
+    /\(1 visit\)/
+  );
+  assert.match(
+    buildDigestEmail({ items: [{ ...AMEX, amountRemaining: 4, unit: "count" }], today: "2026-08-23" }).subject,
+    /\(4\)/
+  );
+});
+
+test("points are points, with a separator and no dollar sign", () => {
+  const email = buildDigestEmail({
+    items: [{ ...VENTURE, benefit: "Transfer bonus", amountRemaining: 10000, unit: "points" }],
+    today: "2026-08-23",
+  });
+  assert.match(email.subject, /\(10,000 pts\)/);
+  assert.match(email.text, /10,000 pts left/);
+  assert.doesNotMatch(email.text, /\$10,000/);
+});
+
+test("only dollars are added into the headline total, and it disappears when there are none", () => {
+  // $300 of credit plus 13 lounge visits is not $313 of anything, so the total
+  // covers the money items and says nothing about the rest.
+  const mixed = buildDigestEmail({
+    items: [VENTURE, { ...AMEX, benefit: "Sky Club visits", amountRemaining: 13, unit: "visits" }],
+    today: "2026-08-23",
+  });
+  assert.equal(mixed.subject, "2 card benefits expiring — $300.00 unused, soonest in 8 days");
+  assert.match(mixed.text, /Total unused: \$300\.00/);
+  assert.match(mixed.text, /13 visits left/);
+
+  const noMoney = buildDigestEmail({
+    items: [
+      { ...VENTURE, amountRemaining: 2, unit: "visits" },
+      { ...AMEX, amountRemaining: 5000, unit: "points" },
+    ],
+    today: "2026-08-23",
+  });
+  assert.equal(noMoney.subject, "2 card benefits expiring, soonest in 8 days");
+  assert.doesNotMatch(noMoney.text, /Total unused/);
+  assert.doesNotMatch(noMoney.html, /Total unused/);
+});
+
+test("an item with no unit at all is still money, exactly as before", () => {
+  const email = buildDigestEmail({ items: [AMEX, { ...AMEX, unit: undefined }], today: "2026-08-23" });
+  assert.match(email.subject, /\$30\.00 unused/);
 });
 
 test("amounts over a thousand carry a separator, and cents are never dropped", () => {

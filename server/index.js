@@ -905,6 +905,9 @@ app.post("/api/alerts/run", requireApiKeyOrAuth, async (req, res) => {
             benefit: broken ? `${benefit.name} — a match rule is broken, usage cannot be evaluated` : benefit.name,
             card: card.nickname,
             amountRemaining: benefit.amount_remaining,
+            // The benefit's own denomination, so the digest says "3 visits
+            // left" rather than "$3.00 left" for a lounge allowance.
+            unit: benefit.unit,
             periodEnds: benefit.period_end,
             daysLeft: benefit.days_left,
             tier: unsent[0],

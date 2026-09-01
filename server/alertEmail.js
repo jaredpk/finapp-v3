@@ -20,6 +20,26 @@ function money(amount) {
   return `$${value.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}`;
 }
 
+const groups3 = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+
+// An amount in the BENEFIT's own unit, not in dollars.
+//
+// Card benefits are not all money: a Sky Club allowance is counted in visits
+// and a transfer bonus in points, and "$3.00 remaining" for three lounge visits
+// is not a rounding problem, it is the wrong sentence. The unit travels on the
+// item (index.js reads it off the status payload); anything unrecognised — an
+// item composed before units existed, most of all — falls back to dollars,
+// which is what every item meant until now.
+function unitAmount(amount, unit) {
+  const value = Number(amount) || 0;
+  if (unit === "points") return `${groups3(Math.round(value * 100) / 100)} pts`;
+  if (unit === "visits") return `${groups3(Math.round(value))} visit${Math.round(value) === 1 ? "" : "s"}`;
+  if (unit === "count") return groups3(Math.round(value));
+  return money(value);
+}
+
+const itemAmount = (item) => unitAmount(item?.amountRemaining, item?.unit);
+
 // "in 7 days" / "in 1 day" / "today". Anything past due reads as today rather
 // than as a negative count — an alert that says "-2 days" looks like a bug and
 // gets ignored, which is the one outcome an expiry nudge cannot afford.
@@ -62,8 +82,9 @@ function groupByCard(items) {
 }
 
 // Composes the digest. `items` are
-// { benefit, card, amountRemaining, periodEnds, daysLeft, tier } — the shape
-// phase 2's evaluation will emit.
+// { benefit, card, amountRemaining, unit, periodEnds, daysLeft, tier } — the
+// shape phase 2's evaluation emits. `unit` is the benefit's own denomination
+// (usd | points | visits | count) and defaults to dollars when absent.
 //
 // Returns null when there is nothing to say. Silence is the correct output for
 // an empty list: a daily "you have 0 expiring credits" email is how a mailbox
@@ -73,7 +94,12 @@ export function buildDigestEmail({ items, today } = {}) {
   if (list.length === 0) return null;
 
   const asOf = formatDate(today);
-  const total = list.reduce((sum, item) => sum + (Number(item.amountRemaining) || 0), 0);
+  // DOLLAR items only. Visits and points are not money and cannot be added to
+  // it — a total of "$313.00" over $300 of credits and 13 lounge visits is a
+  // number that describes nothing — so the headline total covers the usd items
+  // and simply goes unsaid when there are none.
+  const usdItems = list.filter((item) => (item.unit ?? "usd") === "usd");
+  const total = usdItems.reduce((sum, item) => sum + (Number(item.amountRemaining) || 0), 0);
   // Number(undefined) is NaN, and one NaN poisons a Math.min chain — so a
   // missing daysLeft is skipped rather than allowed to swallow the real minimum.
   const soonest = list.reduce((min, item) => {
@@ -82,8 +108,9 @@ export function buildDigestEmail({ items, today } = {}) {
   }, Infinity);
 
   const subject = list.length === 1
-    ? `Card benefit expiring: ${list[0].benefit} (${money(list[0].amountRemaining)}) — ${daysPhrase(list[0].daysLeft)}`
-    : `${list.length} card benefits expiring — ${money(total)} unused` +
+    ? `Card benefit expiring: ${list[0].benefit} (${itemAmount(list[0])}) — ${daysPhrase(list[0].daysLeft)}`
+    : `${list.length} card benefits expiring` +
+      (usdItems.length > 0 ? ` — ${money(total)} unused` : "") +
       (Number.isFinite(soonest) ? `, soonest ${daysPhrase(soonest)}` : "");
 
   const groups = groupByCard(list);
@@ -94,13 +121,13 @@ export function buildDigestEmail({ items, today } = {}) {
     for (const b of benefits) {
       const ends = formatDate(b.periodEnds);
       textLines.push(
-        `  - ${b.benefit}: ${money(b.amountRemaining)} left, expires ${daysPhrase(b.daysLeft)}` +
+        `  - ${b.benefit}: ${itemAmount(b)} left, expires ${daysPhrase(b.daysLeft)}` +
         (ends ? ` (period ends ${ends})` : "")
       );
     }
     textLines.push("");
   }
-  if (list.length > 1) textLines.push(`Total unused: ${money(total)}`, "");
+  if (list.length > 1 && usdItems.length > 0) textLines.push(`Total unused: ${money(total)}`, "");
   textLines.push("Sent by FinApp.");
   const text = textLines.join("\n");
 
@@ -110,7 +137,7 @@ export function buildDigestEmail({ items, today } = {}) {
     const rows = benefits.map((b) => {
       const ends = formatDate(b.periodEnds);
       return `<li style="margin:0 0 8px 0;">
-        <strong>${escapeHtml(b.benefit)}</strong> — ${escapeHtml(money(b.amountRemaining))} left,
+        <strong>${escapeHtml(b.benefit)}</strong> — ${escapeHtml(itemAmount(b))} left,
         expires ${escapeHtml(daysPhrase(b.daysLeft))}${ends ? ` <span style="color:#6b7280;">(period ends ${escapeHtml(ends)})</span>` : ""}
       </li>`;
     }).join("\n");
@@ -123,7 +150,7 @@ ${rows}
   const html = `<div style="font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;max-width:560px;color:#111827;">
   <p style="font-size:14px;color:#6b7280;margin:0 0 4px 0;">${asOf ? `Unused card benefits as of ${escapeHtml(asOf)}` : "Unused card benefits"}</p>
 ${htmlGroups}
-${list.length > 1 ? `  <p style="font-size:14px;margin:20px 0 0 0;"><strong>Total unused: ${escapeHtml(money(total))}</strong></p>` : ""}
+${list.length > 1 && usdItems.length > 0 ? `  <p style="font-size:14px;margin:20px 0 0 0;"><strong>Total unused: ${escapeHtml(money(total))}</strong></p>` : ""}
   <p style="font-size:12px;color:#9ca3af;margin:24px 0 0 0;">Sent by FinApp.</p>
 </div>`;
 

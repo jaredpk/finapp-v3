@@ -648,6 +648,168 @@ test("a months_n mark anchors the cycle even though its key no longer matches", 
 // an unrelated later charge outranked the true earlier one, and a credit could
 // reach across a period boundary to confirm the next period's spend. The whole
 // suite passed while that was live, hence these.
+// ── Per-benefit cycle anchors ─────────────────────────────────────────────────
+
+test("the scan window follows the benefit's own anchor, not the card's anniversary", () => {
+  // The card was opened in September; this credit renews December 17. If
+  // buildWindows scanned the September window and evaluateBenefit reported the
+  // December one (or the reverse), the amount would be measured over a period
+  // nobody asked about — so the two halves share cycleAnchorFor and this test
+  // is what holds them together.
+  const cards = [card({
+    benefits: [benefit({
+      period_unit: "year", period_basis: "anniversary",
+      cycle_anchor: "2023-12-17", amount_limit: 300,
+    })],
+  })];
+  const { windows } = scan(cards, [], "2026-08-23");
+  assert.equal(windows[0].period_key, "anniv:year:1:2025-12-17");
+  assert.equal(windows[0].start_date, "2025-12-17");
+  assert.equal(windows[0].end_date, "2026-12-16");
+  // One preceding period is always in scope, and it is the anchored one too.
+  assert.equal(windows[1].period_key, "anniv:year:1:2024-12-17");
+
+  // A March charge falls in the December-anchored year, and is counted there.
+  const result = one({
+    cards,
+    txns: [txn({ date: "2026-03-02", amount: 300, merchant: "TRAVEL" })],
+  }, "2026-08-23");
+  assert.equal(result.period_key, "anniv:year:1:2025-12-17");
+  assert.equal(result.amount_used, 300);
+  assert.equal(result.status, "used-unconfirmed");
+
+  // The same charge dated a week before the anchor belongs to the PREVIOUS
+  // year, so this one still reads unused.
+  const before = one({
+    cards,
+    txns: [txn({ date: "2025-12-10", amount: 300, merchant: "TRAVEL" })],
+  }, "2026-08-23");
+  assert.equal(before.amount_used, 0);
+  assert.equal(before.status, "available");
+});
+
+test("a February-through-January cycle counts a January charge against the year that opened in February", () => {
+  const cards = [card({
+    benefits: [benefit({
+      period_unit: "year", period_basis: "anniversary",
+      cycle_anchor: "2024-02-01", unit: "visits", amount_limit: 10,
+    })],
+  })];
+  const result = one({
+    cards,
+    txns: [txn({ txn_id: "t1", date: "2026-01-08", amount: 59, merchant: "SKY CLUB" })],
+  }, "2026-01-20");
+  assert.equal(result.period_key, "anniv:year:1:2025-02-01");
+  assert.equal(result.period_start, "2025-02-01");
+  assert.equal(result.period_end, "2026-01-31");
+  assert.equal(result.amount_used, 1);
+});
+
+// ── Units ─────────────────────────────────────────────────────────────────────
+
+test("a visits benefit counts its matched transactions instead of summing them", () => {
+  // Three lounge visits against a 10-visit allowance are 3 of 10. Summing the
+  // dollar amounts would answer a question nobody asked — and would report the
+  // benefit fully used the moment the charges passed $10.
+  const cards = [card({ benefits: [benefit({ unit: "visits", amount_limit: 10, name: "Sky Club visits" })] })];
+  const result = one({
+    cards,
+    txns: [
+      txn({ txn_id: "v1", date: "2026-08-03", amount: 59, merchant: "DELTA SKY CLUB" }),
+      txn({ txn_id: "v2", date: "2026-08-11", amount: 59, merchant: "DELTA SKY CLUB" }),
+      txn({ txn_id: "v3", date: "2026-08-19", amount: 79, merchant: "DELTA SKY CLUB" }),
+    ],
+  }, "2026-08-23");
+  assert.equal(result.unit, "visits");
+  assert.equal(result.amount_used, 3);              // three visits, not $197
+  assert.equal(result.amount_remaining, 7);
+  assert.equal(result.status, "partially-used");
+  assert.equal(result.matches.length, 3);
+
+  // The tenth visit fills the allowance; the dollars never did.
+  const full = one({
+    cards,
+    txns: Array.from({ length: 10 }, (_, i) => txn({
+      txn_id: `v${i}`, date: `2026-08-0${(i % 9) + 1}`, amount: 59, merchant: "DELTA SKY CLUB",
+    })),
+  }, "2026-08-23");
+  assert.equal(full.amount_used, 10);
+  assert.equal(full.status, "used-unconfirmed");
+});
+
+test("a posted credit confirms a counted visit rather than counting as another one", () => {
+  // The count-shaped version of "charges and the credits paired to them are
+  // never summed": a refund is the same event as its charge, not a second use.
+  const cards = [card({ benefits: [benefit({ unit: "visits", amount_limit: 10 })] })];
+  const result = one({
+    cards,
+    txns: [
+      txn({ txn_id: "v1", date: "2026-08-03", amount: 59, merchant: "DELTA SKY CLUB" }),
+      txn({ txn_id: "c1", date: "2026-08-09", amount: -59, merchant: "DELTA SKY CLUB CREDIT" }),
+    ],
+  }, "2026-08-23");
+  assert.equal(result.amount_used, 1);
+  assert.equal(result.confidence, "confirmed");
+  assert.equal(result.matches.length, 2); // both listed as evidence
+});
+
+test("a count benefit reads its uses, and a plain count reports no unit noun", () => {
+  const cards = [card({ benefits: [benefit({ unit: "count", amount_limit: 5 })] })];
+  const result = one({
+    cards,
+    txns: [
+      txn({ txn_id: "u1", date: "2026-08-03", amount: 12.5 }),
+      txn({ txn_id: "u2", date: "2026-08-14", amount: 200 }),
+    ],
+  }, "2026-08-23");
+  assert.equal(result.unit, "count");
+  assert.equal(result.amount_used, 2);
+  assert.equal(result.amount_remaining, 3);
+});
+
+test("a points benefit never sums its matched transactions, and reads manual-only until marked", () => {
+  // $250 of matched spend is not 250 points. There is no rate in this app to
+  // convert one into the other, so the transactions are listed as evidence and
+  // contribute nothing at all.
+  const cards = [card({ benefits: [benefit({ unit: "points", amount_limit: 25000, name: "Transfer bonus" })] })];
+  const result = one({
+    cards,
+    txns: [
+      txn({ txn_id: "p1", date: "2026-08-04", amount: 250, merchant: "AIRLINE" }),
+      txn({ txn_id: "p2", date: "2026-08-14", amount: 125, merchant: "AIRLINE" }),
+    ],
+  }, "2026-08-23");
+  assert.equal(result.unit, "points");
+  assert.equal(result.amount_used, 0);
+  assert.equal(result.amount_remaining, 25000);
+  assert.equal(result.status, "manual-only");
+  assert.equal(result.confidence, "none");
+  // Still evidence, even though it is not usage.
+  assert.deepEqual(result.matches.map((m) => m.txn_id), ["p1", "p2"]);
+
+  // The owner's mark is the only thing that moves it.
+  const marked = one({
+    cards,
+    txns: [txn({ txn_id: "p1", date: "2026-08-04", amount: 250, merchant: "AIRLINE" })],
+    marks: [{ benefit_id: 10, period_key: "cal:month:1:2026-08", amount: 25000, note: null, created_at: "2026-08-20" }],
+  }, "2026-08-23");
+  assert.equal(marked.amount_used, 25000);
+  assert.equal(marked.status, "used");
+  assert.equal(marked.confidence, "manual");
+});
+
+test("a credit-only points benefit still contributes nothing", () => {
+  // The one path by which a credit counts as money is standalone residue. In
+  // points that path is closed too: the residue is dollars.
+  const cards = [card({ benefits: [benefit({ unit: "points", amount_limit: 10000 })] })];
+  const result = one({
+    cards,
+    txns: [txn({ txn_id: "c1", date: "2026-08-09", amount: -100, merchant: "AIRLINE CREDIT" })],
+  }, "2026-08-23");
+  assert.equal(result.amount_used, 0);
+  assert.equal(result.status, "manual-only");
+});
+
 test("a credit settles the charge that preceded it, not a later lookalike", () => {
   const { charges } = pairCreditsToCharges({
     charges: [

@@ -19,7 +19,10 @@
 // own — so the two things most likely to be wrong (which credit settles which
 // charge, and what that adds up to) are unit-testable without a database
 // (test/benefitDerive.test.js).
-import { resolvePeriod, recentPeriods, toDateString, addDaysIso, hasCriteria } from "./periods.js";
+import {
+  resolvePeriod, recentPeriods, toDateString, addDaysIso, hasCriteria,
+  cycleAnchorFor, benefitUnit, isCountUnit, isManualUnit,
+} from "./periods.js";
 
 // How far back a read looks for the charge a lagging statement credit settles.
 //
@@ -85,11 +88,16 @@ const num = (v) => {
   return Number.isFinite(n) ? n : 0;
 };
 
+// The anniversary base is the BENEFIT's cycle_anchor when it has one and the
+// card's anniversary_date otherwise — cycleAnchorFor, imported rather than
+// re-expressed, because periods.js#evaluateBenefit asks the same question and
+// the two must not be able to disagree. A window scanned here and a window
+// reported there would measure an amount against a period nobody asked about.
 const periodSpec = (benefit, card, anchorDate = null) => ({
   unit: benefit.period_unit,
   count: benefit.period_count,
   basis: benefit.period_basis,
-  anniversaryDate: card?.anniversary_date ?? null,
+  anniversaryDate: cycleAnchorFor(benefit, card),
   anchorDate,
 });
 
@@ -405,14 +413,51 @@ function deriveOne(plan, { rows, marks, aggIndex, asOf }) {
     : num(chargeAgg?.total);
   const standaloneTotal = periodCredits.reduce((sum, c) => sum + num(c.standalone), 0);
 
-  // Charges and the credits paired to them are NEVER summed — a paired credit
-  // contributes only to confirmedTotal. This is what makes the dropped-charge
-  // regression impossible: there is no per-row confirmed-vs-charging bucket for
-  // a stamped charge to fall out of, and a charge always carries its amount.
-  const amountUsed = round2(chargeTotal + standaloneTotal);
-  const confirmedTotal = round2(
-    periodCharges.reduce((sum, c) => sum + num(c.confirmed), 0) + standaloneTotal
-  );
+  // ── How usage is MEASURED, which is the benefit's unit's business ───────────
+  //
+  // `usd` is the original behaviour and the default: charges and the credits
+  // paired to them are NEVER summed — a paired credit contributes only to
+  // confirmedTotal. That is what makes the dropped-charge regression
+  // impossible: there is no per-row confirmed-vs-charging bucket for a stamped
+  // charge to fall out of, and a charge always carries its amount.
+  //
+  // `visits` / `count` measure ROWS instead. A 10-visit allowance with three
+  // matching transactions is 3 of 10, not the $3-ish their amounts happen to
+  // add up to, so the aggregate's COUNT is read where the SUM is read for
+  // dollars — a branch, not a second query. Only CHARGES are counted: a posted
+  // credit is the same event as the charge it settles, so counting it too would
+  // record one lounge visit twice, exactly as summing both would double-count
+  // one dollar. An unpaired credit is not a visit of its own either — there is
+  // no "standalone visit" a refund could represent — so residue adds nothing
+  // here.
+  //
+  // `points` measures NOTHING automatically. A transaction amount is
+  // denominated in dollars, and folding dollars into a points allowance is a
+  // category error rather than an approximation: $250 of spend is not 250
+  // points, and this app holds no rate to convert it with. So the matched
+  // transactions stay in `matches` as evidence and contribute zero, and with no
+  // manual mark periods.js reports the benefit `manual-only`.
+  const denomination = benefitUnit(benefit.unit);
+  let amountUsed;
+  let confirmedTotal;
+  if (isManualUnit(denomination)) {
+    amountUsed = 0;
+    confirmedTotal = 0;
+  } else if (isCountUnit(denomination)) {
+    // From the aggregate for the same reason the dollar total is: the rows are
+    // a bounded sample, the aggregate is the exact answer for the period. (An
+    // anchored cycle has no aggregate bucket for its window — see above — so it
+    // counts the rows, which are complete whenever `overflow` is null.)
+    amountUsed = anchored ? periodCharges.length : num(chargeAgg?.count);
+    // The count-shaped reading of "every counted unit has a posted credit
+    // behind it": how many of the counted charges are fully settled.
+    confirmedTotal = periodCharges.filter((c) => num(c.confirmed) + EPSILON >= c.amount).length;
+  } else {
+    amountUsed = round2(chargeTotal + standaloneTotal);
+    confirmedTotal = round2(
+      periodCharges.reduce((sum, c) => sum + num(c.confirmed), 0) + standaloneTotal
+    );
+  }
 
   // Every matched transaction in the period, charges and credits alike, in
   // date order — the credit is evidence even when its money belongs to an

@@ -151,6 +151,78 @@ export function resolvePeriod({ unit, count, basis, anniversaryDate, anchorDate 
   return resolveCalendar(unit, count, len, now);
 }
 
+// ── The anniversary base ──────────────────────────────────────────────────────
+// Which date an `anniversary`-basis period counts from.
+//
+// It used to be the CARD's anniversary_date, unconditionally. Real catalogs do
+// not work that way: a Venture X credit renews on December 17 whatever day the
+// account was opened, and Platinum Sky Club visits run February through
+// January. So a benefit may carry its own `cycle_anchor`, and the card's
+// anniversary is only the fallback for the benefits that really do follow it.
+//
+// resolveAnniversary needs no change — it already steps in whole-month
+// increments from an arbitrary base — so this is the ONLY place the base is
+// chosen, and derive.js imports it rather than repeating the expression. Two
+// answers to "which window is this benefit in" is the failure this feature
+// cannot have: buildWindows scans one window and evaluateBenefit reports
+// another, and the amount is measured over a window nobody asked about.
+//
+// NOTE ON EDITING AN ANCHOR: the period key embeds the window START
+// (`anniv:year:1:2025-12-17`), so two anchors are two key spaces — correctly,
+// because they are two different windows. The non-obvious consequence is that
+// changing a benefit's cycle_anchor ABANDONS the current period's cb_alerts
+// rows (and its cb_manual_marks) under the old key: they are still there, they
+// just no longer describe any window that will be evaluated again. Harmless —
+// the same property that stops a re-shaped period from inheriting the old
+// period's marks — but it does mean an alert already sent for the old window
+// can fire once more under the new one.
+export const cycleAnchorFor = (benefit, card) =>
+  toDateString(benefit?.cycle_anchor ?? card?.anniversary_date ?? null);
+
+// An `anniversary` benefit with NO base at all — no cycle_anchor on the benefit
+// and no anniversary_date on the card — has no line to count cardmember years
+// from. resolvePeriod falls back to the calendar so the response still carries
+// a period key to mark against, but that window is a guess, and reporting
+// "nothing has matched this period yet" about a guessed window is the
+// confidently-wrong answer this feature exists to prevent. evaluateBenefit
+// turns this into the `no-anchor` status instead of letting it reach
+// `available`.
+export const anniversaryUnresolved = (benefit, card) =>
+  benefit?.period_basis === "anniversary" &&
+  benefit?.period_unit !== "months_n" &&
+  !cycleAnchorFor(benefit, card);
+
+// ── Benefit units ─────────────────────────────────────────────────────────────
+// What a benefit's amount_limit and amount_used are DENOMINATED in. Not every
+// benefit is dollars: a 10-visit lounge allowance and a 10,000-point bonus are
+// both real catalog rows, and both are nonsense when summed as money.
+//
+// The unit drives display AND how usage is measured (see derive.js):
+//
+//   usd     amount_used is the SUM of the matched transaction amounts — the
+//           behaviour every benefit had before units existed.
+//   visits  amount_used is the COUNT of matching transactions, one unit each,
+//   count   not the sum of their amounts. Summing dollars there would answer a
+//           question nobody asked: three lounge visits are 3, not $3.
+//   points  CANNOT be derived at all. A transaction amount is denominated in
+//           dollars, and adding dollars into a points allowance is a category
+//           error, not an approximation — $250 of spend is not 250 points, and
+//           there is no rate in this app to convert it with. Usage comes from
+//           the owner's manual mark alone; matched transactions are still
+//           listed as evidence but contribute nothing.
+export const BENEFIT_UNITS = ["usd", "points", "visits", "count"];
+
+// Anything unrecognised reads as `usd`: a row written before this column
+// existed, or one hand-edited past the CHECK constraint, keeps the behaviour it
+// has always had rather than silently becoming a count.
+export const benefitUnit = (value) => (BENEFIT_UNITS.includes(value) ? value : "usd");
+
+// Usage is rows, not dollars.
+export const isCountUnit = (value) => benefitUnit(value) === "visits" || benefitUnit(value) === "count";
+
+// Usage cannot be derived from transactions at all — manual marks only.
+export const isManualUnit = (value) => benefitUnit(value) === "points";
+
 // ── recentPeriods ─────────────────────────────────────────────────────────────
 // The current period, every preceding period that reaches back into the last
 // `lookbackDays`, AND — regardless of length — at least `minPrevious` of them.
@@ -315,7 +387,10 @@ export const hasCriteria = (rule) =>
 // a benefit they cannot act on trains the mailbox to ignore this sender — but
 // alertTiers gives it its own tier instead of pure silence, because a benefit
 // whose rule no longer runs is worth exactly one message per period.
-const NEVER_ALERT = new Set(["used", "used-unconfirmed", "insufficient-history", "rule-error"]);
+// `no-anchor` joins them for the same reason as `insufficient-history`: the
+// window the figure would be quoted against was never resolved, so an expiry
+// nudge would name a deadline this app invented.
+const NEVER_ALERT = new Set(["used", "used-unconfirmed", "insufficient-history", "rule-error", "no-anchor"]);
 
 // cards → the `cards` array of GET /api/benefits/status.
 //
@@ -378,6 +453,9 @@ function evaluateBenefit(benefit, card, stat, historyStart, today, ruleError) {
   const unit = benefit.period_unit;
   const count = Number(benefit.period_count) || 1;
   const basis = benefit.period_basis || "calendar";
+  // What amount_limit / amount_used are denominated in. `usd` for anything this
+  // build does not recognise, so an older row behaves exactly as it always did.
+  const denomination = benefitUnit(benefit.unit);
 
   // derive.js already resolved this benefit's window (it had to, to build the
   // scan windows and to pick the anchor of a months_n cycle out of the matched
@@ -385,7 +463,7 @@ function evaluateBenefit(benefit, card, stat, historyStart, today, ruleError) {
   // must only have one, so the derived period is used when it is there and
   // recomputed only for a benefit derive never saw.
   const period = stat?.period || resolvePeriod(
-    { unit, count, basis, anniversaryDate: card.anniversary_date, anchorDate: null },
+    { unit, count, basis, anniversaryDate: cycleAnchorFor(benefit, card), anchorDate: null },
     today
   );
 
@@ -436,7 +514,11 @@ function evaluateBenefit(benefit, card, stat, historyStart, today, ruleError) {
     // must clear history coverage before it is allowed to claim `available`:
     // no history for the account, or a period that opened before coverage did,
     // means we cannot see the window and must say so.
-    if (ruleCount === 0) status = "manual-only";
+    // A points benefit joins the no-rules case: its usage cannot be derived
+    // from transactions at ALL (dollars are not points — see BENEFIT_UNITS), so
+    // it has no automatic footprint however many rules it carries, and the
+    // matched transactions it does list are evidence, not usage.
+    if (ruleCount === 0 || isManualUnit(denomination)) status = "manual-only";
     else if (!historyStart || (period.start && period.start < historyStart)) status = "insufficient-history";
     else status = "available";
   } else {
@@ -467,11 +549,27 @@ function evaluateBenefit(benefit, card, stat, historyStart, today, ruleError) {
   else if (stat?.overflow) ruleErrorText = stat.overflow;
   if (ruleErrorText) status = "rule-error";
 
+  // And the same gate one level lower down: a benefit that resets on an
+  // anniversary nobody has given us has no window at all. resolvePeriod hands
+  // back a calendar window so there is still a key to mark against, but that
+  // window is this app's guess, and every figure above was measured inside it —
+  // so `available` here would be "nothing has matched this period yet" about a
+  // period the owner never defined. Applied LAST, after rule-error, because a
+  // rule that cannot run is still a smaller hole than a window that was never
+  // resolved: there is no window to name the rule's answer against.
+  if (anniversaryUnresolved(benefit, card)) status = "no-anchor";
+
   return {
     id: benefit.id,
     name: benefit.name,
     amount_limit: numOrNull(benefit.amount_limit),
+    // What amount_limit, amount_used and amount_remaining are counted in, so
+    // the client and the digest never render three lounge visits as "$3.00".
+    unit: denomination,
     period: { unit, count, basis },
+    // The benefit's own reset date, overriding the card's anniversary for an
+    // anniversary-basis period. Null means it follows the card.
+    cycle_anchor: toDateString(benefit.cycle_anchor),
     // Captured for a later phase and returned as stored: NOTHING below applies
     // it. An unused amount does not roll into the next period — every period's
     // allowance is `amount_limit`, whatever the previous period left on the

@@ -11,7 +11,7 @@ import {
   matchTest, assertValidRegex,
   CARD_FIELDS, BENEFIT_FIELDS, RULE_FIELDS,
 } from "./repository.js";
-import { evaluateBenefits, toDateString, hasCriteria } from "./periods.js";
+import { evaluateBenefits, toDateString, hasCriteria, BENEFIT_UNITS } from "./periods.js";
 import { buildWindows, deriveBenefitStats } from "./derive.js";
 import { DATE_PARAM_RE, validateDateRange } from "../limits.js";
 
@@ -34,6 +34,10 @@ function invalidEnum(values) {
   for (const [field, allowed] of [
     ["period_unit", PERIOD_UNITS],
     ["period_basis", PERIOD_BASES],
+    // Rejected here as well as by the column's CHECK constraint, so a typo'd
+    // unit is a 400 naming the choices rather than a 500 carrying a constraint
+    // name — and it can never reach a row where it would silently read as usd.
+    ["unit", BENEFIT_UNITS],
     ["direction", DIRECTIONS],
   ]) {
     if (values[field] !== undefined && values[field] !== null && !allowed.includes(values[field])) {
@@ -176,6 +180,9 @@ export function registerBenefitsRoutes(app, requireAuth, requireApiKeyOrAuth) {
   // ── Benefits ────────────────────────────────────────────────────────────────
   app.post("/api/benefits/benefits", requireAuth, async (req, res) => {
     const values = pick(req.body || {}, BENEFIT_FIELDS);
+    // `unit` is NOT NULL with a default, so pick()'s ""-means-clear-it rule has
+    // to land on the default rather than on a constraint violation.
+    if (values.unit === null) values.unit = "usd";
     if (!Number.isInteger(Number(values.card_id))) return res.status(400).json({ error: "card_id required" });
     if (!String(values.name || "").trim()) return res.status(400).json({ error: "name required" });
     const enumError = invalidEnum(values);
@@ -186,6 +193,7 @@ export function registerBenefitsRoutes(app, requireAuth, requireApiKeyOrAuth) {
 
   app.patch("/api/benefits/benefits/:id", requireAuth, async (req, res) => {
     const values = pick(req.body || {}, BENEFIT_FIELDS);
+    if (values.unit === null) values.unit = "usd";
     if (values.name !== undefined && !String(values.name || "").trim())
       return res.status(400).json({ error: "name cannot be empty" });
     const enumError = invalidEnum(values);
