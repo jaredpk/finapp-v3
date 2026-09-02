@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useEffect } from "react";
 import { saveAssignment, saveMerchantOverride, deleteTransaction, unhideTransactionApi, replaceSplitsApi, reviewTransactions, fetchTransactionStats } from "../api.js";
+import { buildCsv, transactionCsvRows, csvFilename, downloadCsv, CSV_HEADERS } from "../csvExport.js";
 
 const toNum = (n) => n == null ? null : parseFloat(n);
 
@@ -77,6 +78,16 @@ export default function Transactions({
   const acctIds = useMemo(() => {
     return [...new Set(transactions.map((t) => t.account_id).filter(Boolean))].sort();
   }, [transactions]);
+
+  // id -> name, for the CSV export's Category column. The table itself never
+  // needs this — its <select> renders the category list directly — but a CSV
+  // has to carry the name, since a uuid is not a category to anyone reading
+  // the file later.
+  const categoryNames = useMemo(() => {
+    const m = {};
+    (categories || []).forEach((c) => { m[c.id] = c.name; });
+    return m;
+  }, [categories]);
 
   const getDisplayName = (t) =>
     merchantOverrides?.[t.transaction_id] || t.merchant_name || t.name || t.suggested_category || "Unknown";
@@ -373,6 +384,43 @@ export default function Transactions({
     }
   }
 
+  // ── CSV export ───────────────────────────────────────────────────────────────
+  // Exports `filtered` — the exact rows listed below, in the order they are
+  // listed — so every filter in the toolbar is respected by construction rather
+  // than by being re-implemented here. The date range and the category filter
+  // are the two the export is asked for most, and they are already in `filtered`
+  // via effectiveDateRange and catFilter; nothing needs to reach around them.
+  //
+  // The caveat is the loaded-rows cap, and it is the same one the filters
+  // themselves carry: `filtered` is drawn from the page of transactions this
+  // view holds, so on an account with more than that, an export cannot include
+  // rows the view never fetched. `notAllLoaded` is exactly that condition, and
+  // it is carried into the filename as `-partial` and spelled out in the button
+  // tooltip. See the note at the top of csvExport.js.
+  function handleExportCsv() {
+    if (!filtered.length) return;
+    const { from, to } = effectiveDateRange;
+    const categoryLabel =
+      catFilter === "all" ? null
+      : catFilter === "unassigned" ? "unassigned"
+      : categoryNames[catFilter] || null;
+    const csv = buildCsv(CSV_HEADERS, transactionCsvRows({
+      transactions: filtered,
+      accountNames: acctMap,
+      categoryNames,
+      assignments,
+      splits,
+      merchantOverrides,
+    }));
+    downloadCsv(csvFilename({
+      from,
+      to,
+      categoryLabel,
+      partial: notAllLoaded,
+      generatedOn: new Date().toISOString().slice(0, 10),
+    }), csv);
+  }
+
   const hasFilters = search || catFilter !== "all" || acctFilter !== "all" || minAmount || maxAmount || datePreset !== "all" || reviewFilter;
   const hiddenCount = transactions.filter(t => t.hidden && !hiddenAccounts?.has(t.account_id)).length;
 
@@ -485,6 +533,22 @@ export default function Transactions({
             {hiddenCount} hidden
           </label>
         )}
+        {/* Exports the rows listed below, not the whole table — the label says
+            "shown" for the same reason "Approve all shown" does. Split rows
+            expand to one CSV row each, so the count on the button is a count of
+            transactions and the file may be longer. */}
+        <button
+          style={{ ...styles.exportBtn, opacity: filtered.length ? 1 : 0.45, cursor: filtered.length ? "pointer" : "default" }}
+          onClick={handleExportCsv}
+          disabled={!filtered.length}
+          title={
+            filtered.length
+              ? `Downloads the ${fmtCount(filtered.length)} transactions listed below as a CSV, with the filters and sort order you have set${notAllLoaded ? `. These come from the ${fmtCount(loadedCount)} rows loaded here, not from all ${fmtCount(serverStats.total)} transactions on record — older rows this page has not fetched cannot be exported from this screen, and the file is named "-partial" to say so` : ""}. Split transactions export as one row per split line.`
+              : "Nothing to export — no rows match the current filters."
+          }
+        >
+          ↓ Export CSV{filtered.length ? ` (${fmtCount(filtered.length)})` : ""}
+        </button>
         {hasFilters && (
           <button
             style={styles.clearBtn}
@@ -870,6 +934,11 @@ const styles = {
   approveAllBtn: {
     padding: "8px 12px", background: "var(--accent)", border: "none",
     borderRadius: "var(--radius)", color: "#fff", fontSize: 12, fontWeight: 700,
+    fontFamily: "var(--font-mono)", cursor: "pointer",
+  },
+  exportBtn: {
+    padding: "8px 12px", background: "var(--surface)", border: "1px solid var(--border)",
+    borderRadius: "var(--radius)", color: "var(--text)", fontSize: 12, fontWeight: 600,
     fontFamily: "var(--font-mono)", cursor: "pointer",
   },
   clearBtn: {
