@@ -32,12 +32,16 @@
 // those with an apostrophe is the standard mitigation — the apostrophe is
 // consumed by the spreadsheet, so `=SUM(A1)` still reads as "=SUM(A1)" on
 // screen, and a plain-text reader sees one extra character rather than a cell
-// that executes.
+// that executes. Matched against the raw string, leading whitespace included:
+// a tab or CR in that position is itself a lead character, and a leading space
+// is not — a spreadsheet does not treat " =SUM(A1)" as a formula either.
 //
 // Applied to strings only. Numbers are formatted by the caller and a negative
 // amount must stay `-42.5`, not `'-42.5` — a guarded number would import as
 // text and silently break every SUM in the sheet, which is the exact failure
-// this export exists to avoid.
+// this export exists to avoid. Note that this makes the Amount column the one
+// place a `-` survives unguarded, which is the point: it is the only column
+// whose values are numbers rather than bank-supplied text.
 const FORMULA_LEAD = /^[=+\-@\t\r]/;
 
 export function csvCell(value) {

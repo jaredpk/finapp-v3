@@ -136,6 +136,11 @@ export default function Transactions({
 
   const loadedCount = loadedStats.total;
   const notAllLoaded = serverStats != null && serverStats.total > loadedCount;
+  // Everything the export needs to know about the cap, in one flag: either the
+  // totals say there are rows the view never fetched, or the totals could not
+  // be read and completeness is unknown. Both mean "do not present this file as
+  // the whole table"; neither means the rows in it are wrong.
+  const coverageIncomplete = notAllLoaded || statsFailed;
 
   // The approval chip and the "Approve all shown" button beside it answer two
   // different questions, and side by side they read as one. The chip carried
@@ -394,9 +399,18 @@ export default function Transactions({
   // The caveat is the loaded-rows cap, and it is the same one the filters
   // themselves carry: `filtered` is drawn from the page of transactions this
   // view holds, so on an account with more than that, an export cannot include
-  // rows the view never fetched. `notAllLoaded` is exactly that condition, and
-  // it is carried into the filename as `-partial` and spelled out in the button
+  // rows the view never fetched. `coverageIncomplete` is that condition, and it
+  // is carried into the filename as `-partial` and spelled out in the button
   // tooltip. See the note at the top of csvExport.js.
+  //
+  // "Partial" is `notAllLoaded || statsFailed`, not `notAllLoaded` alone. The
+  // two are different states — "I know there are more" and "I could not find
+  // out" — but they carry the SAME warning, and only the first has a count to
+  // put in it. When /api/transactions/stats is down the view already says
+  // "Totals unavailable ... may be fewer than every transaction on record";
+  // labelling the file complete on the strength of a failed request would have
+  // the filename contradict the screen that produced it, in the one case where
+  // the file has least reason to be trusted.
   function handleExportCsv() {
     if (!filtered.length) return;
     const { from, to } = effectiveDateRange;
@@ -416,10 +430,23 @@ export default function Transactions({
       from,
       to,
       categoryLabel,
-      partial: notAllLoaded,
+      partial: coverageIncomplete,
       generatedOn: new Date().toISOString().slice(0, 10),
     }), csv);
   }
+
+  // Three states, because the caveat differs: the totals name a number the
+  // export cannot reach, the totals are missing so no such number exists, or
+  // the view is holding the whole table and there is no caveat at all.
+  const exportCaveat =
+    notAllLoaded
+      ? ` These come from the ${fmtCount(loadedCount)} rows loaded here, not from all ${fmtCount(serverStats.total)} transactions on record — older rows this page has not fetched cannot be exported from this screen, and the file is named "-partial" to say so.`
+      : statsFailed
+        ? ` These come from the ${fmtCount(loadedCount)} rows loaded here. The totals request failed, so there may be older transactions this page never fetched and the export cannot reach — the file is named "-partial" because completeness could not be confirmed, not because anything in it is wrong.`
+        : "";
+  const exportTitle =
+    `Downloads the ${fmtCount(filtered.length)} transactions listed below as a CSV, with the filters and sort order you have set.${exportCaveat}` +
+    ` Split transactions export as one row per split line.`;
 
   const hasFilters = search || catFilter !== "all" || acctFilter !== "all" || minAmount || maxAmount || datePreset !== "all" || reviewFilter;
   const hiddenCount = transactions.filter(t => t.hidden && !hiddenAccounts?.has(t.account_id)).length;
@@ -541,11 +568,7 @@ export default function Transactions({
           style={{ ...styles.exportBtn, opacity: filtered.length ? 1 : 0.45, cursor: filtered.length ? "pointer" : "default" }}
           onClick={handleExportCsv}
           disabled={!filtered.length}
-          title={
-            filtered.length
-              ? `Downloads the ${fmtCount(filtered.length)} transactions listed below as a CSV, with the filters and sort order you have set${notAllLoaded ? `. These come from the ${fmtCount(loadedCount)} rows loaded here, not from all ${fmtCount(serverStats.total)} transactions on record — older rows this page has not fetched cannot be exported from this screen, and the file is named "-partial" to say so` : ""}. Split transactions export as one row per split line.`
-              : "Nothing to export — no rows match the current filters."
-          }
+          title={filtered.length ? exportTitle : "Nothing to export — no rows match the current filters."}
         >
           ↓ Export CSV{filtered.length ? ` (${fmtCount(filtered.length)})` : ""}
         </button>
