@@ -3,6 +3,7 @@ import { randomBytes, createHash } from "crypto";
 import xlsxLib from "xlsx";
 import { initPropertyFinanceSchema } from "./property/schema.js";
 import { initBenefitsSchema } from "./benefits/schema.js";
+import { initInsuranceSchema } from "./insurance/schema.js";
 import { groupDuplicates, isImportedId, sameSignedAmount } from "./transactionMatching.js";
 
 const { Pool } = pg;
@@ -585,6 +586,7 @@ export async function initDb() {
 
   await initPropertyFinanceSchema(pool);
   await initBenefitsSchema(pool);
+  await initInsuranceSchema(pool);
 }
 
 // ── Advisory locks ────────────────────────────────────────────────────────────
