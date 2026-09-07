@@ -42,6 +42,46 @@ function parts(value) {
 const utcMs = ({ y, m, d }) => Date.UTC(y, m - 1, d);
 const daysBetween = (a, b) => Math.round((utcMs(b) - utcMs(a)) / 86400000);
 
+// The TIMESTAMPTZ counterpart to toDateString, and it exists for the same
+// reason: pg hands back a Date object, and String(that) is
+// "Tue Sep 01 2026 00:00:00 GMT+0000" — WEEKDAY FIRST. Two of those compared as
+// strings sort by the name of the day, so "Tue" beats "Sat" and the older
+// document wins the cross-document tie-break in mergeExtractions, which is the
+// exact inversion of the rule that function documents. Every shape that
+// actually reaches us is normalised to one comparable instant instead: a Date,
+// an ISO string, and the "2026-09-05 00:00:00+00" a driver in string mode
+// returns. Parsed on UTC parts rather than through Date.parse, which is the
+// same rule the date helpers above follow and is why the offset is applied by
+// hand. Anything unrecognisable is null, and mergeExtractions sorts those last.
+const TIMESTAMP_RE =
+  /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?(?:\.(\d+))?\s*(Z|z|[+-]\d{2}(?::?\d{2})?)?$/;
+
+export function toInstant(value) {
+  if (value === null || value === undefined || value === "") return null;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.getTime();
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  const m = TIMESTAMP_RE.exec(String(value).trim());
+  if (!m) {
+    // A bare date (a DATE column, or an ISO string cut to ten characters) still
+    // orders correctly against a full timestamp: midnight UTC of that day.
+    const day = parts(value);
+    return day ? utcMs(day) : null;
+  }
+  const ms = Date.UTC(
+    Number(m[1]), Number(m[2]) - 1, Number(m[3]),
+    Number(m[4]), Number(m[5]), Number(m[6] ?? 0),
+    Number(String(m[7] ?? "").slice(0, 3).padEnd(3, "0"))
+  );
+  const zone = m[8];
+  // No zone at all is read as UTC. That can be off by the server's offset for a
+  // TIMESTAMP WITHOUT TIME ZONE, but it is off by the SAME amount for every row
+  // compared, and this value is only ever used to order rows against each other.
+  if (!zone || zone === "Z" || zone === "z") return ms;
+  const digits = zone.slice(1).replace(":", "");
+  const offset = (Number(digits.slice(0, 2)) * 60 + Number(digits.slice(2) || 0)) * 60000;
+  return zone[0] === "-" ? ms + offset : ms - offset;
+}
+
 const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 
 // Money as carriers print it. A declarations page says "$1,234.00" and a
@@ -50,10 +90,21 @@ const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 // module is not allowed to give when the page actually says it. Only the
 // currency symbol, thousands separators and surrounding space are stripped;
 // anything still unparseable stays unknown rather than being guessed at.
+//
+// A STRING WITH NO DIGIT IN IT IS UNKNOWN, and that check is the whole reason
+// this is not a bare Number() call: Number(""), Number(" "), Number("$") and
+// Number([]) are all 0 and all pass a finite check, so a blank premium cell —
+// which is reachable both from an extraction that read nothing and from an
+// owner override of "" — would annualize to a confident $0.00 a year. Zero is a
+// legitimate premium (a fully credited endorsement prints one), so it cannot be
+// filtered downstream the way term_months is by its `months <= 0` guard: a
+// counted unknown and a stated zero have to be told apart here or not at all.
 function money(value) {
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
   if (value === null || value === undefined) return null;
-  const n = Number(String(value).replace(/[$,\s]/g, ""));
+  const s = String(value);
+  if (!/\d/.test(s)) return null;
+  const n = Number(s.replace(/[$,\s]/g, ""));
   return Number.isFinite(n) ? n : null;
 }
 
@@ -121,11 +172,18 @@ export function cellState(cell) {
   // is never rewritten (the table is insert-only), so this branch is permanent
   // rather than transitional. A value that is on the page is a value.
   if (!isCell(cell)) return "value";
-  if (CELL_STATES.includes(cell.state)) return cell.state;
   // A state nobody recognises reads as `unreadable`, never as `value`. Falling
   // the other way would let a malformed cell render as a confident blank, which
   // is the exact failure the three states exist to prevent.
-  return "unreadable";
+  if (!CELL_STATES.includes(cell.state)) return "unreadable";
+  // And a cell claiming `value` with nothing in it is malformed the same way,
+  // so it falls the same direction. A `value` state is a claim that the page
+  // says something; carrying no value is a claim that it says nothing, and the
+  // two together are not a reading. Read as `value` it would beat a populated
+  // ins_policies column in resolveField and blank the carrier the owner typed —
+  // "the document is silent" wearing the one state that outranks the owner.
+  if (cell.state === "value" && (cell.value === null || cell.value === undefined)) return "unreadable";
+  return cell.state;
 }
 
 // The value of a cell, or null.
@@ -139,7 +197,16 @@ export function cellValue(cell) {
 // carry no page, which is one reason the cell shape replaced them.
 export function cellPage(cell) {
   if (!isCell(cell)) return null;
-  const n = Number(cell.page);
+  // A type check before the finite check, and for the reason renewalTiers gives
+  // below: Number(null), Number(""), Number(false) and Number([]) are all 0,
+  // and `page: null` is the ordinary shape for a field nobody could cite — the
+  // test factory's own default. Read as page 0 it becomes a citation, and a
+  // citation to page 0 is a citation to nothing: brief §4 makes
+  // (document_id, page) the mechanism that stops confident invention, so a page
+  // nobody stated has to come back as no page rather than as the first one.
+  const raw = cell.page;
+  if (typeof raw !== "number" && (typeof raw !== "string" || raw.trim() === "")) return null;
+  const n = Number(raw);
   return Number.isFinite(n) ? n : null;
 }
 
@@ -163,6 +230,23 @@ export const RESOLVED_FIELDS = [
   "term_start", "term_end", "term_months", "term_premium",
   "payment_channel", "verified_on", "notes",
 ];
+
+// Fields no document can state, so no extraction is allowed to answer them —
+// the same reasoning resolvePolicyView applies to status and
+// supersedes_policy_id, which is that a fact about the OWNER is not a fact the
+// page can contain. `verified_on` is stamped by the commit flow and records
+// that a person checked, not anything a carrier printed; `notes` is the owner's
+// own prose; `nickname` is what the household calls the policy ("USAA FL
+// homeowners"), and it is not in the ExtractionPayload contract above at all.
+// Each of the three is still overridable and still falls through to its
+// ins_policies column — what is removed is only the extraction's turn, because
+// a cell that did somehow carry one of these would OUTRANK the column and
+// overwrite the owner's own words with the model's.
+//
+// A field in here reports `missing` rather than a document state when nothing
+// fills it, which is the honest reading: "nobody has filled this in" is the
+// only answer available for a question no document was ever asked.
+const OWNER_ONLY_FIELDS = new Set(["nickname", "verified_on", "notes"]);
 
 // Dotted path lookup, so an override can pin `coverages.0.limit_value` and not
 // just a top-level cell. Numeric segments index arrays.
@@ -200,10 +284,12 @@ const findOverride = (overrides, fieldPath) =>
 // extraction only ANSWERS when its cell state is `value`. A cell that is
 // missing, `not_stated_in_document` or `unreadable` does not overwrite a
 // populated policy column — a document that never mentions the nickname must
-// not blank the nickname the owner typed. When the column is empty too, the
-// state reported is the EXTRACTION's, not a bare `missing`, because
-// "the document does not say" and "nobody has filled this in" are different
-// prompts to the reader and only one of them means "call the carrier".
+// not blank the nickname the owner typed, and for the three OWNER_ONLY_FIELDS
+// not even a cell that claims to state one gets a turn. When the column is
+// empty too, the state reported is the EXTRACTION's, not a bare `missing`,
+// because "the document does not say" and "nobody has filled this in" are
+// different prompts to the reader and only one of them means "call the
+// carrier".
 export function resolveField(fieldPath, { policy, overrides, extraction } = {}) {
   const override = findOverride(overrides, fieldPath);
   if (override) {
@@ -213,7 +299,7 @@ export function resolveField(fieldPath, { policy, overrides, extraction } = {}) 
     return { value: override.value === undefined ? null : override.value, state: "value", source: "override", page: null };
   }
 
-  const payload = payloadOf(extraction);
+  const payload = OWNER_ONLY_FIELDS.has(fieldPath) ? null : payloadOf(extraction);
   const cell = payload ? getPath(payload, fieldPath) : undefined;
   const state = cellState(cell);
   if (state === "value") {
@@ -265,9 +351,18 @@ export function mergeExtractions(extractions = []) {
   }
 
   const ordered = [...bestPerDocument.values()].sort((a, b) => {
-    const at = String(a.extracted_at ?? "");
-    const bt = String(b.extracted_at ?? "");
-    if (at !== bt) return bt.localeCompare(at);
+    // toInstant, never String(): see its comment. A Date stringified here sorts
+    // by weekday name and hands the merge to last year's declarations page.
+    const at = toInstant(a.extracted_at);
+    const bt = toInstant(b.extracted_at);
+    if (at !== bt) {
+      // A row nobody can date cannot claim to be the newest reading, so it
+      // sorts behind every row that can — the same call renewalCalendar makes
+      // for a policy with no term_end.
+      if (at === null) return 1;
+      if (bt === null) return -1;
+      return bt - at;
+    }
     return Number(b.document_id ?? 0) - Number(a.document_id ?? 0);
   });
 
@@ -297,6 +392,17 @@ export function mergeExtractions(extractions = []) {
 // `fields` is the part that makes the preview/commit review possible — it says,
 // per field, whether the number on screen came from the owner, from a document
 // (and which page), or from nowhere at all.
+//
+// CALLERS MUST NOT RENDER THE FLAT VALUES DIRECTLY. `view.term_end` and its
+// neighbours come from the `...values` spread below, which flattens all three
+// non-value states to the same null: "the coverage screen does not state a
+// term", "the scan of that page is unreadable" and "no document has ever
+// mentioned it" arrive as one indistinguishable blank. The distinction survives
+// only in `view.fields[path].state`, and rendering the flat value is both the
+// obvious thing to do and precisely how "go confirm this with the carrier"
+// decays into an empty cell — the failure the three states exist to prevent and
+// the one the workbook's Open Items r16 was written about. Read the value for
+// arithmetic; read `fields` for anything a person will look at.
 export function resolvePolicyView({ policy, overrides = [], extractions = [] } = {}) {
   const merged = mergeExtractions(extractions);
 
@@ -310,9 +416,11 @@ export function resolvePolicyView({ policy, overrides = [], extractions = [] } =
 
   return {
     id: policy?.id ?? null,
-    // status and supersedes_policy_id are owner-only: no document states which
-    // policy replaced which, so neither is resolvable and neither is offered as
-    // an overridable field.
+    // status and supersedes_policy_id are owner-only in the strongest sense: no
+    // document states which policy replaced which, so neither is resolvable and
+    // neither is offered as an overridable field. verified_on, notes and
+    // nickname are owner-only in the weaker sense — they are resolved and
+    // overridable, but no extraction gets a turn at them (OWNER_ONLY_FIELDS).
     status: policy?.status ?? null,
     supersedes_policy_id: policy?.supersedes_policy_id ?? null,
     ...values,
@@ -415,6 +523,10 @@ export function rollup(policies = [], keyFn = (p) => p?.carrier) {
         annual: totals.annual,
         monthly: totals.monthly,
         unknown_count: totals.unknown_count,
+        // Carried for the same reason programTotals carries it: "3 policies,
+        // one of them unpriced" is a readable row and "unknown_count: 1" on its
+        // own is not, and members.length is not the caller's job to take.
+        count: totals.count,
         policies: members,
       };
     })
@@ -577,10 +689,23 @@ export function renewalTiers({ policy, daysUntil, termKnown, status } = {}) {
   const days = Number.isFinite(daysUntil) ? daysUntil : NaN;
 
   // A renewal date in the past is a stale record, not a countdown: either the
-  // policy renewed and nobody updated the term, or it lapsed. Both are worth a
-  // human look and neither is a lead-time reminder, so no tier fires — the same
-  // call alertTiers makes for a negative daysLeft.
-  if (!Number.isFinite(days) || days < 0) return [];
+  // policy renewed and nobody updated the term, or it lapsed. Neither is a
+  // lead-time reminder, so no `renewal-Nd` tier fires — but this is where the
+  // resemblance to alertTiers STOPS, and copying its silence here would be
+  // wrong. alertTiers can stay quiet because resolvePeriod recomputes the
+  // period on every read, so a benefit's period_end is never durably in the
+  // past; insurance term_end is an owner-maintained column that nothing
+  // recomputes, so a stale date sits there indefinitely and the owner goes on
+  // believing they are covered through a date that has gone. That is the worse
+  // lapse state of the two this function knows about — an undated policy at
+  // least gets `term-unknown` — and Open Items r8 prices it ("a lapse breaks
+  // the RLI Basic Policy condition"). So it gets a tier of its own, structurally
+  // the twin of `term-unknown` above and of alertTiers' `rule-error`: worth
+  // saying once, and capped at once by ins_alerts (policy_id, renewal_date,
+  // tier). The never-alert statuses above still return [] — a replaced policy
+  // whose term has passed is the expected end of that policy, not news.
+  if (!Number.isFinite(days)) return [];
+  if (days < 0) return ["term-stale"];
 
   return RENEWAL_THRESHOLDS.filter((t) => days <= t).map((t) => `renewal-${t}d`);
 }
@@ -592,14 +717,30 @@ export function renewalTiers({ policy, daysUntil, termKnown, status } = {}) {
 // one dropped and one added for a form that never moved.
 const formKey = (form) => String(form?.code ?? "").trim().toUpperCase();
 
+// And the edition is normalised the same way, for the same reason. "09-16" and
+// " 09-16" are one edition printed twice; compared raw they report a `revised`,
+// which reads as "the wording that defines this coverage changed" and sends
+// someone to re-read a form that never moved. On a path whose whole value is
+// that its findings are arithmetic rather than judgment, a false positive is
+// expensive in a way a formatting difference should never be.
+const editionKey = (edition) => String(edition ?? "").trim().toUpperCase();
+
 // Year-over-year set difference between two forms schedules.
 //
 // This is the strongest deterministic win in the brief and it involves no model
 // at all: the workbook's URGENT finding ("Restore Ordinance or Law coverage at
 // 25%, HO-225FL") and its Resolved r7 ("Not in the 2026-27 form schedule") are
 // both this function's output. An endorsement that disappears between terms is
-// caught with 100% recall, which is a far stronger guarantee than anything the
-// analysis tier can offer.
+// caught with 100% recall OF THE ENTRIES THAT CARRY A FORM CODE, which is a far
+// stronger guarantee than anything the analysis tier can offer — but the
+// qualifier is the honest version of the claim, because the diff is keyed on
+// the code and an entry with no code cannot be keyed at all. Those come back in
+// `codeless` rather than being dropped: a schedule line the extractor read as a
+// title with no code is a gap in the reading, and silently returning four empty
+// buckets for it is the same confident blank the cell states exist to prevent.
+// `codeless` entries are in none of added/dropped/retained/revised, and a
+// caller that renders the diff has to render them too or it is showing a recall
+// guarantee it does not have.
 //
 // A code present in both lists is RETAINED. If its edition changed it is also
 // reported in `revised` — retained-but-revised, because the coverage is still
@@ -614,16 +755,24 @@ const formKey = (form) => String(form?.code ?? "").trim().toUpperCase();
 // First occurrence of a duplicated code wins, so a schedule that lists a form
 // twice diffs as one form rather than producing a phantom add.
 export function diffFormsSchedules(priorList = [], currentList = []) {
-  const index = (list) => {
+  const codeless = [];
+  // `side` travels with the entry because it changes what the gap means: a
+  // codeless line in the CURRENT schedule may be a form that is present and
+  // unnameable, and one in the PRIOR schedule may be a drop nobody can report.
+  const index = (list, side) => {
     const map = new Map();
     for (const form of Array.isArray(list) ? list : []) {
       const key = formKey(form);
-      if (key && !map.has(key)) map.set(key, form);
+      if (!key) {
+        codeless.push({ side, form });
+        continue;
+      }
+      if (!map.has(key)) map.set(key, form);
     }
     return map;
   };
-  const prior = index(priorList);
-  const current = index(currentList);
+  const prior = index(priorList, "prior");
+  const current = index(currentList, "current");
 
   const added = [];
   const dropped = [];
@@ -639,12 +788,12 @@ export function diffFormsSchedules(priorList = [], currentList = []) {
     retained.push(form);
     const priorEdition = priorForm?.edition ?? null;
     const currentEdition = form?.edition ?? null;
-    if (String(priorEdition ?? "") !== String(currentEdition ?? "")) {
+    if (editionKey(priorEdition) !== editionKey(currentEdition)) {
       revised.push({ code: key, prior_edition: priorEdition, current_edition: currentEdition, prior: priorForm, current: form });
     }
   }
 
   for (const [key, form] of prior) if (!current.has(key)) dropped.push(form);
 
-  return { added, dropped, retained, revised };
+  return { added, dropped, retained, revised, codeless };
 }

@@ -174,6 +174,16 @@ export async function initInsuranceSchema(pool) {
       id SERIAL PRIMARY KEY,
       title TEXT NOT NULL,
       rationale TEXT,
+      -- CHECKed, and the ORDER of the five is load bearing rather than
+      -- decorative. They are the workbook's own Open Items levels, and the
+      -- dashboard card the brief asks for ("open CRITICAL items", client
+      -- sketch) is a filter on the top of this list — so the set is closed at
+      -- five to keep that filter meaningful. A sixth level invented at write
+      -- time ("severe", "p0") would be nobody's idea of less urgent than
+      -- 'medium', but the card would not show it: it matches on the literal, so
+      -- an unlisted value renders nowhere and the most urgent finding in the
+      -- table becomes the one nobody sees. The CHECK turns that into a failed
+      -- INSERT the writer has to look at, which is the only place it is cheap.
       priority TEXT NOT NULL DEFAULT 'medium'
         CHECK (priority IN ('critical','urgent','high','medium','low')),
       owner TEXT,                    -- who has to do the thing; several items are third-party asks
@@ -224,6 +234,17 @@ export async function initInsuranceSchema(pool) {
       id SERIAL PRIMARY KEY,
       policy_id INTEGER NOT NULL REFERENCES ins_policies(id) ON DELETE CASCADE,
       renewal_date DATE NOT NULL,
+      -- Free TEXT, and deliberately not CHECKed, which is the one enum-shaped
+      -- column in this file without one. The reason is cb_alerts.tier, which is
+      -- the same: the tier vocabulary belongs to derive.js (renewalTiers), it
+      -- grows whenever a lead time is added, and a CHECK here would mean a
+      -- migration to ship a reminder. The cost is worth naming, because it is
+      -- not zero: this exact string is the third column of the UNIQUE below, so
+      -- idempotency is spelling. A caller that writes "renewal-60" where
+      -- renewalTiers said "renewal-60d" does not collide with the row already
+      -- there, and the owner gets the same reminder twice — which is how a
+      -- mailbox learns to ignore this sender. Nothing but renewalTiers' return
+      -- value may be written here.
       tier TEXT NOT NULL,            -- from renewalTiers() in derive.js
       sent_at TIMESTAMPTZ DEFAULT NOW(),
       -- One row per tier per renewal date, so the daily cron can re-run (or run
