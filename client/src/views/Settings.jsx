@@ -118,6 +118,9 @@ export default function Settings({ reloadData, user, accounts = [] }) {
   // reporting "connected", which is exactly the silent failure the scopes
   // column exists to make visible.
   const [gmailCanRead, setGmailCanRead]     = useState(true);
+  // A token row can exist while Google rejects it (invalid_grant), so
+  // `connected` alone isn't proof it works. null = unknown, not "expired".
+  const [gmailTokenValid, setGmailTokenValid] = useState(null);
   const [testingAlert, setTestingAlert]     = useState(false);
   const [testAlertResult, setTestAlertResult] = useState(null);
 
@@ -152,8 +155,9 @@ export default function Settings({ reloadData, user, accounts = [] }) {
         setGmailConnected(!!data.connected);
         setGmailCanSend(!!data.canSend);
         setGmailCanRead(hasReadScope(data));
+        setGmailTokenValid(data.tokenValid ?? null);
       })
-      .catch(() => { setGmailConnected(false); setGmailCanSend(false); setGmailCanRead(true); });
+      .catch(() => { setGmailConnected(false); setGmailCanSend(false); setGmailCanRead(true); setGmailTokenValid(null); });
     // A usage card that can't load is a footnote, not a failure — it reports
     // itself and leaves the rest of Settings alone.
     //
@@ -204,6 +208,7 @@ export default function Settings({ reloadData, user, accounts = [] }) {
       const status = await gmailStatus().catch(() => null);
       setGmailCanSend(!!status?.canSend);
       setGmailCanRead(hasReadScope(status));
+      setGmailTokenValid(status?.tokenValid ?? null);
     } catch (err) {
       setGmailResult(`Error: ${err.message}`);
     } finally {
@@ -844,9 +849,15 @@ export default function Settings({ reloadData, user, accounts = [] }) {
           <p style={styles.muted}>Loading…</p>
         ) : gmailConnected ? (
           <>
-            <p style={{ ...styles.muted, marginBottom: 12 }}>
-              <span style={{ color: "var(--green, #22c55e)" }}>✓ Gmail connected</span> — receipts are scanned automatically each morning.
-            </p>
+            {gmailTokenValid === false ? (
+              <p style={{ ...styles.muted, marginBottom: 12 }}>
+                <span style={{ color: "#f87171" }}>✗ Gmail access has expired</span> — click Reconnect below.
+              </p>
+            ) : (
+              <p style={{ ...styles.muted, marginBottom: 12 }}>
+                <span style={{ color: "var(--green, #22c55e)" }}>✓ Gmail connected</span> — receipts are scanned automatically each morning.
+              </p>
+            )}
             {!gmailCanRead && (
               <p style={{ ...styles.muted, marginBottom: 12, color: "var(--amber, #f59e0b)" }}>
                 This connection is missing the Gmail <strong>read</strong> scope, so receipt

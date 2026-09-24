@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import Sidebar from "./components/Sidebar.jsx";
 import AccountReviewModal from "./components/AccountReviewModal.jsx";
 import Dashboard from "./views/Dashboard.jsx";
@@ -18,7 +18,7 @@ import {
   fetchAccounts, fetchTransactions,
   fetchCategories, fetchAssignments, fetchMerchantOverrides,
   fetchSplits, fetchHiddenAccounts, addHiddenAccountApi,
-  getLastAudit,
+  getLastAudit, gmailStatus,
 } from "./api.js";
 
 const ALLOWED_EMAIL = "jaredpk@gmail.com";
@@ -82,6 +82,23 @@ function AuthenticatedApp({ user }) {
       setAuditOverdue(days > 14);
     }).catch(() => setAuditOverdue(false));
   }, []);
+
+  // A stored Gmail token can be dead (invalid_grant) while still reading as
+  // "connected", which silently pauses benefit alerts and receipt scanning.
+  // Checked on mount and again when leaving Settings — the only place a
+  // reconnect can happen — so the banner clears without polling.
+  const [gmailExpired, setGmailExpired] = useState(false);
+  const refreshGmailStatus = useCallback(() => {
+    gmailStatus().then(({ connected, tokenValid }) => {
+      setGmailExpired(Boolean(connected) && tokenValid === false);
+    }).catch(() => {});
+  }, []);
+  useEffect(() => { refreshGmailStatus(); }, [refreshGmailStatus]);
+  const prevViewRef = useRef(view);
+  useEffect(() => {
+    if (prevViewRef.current === "settings" && view !== "settings") refreshGmailStatus();
+    prevViewRef.current = view;
+  }, [view, refreshGmailStatus]);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -202,6 +219,16 @@ function AuthenticatedApp({ user }) {
         isMobile={isMobile}
       />
       <main style={{ ...styles.main, paddingBottom: isMobile ? 64 : 0 }}>
+        {gmailExpired && (
+          <div role="alert" style={styles.gmailBanner}>
+            <span style={styles.gmailBannerText}>
+              Gmail access has expired — benefit alerts and receipt scanning are paused.
+            </span>
+            <button style={styles.gmailBannerBtn} onClick={() => setView("settings")}>
+              Reconnect in Settings
+            </button>
+          </div>
+        )}
         {loading && accounts.length === 0 && transactions.length === 0 ? (
           <div style={styles.loader}>
             <span className="pulse" style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 13 }}>
@@ -220,6 +247,18 @@ const styles = {
   app: { display: "flex", minHeight: "100vh", background: "var(--bg)" },
   main: { flex: 1, minWidth: 0, overflowY: "auto", minHeight: "100vh" },
   loader: { display: "flex", alignItems: "center", justifyContent: "center", height: "100vh" },
+  gmailBanner: {
+    display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px 12px",
+    margin: "12px 16px 0", padding: "10px 14px",
+    background: "var(--surface)", border: "1px solid var(--border)", borderLeft: "3px solid #f87171",
+    borderRadius: 8, color: "var(--text)", fontFamily: "var(--font-display)", fontSize: 13,
+  },
+  gmailBannerText: { flex: "1 1 220px", minWidth: 0 },
+  gmailBannerBtn: {
+    padding: "6px 12px", background: "transparent", color: "#f87171",
+    border: "1px solid #f87171", borderRadius: 6, fontSize: 12, fontWeight: 600,
+    cursor: "pointer", fontFamily: "var(--font-display)", whiteSpace: "nowrap",
+  },
 };
 
 const loginStyles = {
