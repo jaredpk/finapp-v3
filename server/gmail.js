@@ -77,6 +77,33 @@ export async function gmailConnected() {
   return Boolean(await getGmailRefreshToken());
 }
 
+// Whether the stored refresh token still works. gmailConnected() only proves a
+// row exists; a token Google has since revoked or expired (`invalid_grant`)
+// still reads as "connected" there, and the first sign of it was the daily
+// alert run 500ing. Minting an access token is the cheapest call that proves
+// the token live.
+//
+// Three-valued on purpose: true = works, false = Google rejected the token
+// (reconnect needed), null = unknown — not connected, not configured, or any
+// other failure (network, 5xx). A transient error must not be reported as an
+// expired token, or the UI would tell the owner to reconnect for no reason.
+export async function checkGmailToken() {
+  if (!gmailConfigured()) return null;
+  const refreshToken = await getGmailRefreshToken();
+  if (!refreshToken) return null;
+  try {
+    const auth = makeOAuthClient();
+    auth.setCredentials({ refresh_token: refreshToken });
+    await auth.getAccessToken();
+    return true;
+  } catch (err) {
+    if (err?.response?.data?.error === "invalid_grant" || String(err?.message || "").includes("invalid_grant")) {
+      return false;
+    }
+    return null;
+  }
+}
+
 // The scopes on the stored grant. Empty when Gmail isn't connected, and also
 // empty for a grant saved before the scopes column existed — that reads as
 // "unknown", and an unknown grant is treated as not able to send.

@@ -51,7 +51,7 @@ import {
   getGeminiUsageByFeature,
 } from "./db.js";
 import pool from "./db.js";
-import { gmailConfigured, getGmailAuthUrl, exchangeGmailAuthCode, gmailConnected, getGrantedScopes, canSendMail } from "./gmail.js";
+import { gmailConfigured, getGmailAuthUrl, exchangeGmailAuthCode, gmailConnected, getGrantedScopes, canSendMail, checkGmailToken } from "./gmail.js";
 import { buildDigestEmail, sendAlert, sendTestEmail } from "./alertEmail.js";
 import { receiptScanConfigured, runReceiptScan } from "./receiptScan.js";
 import { askAiConfigured, runAskLoop, createGeminiGenerate, impl as askAiImpl, resolveAskModel } from "./askAi.js";
@@ -828,8 +828,12 @@ app.get("/api/gmail/status", requireAuth, async (req, res) => {
     // it); the grant detail is additive. canSend is reported separately because
     // a re-consent can grant one scope and not the other, and the only place
     // that is visible is here.
+    // tokenValid is also additive: `connected` only means a token row exists,
+    // so an expired/revoked token (invalid_grant) is surfaced here instead.
+    // null = not connected or couldn't tell (e.g. network error).
     const [connected, scopes] = await Promise.all([gmailConnected(), getGrantedScopes()]);
-    res.json({ connected, scopes, canSend: connected && (await canSendMail()) });
+    const tokenValid = connected ? await checkGmailToken() : null;
+    res.json({ connected, scopes, canSend: connected && (await canSendMail()), tokenValid });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
