@@ -77,6 +77,8 @@ export async function gmailConnected() {
   return Boolean(await getGmailRefreshToken());
 }
 
+const TOKEN_CHECK_TIMEOUT_MS = 5000;
+
 // Whether the stored refresh token still works. gmailConnected() only proves a
 // row exists; a token Google has since revoked or expired (`invalid_grant`)
 // still reads as "connected" there, and the first sign of it was the daily
@@ -94,7 +96,17 @@ export async function checkGmailToken() {
   try {
     const auth = makeOAuthClient();
     auth.setCredentials({ refresh_token: refreshToken });
-    await auth.getAccessToken();
+    // Bounded: /api/gmail/status awaits this, and a hung token endpoint would
+    // leave the Settings card on "Loading…". A timeout reads as unknown (null).
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("token check timed out")), TOKEN_CHECK_TIMEOUT_MS);
+    });
+    try {
+      await Promise.race([auth.getAccessToken(), timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
     return true;
   } catch (err) {
     if (err?.response?.data?.error === "invalid_grant" || String(err?.message || "").includes("invalid_grant")) {

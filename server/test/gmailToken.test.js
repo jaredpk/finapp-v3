@@ -68,6 +68,18 @@ test("a network failure is unknown, not expired", async (t) => {
   assert.equal(await checkGmailToken(), null);
 });
 
+test("a hung token endpoint times out as unknown", async (t) => {
+  withEnv(t);
+  storedToken(t, "rt-good");
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  tokenMint(t, () => new Promise(() => {}));
+  const result = checkGmailToken();
+  // Let the stored-token read settle so the race (and its timer) is armed.
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  t.mock.timers.tick(5000);
+  assert.equal(await result, null);
+});
+
 test("a different OAuth error is unknown, not expired", async (t) => {
   withEnv(t);
   storedToken(t, "rt-good");
