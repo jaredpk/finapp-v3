@@ -2181,8 +2181,8 @@ export async function getAssignments() {
   return rows;
 }
 
-export async function upsertAssignment(transactionId, categoryId) {
-  await pool.query(
+export async function upsertAssignment(transactionId, categoryId, db = pool) {
+  await db.query(
     `INSERT INTO assignments (transaction_id, category_id, updated_at)
      VALUES ($1, $2, NOW())
      ON CONFLICT (transaction_id) DO UPDATE SET category_id = $2, updated_at = NOW()`,
@@ -2433,13 +2433,37 @@ export async function getMerchantOverrides() {
   return rows;
 }
 
-export async function upsertMerchantOverride(transactionId, merchantName) {
-  await pool.query(
+export async function upsertMerchantOverride(transactionId, merchantName, db = pool) {
+  await db.query(
     `INSERT INTO merchant_overrides (transaction_id, merchant_name, updated_at)
      VALUES ($1, $2, NOW())
      ON CONFLICT (transaction_id) DO UPDATE SET merchant_name = $2, updated_at = NOW()`,
     [transactionId, merchantName]
   );
+}
+
+// Bulk AI update (bulkUpdate.js): applies already-validated changes
+// [{ transactionId, categoryId|null, merchant|null }] through the same two
+// upserts the single-row routes use, on one client so it is all-or-nothing.
+// A null categoryId / merchant means "leave that field alone", never "clear".
+export async function applyBulkChanges(changes) {
+  const client = await pool.connect();
+  let categories = 0;
+  let merchants = 0;
+  try {
+    await client.query('BEGIN');
+    for (const c of changes) {
+      if (c.categoryId) { await upsertAssignment(c.transactionId, c.categoryId, client); categories++; }
+      if (c.merchant) { await upsertMerchantOverride(c.transactionId, c.merchant, client); merchants++; }
+    }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+  return { categories, merchants };
 }
 
 // ── Properties ────────────────────────────────────────────────────────────────

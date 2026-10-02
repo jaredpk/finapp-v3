@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from "react";
-import { saveAssignment, saveMerchantOverride, deleteTransaction, unhideTransactionApi, replaceSplitsApi, reviewTransactions, fetchTransactionStats } from "../api.js";
+import { saveAssignment, saveMerchantOverride, deleteTransaction, unhideTransactionApi, replaceSplitsApi, reviewTransactions, fetchTransactionStats, proposeBulkUpdate, applyBulkUpdate } from "../api.js";
 import { buildCsv, transactionCsvRows, csvFilename, downloadCsv, CSV_HEADERS } from "../csvExport.js";
 
 const toNum = (n) => n == null ? null : parseFloat(n);
@@ -60,6 +60,16 @@ export default function Transactions({
   const [merchantDraft, setMerchantDraft]     = useState("");
   const [confirmDelete, setConfirmDelete]     = useState(null);
   const [deleting, setDeleting]               = useState({});
+
+  // Bulk AI edit: targets the rows currently listed (first BULK_MAX), previews
+  // Gemini's proposal, applies only the rows left ticked.
+  const BULK_MAX = 100;
+  const [bulkOpen, setBulkOpen]               = useState(false);
+  const [bulkInstruction, setBulkInstruction] = useState("");
+  const [bulkProposal, setBulkProposal]       = useState(null);
+  const [bulkChecked, setBulkChecked]         = useState({});
+  const [bulkBusy, setBulkBusy]               = useState(false);
+  const [bulkMsg, setBulkMsg]                 = useState(null);
 
   // Split editor state
   const [splitExpanded, setSplitExpanded] = useState(null);
@@ -252,6 +262,42 @@ export default function Transactions({
       console.error("Approve failed:", err);
     } finally {
       setApproving(false);
+    }
+  }
+
+  const bulkTargets = filtered.slice(0, BULK_MAX);
+
+  async function handleBulkPropose() {
+    if (!bulkInstruction.trim() || !bulkTargets.length || bulkBusy) return;
+    setBulkBusy(true);
+    setBulkMsg(null);
+    setBulkProposal(null);
+    try {
+      const res = await proposeBulkUpdate(bulkTargets.map((t) => t.transaction_id), bulkInstruction.trim());
+      setBulkProposal(res);
+      setBulkChecked(Object.fromEntries(res.changes.map((c) => [c.transactionId, true])));
+      if (res.changes.length === 0) setBulkMsg({ error: false, text: "The AI proposed no changes." });
+    } catch (err) {
+      setBulkMsg({ error: true, text: err.message });
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  async function handleBulkApply() {
+    const chosen = (bulkProposal?.changes || []).filter((c) => bulkChecked[c.transactionId]);
+    if (!chosen.length || bulkBusy) return;
+    setBulkBusy(true);
+    setBulkMsg(null);
+    try {
+      const res = await applyBulkUpdate(chosen);
+      setBulkProposal(null);
+      setBulkMsg({ error: false, text: `Updated ${fmtCount(res.transactions)} transactions (${fmtCount(res.categories)} categories, ${fmtCount(res.merchants)} merchant names).${res.skipped?.length ? ` ${fmtCount(res.skipped.length)} skipped.` : ""}` });
+      if (reloadData) reloadData();
+    } catch (err) {
+      setBulkMsg({ error: true, text: err.message });
+    } finally {
+      setBulkBusy(false);
     }
   }
 
@@ -572,6 +618,13 @@ export default function Transactions({
         >
           ↓ Export CSV{filtered.length ? ` (${fmtCount(filtered.length)})` : ""}
         </button>
+        <button
+          style={styles.exportBtn}
+          onClick={() => setBulkOpen((v) => !v)}
+          title="Ask AI to propose category / merchant changes for the rows listed below. You preview before anything is saved."
+        >
+          ✨ AI bulk edit
+        </button>
         {hasFilters && (
           <button
             style={styles.clearBtn}
@@ -587,6 +640,77 @@ export default function Transactions({
           {fmtCount(filtered.length)} of {fmtCount(loadedCount)}{notAllLoaded ? " loaded" : ""}
         </span>
       </div>
+
+      {bulkOpen && (
+        <div className="fade-up" style={styles.bulkPanel}>
+          <p style={styles.bulkNote}>
+            Acts on the {fmtCount(bulkTargets.length)} rows currently listed below
+            {filtered.length > BULK_MAX ? ` (the first ${BULK_MAX} of ${fmtCount(filtered.length)} — narrow the filters for the rest)` : ""}.
+            Nothing is saved until you press Apply.
+          </p>
+          <div style={styles.toolbar}>
+            <input
+              type="text"
+              placeholder='e.g. "categorize these as Groceries" or "rename merchants to clean names"'
+              value={bulkInstruction}
+              maxLength={1000}
+              onChange={(e) => setBulkInstruction(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") handleBulkPropose(); }}
+              style={{ ...styles.input, maxWidth: "none" }}
+            />
+            <button
+              style={{ ...styles.approveAllBtn, opacity: bulkBusy || !bulkInstruction.trim() || !bulkTargets.length ? 0.5 : 1 }}
+              onClick={handleBulkPropose}
+              disabled={bulkBusy || !bulkInstruction.trim() || !bulkTargets.length}
+            >
+              {bulkBusy && !bulkProposal ? "Thinking…" : "Preview"}
+            </button>
+          </div>
+          {bulkMsg && <p style={bulkMsg.error ? styles.statsErrorNote : styles.bulkNote}>{bulkMsg.text}</p>}
+          {bulkProposal && bulkProposal.changes.length > 0 && (
+            <>
+              <div style={styles.bulkTable}>
+                {bulkProposal.changes.map((c) => {
+                  const t = transactions.find((x) => x.transaction_id === c.transactionId);
+                  if (!t) return null;
+                  const curCat = categoryNames[assignments?.[t.transaction_id]] || "—";
+                  const newCat = c.categoryId ? categoryNames[c.categoryId] : null;
+                  return (
+                    <label key={c.transactionId} style={styles.bulkRow}>
+                      <input
+                        type="checkbox"
+                        checked={!!bulkChecked[c.transactionId]}
+                        onChange={(e) => setBulkChecked((prev) => ({ ...prev, [c.transactionId]: e.target.checked }))}
+                      />
+                      <span style={styles.date}>{fmtDate(t.date)}</span>
+                      <span style={styles.bulkCell}>
+                        {getDisplayName(t)}{c.merchant ? <> → <strong>{c.merchant}</strong></> : null}
+                      </span>
+                      <span style={styles.bulkCell}>
+                        {curCat}{newCat ? <> → <strong>{newCat}</strong></> : null}
+                      </span>
+                      <span style={{ ...styles.bulkCell, color: "var(--muted)" }}>{c.reason}</span>
+                    </label>
+                  );
+                })}
+              </div>
+              {bulkProposal.skipped?.length > 0 && (
+                <p style={styles.partialNote}>{fmtCount(bulkProposal.skipped.length)} AI suggestion(s) were discarded as invalid.</p>
+              )}
+              <div style={styles.toolbar}>
+                <button
+                  style={{ ...styles.approveAllBtn, opacity: bulkBusy ? 0.6 : 1 }}
+                  onClick={handleBulkApply}
+                  disabled={bulkBusy}
+                >
+                  {bulkBusy ? "Applying…" : `Apply (${fmtCount(Object.values(bulkChecked).filter(Boolean).length)})`}
+                </button>
+                <button style={styles.clearBtn} onClick={() => { setBulkProposal(null); setBulkMsg(null); }}>Discard</button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       {/* Table */}
       {filtered.length === 0 ? (
@@ -969,6 +1093,14 @@ const styles = {
     borderRadius: "var(--radius)", color: "var(--muted)", fontSize: 12,
     fontFamily: "var(--font-mono)", cursor: "pointer",
   },
+  bulkPanel: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", padding: "14px 16px", marginBottom: 14 },
+  bulkNote: { fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-mono)", lineHeight: 1.5, marginBottom: 10 },
+  bulkTable: { border: "1px solid var(--border)", borderRadius: "var(--radius)", marginBottom: 10, maxHeight: 360, overflow: "auto" },
+  bulkRow: {
+    display: "grid", gridTemplateColumns: "24px 56px minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)", gap: 8, minWidth: 700,
+    padding: "7px 12px", borderBottom: "1px solid var(--border)", alignItems: "center", cursor: "pointer",
+  },
+  bulkCell: { fontSize: 12, color: "var(--text)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   count: { fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", marginLeft: "auto" },
   // Same amber/red emphasis the rest of the app uses for "this number is
   // partial" and "this read failed" — see the AI Usage card in Settings.jsx.
