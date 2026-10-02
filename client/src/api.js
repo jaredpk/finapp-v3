@@ -208,6 +208,31 @@ export async function askAi(question, history) {
   return r.json();
 }
 
+// ── Bulk AI transaction update ────────────────────────────────────────────────
+// propose writes nothing: it returns { changes, skipped } for the user to
+// preview. apply sends back the changes the user kept and returns counts. Both
+// throw with err.status set, like askAi.
+async function bulkUpdateRequest(path, payload, fallback) {
+  const r = await fetch(`${BASE}/transactions/bulk-update/${path}`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    const err = new Error(body.error || `${fallback}: ${r.status}`);
+    err.status = r.status;
+    throw err;
+  }
+  return r.json();
+}
+
+export const proposeBulkUpdate = (transactionIds, instruction) =>
+  bulkUpdateRequest("propose", { transactionIds, instruction }, "Bulk update proposal failed");
+
+export const applyBulkUpdate = (changes) =>
+  bulkUpdateRequest("apply", { changes }, "Bulk update failed");
+
 // Month-to-date estimated Gemini spend and how close it is to the monthly
 // budget, for the settings card. Read-only, so a failure comes back as
 // { error } like the other plain GETs rather than throwing.

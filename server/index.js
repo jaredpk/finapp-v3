@@ -31,7 +31,7 @@ import {
   getAssignments, upsertAssignment,
   getSplits, createSplit, deleteSplit, deleteSplitsForTransaction, deleteTransaction, unhideTransaction, replaceSplits,
   getHiddenAccounts, addHiddenAccount, removeHiddenAccount,
-  getMerchantOverrides, upsertMerchantOverride,
+  getMerchantOverrides, upsertMerchantOverride, applyBulkChanges,
   parseCsvText, upsertCsvTransaction,
   parseXlsxBase64, upsertPlaidTransactions,
   upsertImportedTransaction, deleteImportedTransactions, getImportedTransactionAccounts,
@@ -55,6 +55,7 @@ import { gmailConfigured, getGmailAuthUrl, exchangeGmailAuthCode, gmailConnected
 import { buildDigestEmail, sendAlert, sendTestEmail } from "./alertEmail.js";
 import { receiptScanConfigured, runReceiptScan } from "./receiptScan.js";
 import { askAiConfigured, runAskLoop, createGeminiGenerate, impl as askAiImpl, resolveAskModel } from "./askAi.js";
+import { MAX_BULK_TRANSACTIONS, parseProposeRequest, validateChanges, proposeBulkUpdate, createBulkGenerate } from "./bulkUpdate.js";
 import {
   ASK_HARD_CEILING_PCT, checkGeminiBudget, getBudgetStatus, recordGeminiCall,
 } from "./geminiUsage.js";
@@ -1044,6 +1045,81 @@ app.post("/api/ask", requireAuth, async (req, res) => {
     // whatever was thrown; it is not guaranteed to be an Error.
     console.error("ask-ai:", err?.status || "", err?.message, `after ${Date.now() - startedAt}ms`);
     res.status(err?.status === 429 ? 429 : 502).json({ error: "AI request failed" });
+  }
+});
+
+// ── Bulk AI transaction update ────────────────────────────────────────────────
+// propose: Gemini suggests per-transaction category / merchant changes for the
+// given ids and an instruction. Writes nothing. apply: re-validates what the
+// client sends back (it is untrusted) and writes it in one DB transaction.
+// Logs counts only — never the instruction or any transaction data.
+app.post("/api/transactions/bulk-update/propose", requireAuth, async (req, res) => {
+  if (!askAiConfigured())
+    return res.status(503).json({ error: "Ask AI not configured" });
+  const parsed = parseProposeRequest(req.body);
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+  const model = resolveAskModel();
+  try {
+    // Interactive caller, so it shares Ask AI's hard ceiling rather than the
+    // receipt scanner's 100% cutoff — see /api/ask.
+    const budget = await checkGeminiBudget("bulk_update");
+    if (budget.pct >= ASK_HARD_CEILING_PCT) {
+      return res.status(503).json({
+        error:
+          `Monthly Gemini budget exhausted: $${budget.spentUsd} of $${budget.budgetUsd} spent in ` +
+          `${budget.month} (${budget.pct}%), past the ${ASK_HARD_CEILING_PCT}% hard ceiling. ` +
+          `Raise GEMINI_ASK_CEILING_PCT (or GEMINI_MONTHLY_BUDGET_USD) to continue this month.`,
+      });
+    }
+    const [txns, categories, assignments, overrides] = await Promise.all([
+      getTransactionsByIds(parsed.ids), getCategories(), getAssignments(), getMerchantOverrides(),
+    ]);
+    if (txns.length === 0) return res.status(400).json({ error: "no matching transactions" });
+    const categoryNameById = new Map(categories.map((c) => [c.id, c.name]));
+    const categoryIdByTxn = new Map(assignments.map((a) => [a.transaction_id, a.category_id]));
+    const overrideByTxn = new Map(overrides.map((o) => [o.transaction_id, o.merchant_name]));
+    const rows = txns.map((t) => ({
+      id: t.id,
+      date: t.date,
+      merchant: overrideByTxn.get(t.id) || t.merchant,
+      amount: t.amount,
+      category: categoryNameById.get(categoryIdByTxn.get(t.id)) || null,
+    }));
+    const { changes, skipped, usage } = await proposeBulkUpdate({
+      rows, categories, instruction: parsed.instruction, generate: createBulkGenerate(),
+    });
+    await recordGeminiCall({ feature: "bulk_update", model, usage });
+    console.log(`bulk-update propose: ${rows.length} transaction(s), ${changes.length} change(s), ${skipped.length} skipped`);
+    res.json({ changes, skipped });
+  } catch (err) {
+    // A call that was billed but failed to parse still cost money; see /api/ask.
+    if (err?.usage?.totalTokens > 0) {
+      await recordGeminiCall({ feature: "bulk_update", model, usage: err.usage });
+    }
+    console.error("bulk-update propose:", err?.status || "", err?.message);
+    res.status(err?.status === 429 ? 429 : 502).json({ error: "AI request failed" });
+  }
+});
+
+app.post("/api/transactions/bulk-update/apply", requireAuth, async (req, res) => {
+  const incoming = req.body?.changes;
+  if (!Array.isArray(incoming) || incoming.length === 0)
+    return res.status(400).json({ error: "changes array required" });
+  if (incoming.length > MAX_BULK_TRANSACTIONS)
+    return res.status(400).json({ error: `at most ${MAX_BULK_TRANSACTIONS} changes per request` });
+  try {
+    const ids = [...new Set(incoming.map((c) => c?.transactionId).filter((id) => typeof id === "string" && id))];
+    const [txns, categories] = await Promise.all([getTransactionsByIds(ids), getCategories()]);
+    const { changes, skipped } = validateChanges(incoming, {
+      allowedIds: new Set(txns.map((t) => t.id)),
+      categoryIds: new Set(categories.map((c) => c.id)),
+    });
+    const applied = await applyBulkChanges(changes);
+    console.log(`bulk-update apply: ${changes.length} transaction(s), ${skipped.length} skipped`);
+    res.json({ ok: true, transactions: changes.length, categories: applied.categories, merchants: applied.merchants, skipped });
+  } catch (err) {
+    console.error("bulk-update apply:", err?.message);
+    res.status(500).json({ error: "Bulk update failed" });
   }
 });
 
