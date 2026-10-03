@@ -808,3 +808,10 @@ test("history is clamped to the last 10 turns and junk entries are dropped", asy
   assert.deepEqual(contents[9], { role: "model", parts: [{ text: "turn 12" }] });
   assert.deepEqual(contents[10], { role: "user", parts: [{ text: "and now?" }] });
 });
+
+test("system prompt points edit requests to the AI bulk edit UI", async () => {
+  const { buildSystemPrompt } = await import("../askAi.js");
+  const p = buildSystemPrompt("2026-10-03");
+  assert.match(p, /AI bulk edit/);
+  assert.match(p, /Transactions/);
+});
