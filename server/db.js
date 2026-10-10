@@ -144,6 +144,18 @@ export async function initDb() {
       PRIMARY KEY (transaction_id)
     );
 
+    -- Rules learned from user assignments: normalized description -> category.
+    -- account_id/amount_key are '' for global rules; ambiguous descriptors
+    -- (Apple Pay, PayPal...) are scoped to account + exact amount.
+    CREATE TABLE IF NOT EXISTS learned_category_rules (
+      rule_key TEXT NOT NULL,
+      account_id TEXT NOT NULL DEFAULT '',
+      amount_key TEXT NOT NULL DEFAULT '',
+      category_id UUID NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+      updated_at TIMESTAMP DEFAULT NOW(),
+      PRIMARY KEY (rule_key, account_id, amount_key)
+    );
+
     CREATE TABLE IF NOT EXISTS splits (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       transaction_id TEXT NOT NULL,
@@ -582,6 +594,11 @@ export async function initDb() {
       END IF;
     END $$;
   `);
+
+  // One-time backfill of learned rules from existing assignments (only while
+  // the table is empty; later rules come from upsertAssignment).
+  const { rows: [{ n: ruleCount }] } = await pool.query(`SELECT COUNT(*)::int AS n FROM learned_category_rules`);
+  if (ruleCount === 0) await backfillLearnedRules();
 
   await initPropertyFinanceSchema(pool);
   await initBenefitsSchema(pool);
@@ -1257,7 +1274,14 @@ const KEYWORD_RULES = [
   { keywords: ["DELTA", "UNITED AIRLINES", "SOUTHWEST", "AMERICAN AIR", "AIRBNB", "MARRIOTT", "HILTON", "HYATT"], category: "Rec and Vacation" },
 ];
 
-function suggestCategoryForTx(tx) {
+function suggestCategoryForTx(tx, learned = new Map()) {
+  // 0. Learned rules (from user assignments) beat everything else
+  const scope = ruleScope(tx);
+  if (scope) {
+    const hit = learned.get(`${scope.key}|${scope.account}|${scope.amount}`);
+    if (hit) return hit;
+  }
+
   const searchStr = [tx.merchant, tx.name, tx.original_description]
     .filter(Boolean)
     .join(" ")
@@ -1288,16 +1312,21 @@ function suggestCategoryForTx(tx) {
 
 // Populate suggested_category on transactions that don't have one yet
 export async function populateSuggestedCategories() {
+  const learned = await loadLearnedRules();
+  // Unassigned rows are re-evaluated too so learned rules can supersede an
+  // older keyword/Plaid suggestion; assigned rows are never touched.
   const { rows: txns } = await pool.query(`
-    SELECT id, merchant, name, original_description, primary_category, plaid_category
-    FROM transactions
-    WHERE suggested_category IS NULL
+    SELECT t.id, t.merchant, t.name, t.original_description, t.primary_category, t.plaid_category,
+           t.account, t.amount::float AS amount, t.suggested_category
+    FROM transactions t
+    LEFT JOIN assignments a ON a.transaction_id = t.id
+    WHERE t.suggested_category IS NULL OR a.transaction_id IS NULL
   `);
 
   let updated = 0;
   for (const tx of txns) {
-    const suggestion = suggestCategoryForTx(tx);
-    if (suggestion) {
+    const suggestion = suggestCategoryForTx(tx, learned);
+    if (suggestion && suggestion !== tx.suggested_category) {
       await pool.query(
         `UPDATE transactions SET suggested_category = $1 WHERE id = $2`,
         [suggestion, tx.id]
@@ -2188,6 +2217,95 @@ export async function upsertAssignment(transactionId, categoryId, db = pool) {
      ON CONFLICT (transaction_id) DO UPDATE SET category_id = $2, updated_at = NOW()`,
     [transactionId, categoryId || null]
   );
+  if (categoryId) await learnRuleFromAssignment(transactionId, categoryId, db);
+}
+
+// ── Learned category rules ────────────────────────────────────────────────────
+// Descriptors shared by many unrelated payees; a rule for these is only valid
+// for the same account and exact amount.
+const AMBIGUOUS_RULE_KEYS = new Set([
+  "apple pay", "apple cash", "applepay", "paypal", "venmo", "zelle", "cash app", "square", "sq", "tst", "pos purchase",
+]);
+
+// 'PLK*1234 #55' -> 'plk'; lowercase, drop digits/punctuation, collapse spaces.
+export function normalizeRuleKey(tx) {
+  for (const s of [tx.original_description, tx.name, tx.merchant]) {
+    const key = (s || "").toLowerCase().replace(/[^a-z\s]/g, " ").replace(/\s+/g, " ").trim();
+    if (key) return key;
+  }
+  return "";
+}
+
+function ruleScope(tx) {
+  const key = normalizeRuleKey(tx);
+  if (!key) return null;
+  const scoped = AMBIGUOUS_RULE_KEYS.has(key);
+  return {
+    key,
+    account: scoped ? String(tx.account || "") : "",
+    amount: scoped ? Number(tx.amount).toFixed(2) : "",
+  };
+}
+
+async function learnRuleFromAssignment(transactionId, categoryId, db = pool) {
+  const { rows } = await db.query(
+    `SELECT merchant, name, original_description, account, amount::float AS amount
+     FROM transactions WHERE id = $1`,
+    [transactionId]
+  );
+  const scope = rows[0] && ruleScope(rows[0]);
+  if (!scope) return;
+  await db.query(
+    `INSERT INTO learned_category_rules (rule_key, account_id, amount_key, category_id, updated_at)
+     VALUES ($1, $2, $3, $4, NOW())
+     ON CONFLICT (rule_key, account_id, amount_key)
+     DO UPDATE SET category_id = $4, updated_at = NOW()`,
+    [scope.key, scope.account, scope.amount, categoryId]
+  );
+}
+
+// Build rules from existing assignments: most frequent category per scoped key,
+// skipping keys with no clear majority. Never overwrites an existing rule and
+// never touches assignments.
+export async function backfillLearnedRules() {
+  const { rows } = await pool.query(
+    `SELECT t.merchant, t.name, t.original_description, t.account, t.amount::float AS amount, a.category_id
+     FROM assignments a JOIN transactions t ON t.id = a.transaction_id
+     WHERE a.category_id IS NOT NULL`
+  );
+  const groups = new Map();
+  for (const r of rows) {
+    const scope = ruleScope(r);
+    if (!scope) continue;
+    const gk = JSON.stringify([scope.key, scope.account, scope.amount]);
+    if (!groups.has(gk)) groups.set(gk, { scope, counts: new Map(), total: 0 });
+    const g = groups.get(gk);
+    g.counts.set(r.category_id, (g.counts.get(r.category_id) || 0) + 1);
+    g.total++;
+  }
+  let created = 0;
+  for (const { scope, counts, total } of groups.values()) {
+    const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+    const [topCat, topN] = ranked[0];
+    if (ranked.length > 1 && (topN === ranked[1][1] || topN / total <= 0.5)) continue;
+    const { rowCount } = await pool.query(
+      `INSERT INTO learned_category_rules (rule_key, account_id, amount_key, category_id)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (rule_key, account_id, amount_key) DO NOTHING`,
+      [scope.key, scope.account, scope.amount, topCat]
+    );
+    created += rowCount;
+  }
+  return created;
+}
+
+// rule lookup map: "key|account|amount" -> category name
+async function loadLearnedRules() {
+  const { rows } = await pool.query(
+    `SELECT r.rule_key, r.account_id, r.amount_key, c.name
+     FROM learned_category_rules r JOIN categories c ON c.id = r.category_id`
+  );
+  return new Map(rows.map((r) => [`${r.rule_key}|${r.account_id}|${r.amount_key}`, r.name]));
 }
 
 // ── Review state & Gmail receipt scanning ─────────────────────────────────────

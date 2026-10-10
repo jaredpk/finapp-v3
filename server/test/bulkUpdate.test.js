@@ -132,7 +132,7 @@ test("applyBulkChanges writes both upserts in one BEGIN/COMMIT and counts them",
       { transactionId: "t2", categoryId: null, merchant: "Coffee" },
     ]);
     assert.deepEqual(counts, { categories: 1, merchants: 2 });
-    assert.deepEqual(queries.map((q) => q.sql), ["BEGIN", "INSERT", "INSERT", "INSERT", "COMMIT"]);
+    assert.deepEqual(queries.map((q) => q.sql), ["BEGIN", "INSERT", "SELECT", "INSERT", "INSERT", "COMMIT"]);
     assert.ok(client.released);
   } finally {
     pool.connect = original;

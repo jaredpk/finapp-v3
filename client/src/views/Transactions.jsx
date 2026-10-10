@@ -102,6 +102,28 @@ export default function Transactions({
   const getDisplayName = (t) =>
     merchantOverrides?.[t.transaction_id] || t.merchant_name || t.name || t.suggested_category || "Unknown";
 
+  // Muted extra detail: raw bank description (when it adds something beyond the
+  // displayed merchant), 'City, ST', else the Plaid category for Plaid rows.
+  const getContext = (t) => {
+    const squash = (s) => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    const shown = squash(getDisplayName(t));
+    const orig = (t.original_description || "").trim();
+    const o = squash(orig);
+    const parts = [];
+    if (o && !(shown && (o.includes(shown) || shown.includes(o)))) parts.push(orig);
+    const place = [t.city, t.state].filter(Boolean).join(", ");
+    if (place) parts.push(place);
+    let plaid = null;
+    if (t.primary_category) {
+      const label = t.primary_category.replace(/_/g, " ").toLowerCase().replace(/^./, (c) => c.toUpperCase());
+      plaid = `Plaid: ${label}${t.category_confidence ? ` (${t.category_confidence.replace(/_/g, " ").toLowerCase()} confidence)` : ""}`;
+      if (!parts.length) parts.push(label);
+    }
+    const text = parts.join(" · ");
+    const title = [...parts, plaid].filter((p, i, a) => p && a.indexOf(p) === i).join("\n");
+    return { text, title };
+  };
+
   // What the loaded rows say. `transactions` is one capped page of the table
   // (/api/transactions returns the 2000 most recent by default), so this answers
   // "what am I holding", not "what exists". Still computed on every render: it
@@ -726,6 +748,7 @@ export default function Transactions({
           <div style={styles.tableHeader}>
             <span style={styles.sortable} onClick={() => toggleSort("date")}>Date {sortIcon("date")}</span>
             <span style={styles.sortable} onClick={() => toggleSort("merchant")}>Merchant {sortIcon("merchant")}</span>
+            <span>Context</span>
             <span style={styles.sortable} onClick={() => toggleSort("account")}>Account {sortIcon("account")}</span>
             <span style={{ ...styles.sortable, textAlign: "right" }} onClick={() => toggleSort("amount")}>Amount {sortIcon("amount")}</span>
             <span>Category</span>
@@ -779,6 +802,13 @@ export default function Transactions({
                       </span>
                     )}
                   </span>
+
+                  {(() => {
+                    const ctx = getContext(t);
+                    return (
+                      <span style={styles.contextCell} title={ctx.title || undefined}>{ctx.text || "—"}</span>
+                    );
+                  })()}
 
                   <span style={styles.acct}>{acctMap[t.account_id] || t.account_id || "—"}</span>
 
@@ -1110,7 +1140,7 @@ const styles = {
 
   tableWrap: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", overflowX: "auto" },
   tableHeader: {
-    display: "grid", gridTemplateColumns: "76px minmax(0,1fr) minmax(0,150px) 96px minmax(0,210px) 110px", minWidth: 800,
+    display: "grid", gridTemplateColumns: "76px minmax(0,1fr) minmax(0,170px) minmax(0,150px) 96px minmax(0,210px) 110px", minWidth: 970,
     padding: "10px 16px", background: "var(--surface2)",
     fontSize: 10, fontWeight: 600, letterSpacing: "0.1em",
     textTransform: "uppercase", color: "var(--muted)", fontFamily: "var(--font-mono)",
@@ -1120,7 +1150,7 @@ const styles = {
   sortNeutral: { opacity: 0.3, fontSize: 10 },
   sortActive:  { color: "var(--accent)", fontSize: 10 },
   row: {
-    display: "grid", gridTemplateColumns: "76px minmax(0,1fr) minmax(0,150px) 96px minmax(0,210px) 110px", minWidth: 800,
+    display: "grid", gridTemplateColumns: "76px minmax(0,1fr) minmax(0,170px) minmax(0,150px) 96px minmax(0,210px) 110px", minWidth: 970,
     padding: "9px 16px", borderBottom: "1px solid var(--border)",
     alignItems: "center",
   },
@@ -1132,6 +1162,7 @@ const styles = {
     borderRadius: 4, color: "var(--text)", fontSize: 13,
     fontFamily: "var(--font-mono)", outline: "none",
   },
+  contextCell: { fontSize: 11, color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", paddingRight: 12 },
   acct:   { fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", paddingRight: 12 },
   amount: { fontSize: 13, fontFamily: "var(--font-mono)", textAlign: "right", fontWeight: 500, paddingRight: 16 },
   catCell: { minWidth: 0 },
