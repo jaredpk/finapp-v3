@@ -152,7 +152,11 @@ async function syncTransactionsCore() {
     let hasMore = true;
     let lastAccounts = [];
     while (hasMore) {
-      const r = await plaidClient.transactionsSync({ access_token: accessToken, cursor });
+      const r = await plaidClient.transactionsSync({
+        access_token: accessToken,
+        cursor,
+        options: { include_original_description: true },
+      });
 
       // 1. Delete transactions Plaid says are removed
       const removedIds = (r.data.removed || []).map((t) => t.transaction_id).filter(Boolean);
