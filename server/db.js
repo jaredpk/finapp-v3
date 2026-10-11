@@ -389,7 +389,8 @@ export async function initDb() {
       ADD COLUMN IF NOT EXISTS website                TEXT,
       ADD COLUMN IF NOT EXISTS logo_url               TEXT,
       ADD COLUMN IF NOT EXISTS original_description   TEXT,
-      ADD COLUMN IF NOT EXISTS suggested_category     TEXT;
+      ADD COLUMN IF NOT EXISTS suggested_category     TEXT,
+      ADD COLUMN IF NOT EXISTS payment_channel         TEXT;
   `);
 
   // Every transaction scan behind card-benefit tracking is bounded by account
@@ -798,11 +799,33 @@ export async function upsertTransactions(transactions) {
     const category = t.personal_finance_category?.primary || t.category?.[0] || t.plaid_category || null;
     const status = t.pending ? 'pending' : 'reviewed';  // constraint: pending | reviewed
     const pendingTxnId = t.pending_transaction_id || null;
+    // Context-column fields. All null-safe; on conflict a null never wipes data.
+    const pfc = t.personal_finance_category;
     await pool.query(
-      `INSERT INTO transactions (id, date, merchant, amount, account, plaid_category, status, currency, pending_transaction_id, reviewed_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'USD', $8, NOW())
-       ON CONFLICT (id) DO UPDATE SET amount = $4, status = $7, pending_transaction_id = $8`,
-      [txnId, t.date, merchant, t.amount, t.account_id || t.account || 'unknown', category, status, pendingTxnId]
+      `INSERT INTO transactions
+         (id, date, merchant, amount, account, plaid_category, status, currency, pending_transaction_id, reviewed_at,
+          name, original_description, city, state, website, logo_url,
+          primary_category, category_confidence, authorized_date, payment_channel)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'USD', $8, NOW(),
+               $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+       ON CONFLICT (id) DO UPDATE SET
+         amount = $4, status = $7, pending_transaction_id = $8,
+         name                 = COALESCE(EXCLUDED.name, transactions.name),
+         original_description = COALESCE(EXCLUDED.original_description, transactions.original_description),
+         city                 = COALESCE(EXCLUDED.city, transactions.city),
+         state                = COALESCE(EXCLUDED.state, transactions.state),
+         website              = COALESCE(EXCLUDED.website, transactions.website),
+         logo_url             = COALESCE(EXCLUDED.logo_url, transactions.logo_url),
+         primary_category     = COALESCE(EXCLUDED.primary_category, transactions.primary_category),
+         category_confidence  = COALESCE(EXCLUDED.category_confidence, transactions.category_confidence),
+         authorized_date      = COALESCE(EXCLUDED.authorized_date, transactions.authorized_date),
+         payment_channel      = COALESCE(EXCLUDED.payment_channel, transactions.payment_channel)`,
+      [
+        txnId, t.date, merchant, t.amount, t.account_id || t.account || 'unknown', category, status, pendingTxnId,
+        t.name || null, t.original_description || null, t.location?.city || null, t.location?.region || null,
+        t.website || null, t.logo_url || null, pfc?.primary || null, pfc?.confidence_level || null,
+        t.authorized_date || null, t.payment_channel || null,
+      ]
     );
   }
 }
