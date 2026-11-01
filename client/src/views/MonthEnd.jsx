@@ -14,7 +14,7 @@ function previousMonth() {
 const DEFAULT_VERIZON_LINES = 2;
 const DEFAULT_VERIZON_LINE_AMOUNT = 37.49;
 
-const COLS ="90px minmax(0,1fr) 140px 140px 100px";
+const COLS = "90px minmax(0,1fr) 140px 140px 100px";
 
 function TxnTable({ rows }) {
   if (!rows.length) return <p style={styles.empty}>None</p>;

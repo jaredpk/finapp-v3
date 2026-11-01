@@ -118,7 +118,7 @@ export function buildMonthEndReconciliation({ month, rows = [], config = {} } = 
       line_amount: money(lineCents),
       total: money(verizonTotalCents),
       share: money(verizonShareCents),
-      label: `Verizon: ${cfg.verizonLines} lines x ${fmt(lineCents)} (plan + surcharges + taxes/fees) =${fmt(verizonTotalCents)}`,
+      label: `Verizon: ${cfg.verizonLines} lines x ${fmt(lineCents)} (plan + surcharges + taxes/fees) = ${fmt(verizonTotalCents)}`,
     },
     total_due: money(totalDueCents),
     review: {

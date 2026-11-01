@@ -89,7 +89,7 @@ test("review lists: uncategorized and health-related only, excluded from totals 
   assert.deepEqual(r.review.health.map((x) => x.transaction_id), ["3", "6"]);
   assert.equal(r.kids.rows.length, 1);
   assert.equal(r.kids.subtotal, 60);
-  assert.equal(r.total_due, 30 + 37.49);
+  assert.equal(r.total_due, 67.49);
 });
 
 test("empty month yields zeros plus the Verizon share", () => {
