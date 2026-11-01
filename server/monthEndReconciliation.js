@@ -71,6 +71,12 @@ export function isHealthCategory(name) {
   return !isKidsCategory(n) && /health|medical|dental|vision|pharm|doctor/.test(n);
 }
 
+// Exactly "Personal - Jared" (case-insensitive, trimmed). Listed only: never
+// part of the kids share, Verizon, total due, or the review lists.
+export function isPersonalJaredCategory(name) {
+  return norm(name) === "personal - jared";
+}
+
 export function isUncategorized(name) {
   return norm(name) === "";
 }
@@ -124,10 +130,12 @@ export function buildMonthEndReconciliation({ month, rows = [], config = {} } = 
   const shaped = rows.map(shapeRow).sort(byDate);
 
   const kids = shaped.filter((r) => isKidsCategory(r.category));
+  const personalJared = shaped.filter((r) => isPersonalJaredCategory(r.category));
   const uncategorized = shaped.filter((r) => isUncategorized(r.category));
   const health = shaped.filter((r) => isHealthCategory(r.category));
 
   const kidsSubtotalCents = kids.reduce((s, r) => s + r._cents, 0);
+  const personalJaredSubtotalCents = personalJared.reduce((s, r) => s + r._cents, 0);
   const kidsShareCents = shareOfCents(kidsSubtotalCents, cfg.share);
 
   const lineCents = toCents(cfg.verizonLineAmount);
@@ -173,6 +181,10 @@ export function buildMonthEndReconciliation({ month, rows = [], config = {} } = 
     },
     total_due: money(totalDueCents),
     health_equity: healthEquityStatus(month, rows),
+    personal_jared: {
+      rows: personalJared.map(publicRow),
+      subtotal: money(personalJaredSubtotalCents),
+    },
     review: {
       uncategorized: uncategorized.map(publicRow),
       health: health.map(publicRow),
@@ -212,6 +224,12 @@ export function buildMonthEndSheetRows(result) {
   out.push([]);
 
   out.push(["", "", "", "TOTAL DUE", result.total_due]);
+  out.push([]);
+
+  out.push(["PERSONAL - JARED (listed only - not included in total due)"]);
+  out.push(header);
+  for (const r of result.personal_jared.rows) out.push(line(r));
+  out.push(["", "", "", "Subtotal", result.personal_jared.subtotal]);
   out.push([]);
 
   out.push(["REVIEW - UNCATEGORIZED (not included in totals)"]);
