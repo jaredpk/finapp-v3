@@ -12,7 +12,9 @@
 
 export const DEFAULT_MONTH_END_CONFIG = {
   verizonLines: 2,
-  verizonLineAmount: 30.0, // dollars, per line
+  // dollars, per line: exact Oct 2026 bill charge = $30.00 plan + $4.89
+  // surcharges + $2.60 taxes/fees
+  verizonLineAmount: 37.49,
   share: 0.5,
 };
 
@@ -116,7 +118,7 @@ export function buildMonthEndReconciliation({ month, rows = [], config = {} } = 
       line_amount: money(lineCents),
       total: money(verizonTotalCents),
       share: money(verizonShareCents),
-      label: `Verizon: ${cfg.verizonLines} lines x ${fmt(lineCents)} = ${fmt(verizonTotalCents)}`,
+      label: `Verizon: ${cfg.verizonLines} lines x ${fmt(lineCents)} (plan + surcharges + taxes/fees) =${fmt(verizonTotalCents)}`,
     },
     total_due: money(totalDueCents),
     review: {

@@ -48,13 +48,21 @@ test("50% share rounds half-up to the cent without float drift", () => {
   assert.equal(shareOfCents(4, 0.5), 2);
 });
 
-test("verizon: 2 lines x $30 = $60, 50% = $30; total due combines both shares", () => {
+test("verizon: 2 lines x $37.49 = $74.98, 50% = $37.49; total due combines both shares", () => {
   const r = buildMonthEndReconciliation({ month: MONTH, rows: [row("1", "2026-10-02", "School", "Kids", 100)] });
   assert.equal(r.verizon.lines, 2);
-  assert.equal(r.verizon.total, 60);
-  assert.equal(r.verizon.share, 30);
-  assert.equal(r.verizon.label, "Verizon: 2 lines x $30.00 = $60.00");
-  assert.equal(r.total_due, 80);
+  assert.equal(r.verizon.line_amount, 37.49);
+  assert.equal(r.verizon.total, 74.98);
+  assert.equal(r.verizon.share, 37.49);
+  assert.equal(r.verizon.label, "Verizon: 2 lines x $37.49 (plan + surcharges + taxes/fees) = $74.98");
+  assert.equal(r.total_due, 87.49);
+});
+
+test("verizon defaults (no config) give total 74.98 and share 37.49", () => {
+  const r = buildMonthEndReconciliation({ month: MONTH, rows: [] });
+  assert.equal(r.verizon.total, 74.98);
+  assert.equal(r.verizon.share, 37.49);
+  assert.equal(r.total_due, 37.49);
 });
 
 test("verizon config overrides", () => {
@@ -81,7 +89,7 @@ test("review lists: uncategorized and health-related only, excluded from totals 
   assert.deepEqual(r.review.health.map((x) => x.transaction_id), ["3", "6"]);
   assert.equal(r.kids.rows.length, 1);
   assert.equal(r.kids.subtotal, 60);
-  assert.equal(r.total_due, 30 + 30);
+  assert.equal(r.total_due, 30 + 37.49);
 });
 
 test("empty month yields zeros plus the Verizon share", () => {
@@ -89,7 +97,7 @@ test("empty month yields zeros plus the Verizon share", () => {
   assert.equal(r.kids.subtotal, 0);
   assert.equal(r.kids.share, 0);
   assert.deepEqual(r.review, { uncategorized: [], health: [] });
-  assert.equal(r.total_due, 30);
+  assert.equal(r.total_due, 37.49);
 });
 
 test("sheet rows are stacked in the requested order", () => {

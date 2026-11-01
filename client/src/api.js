@@ -314,9 +314,20 @@ export async function downloadXlsx(startDate, endDate, offset) {
 
 // ── Month-end reconciliation ──────────────────────────────────────────────────
 // month is YYYY-MM (server defaults to the previous full month when omitted).
-export async function fetchMonthEnd(month) {
+// Optional { verizonLines, verizonLineAmount } are only sent when valid.
+function setVerizonParams(qs, { verizonLines, verizonLineAmount } = {}) {
+  if (Number.isInteger(verizonLines) && verizonLines >= 0 && verizonLines <= 999) {
+    qs.set("verizonLines", String(verizonLines));
+  }
+  if (Number.isFinite(verizonLineAmount) && verizonLineAmount >= 0 && verizonLineAmount < 1e7) {
+    qs.set("verizonLineAmount", (Math.round(verizonLineAmount * 100) / 100).toFixed(2));
+  }
+}
+
+export async function fetchMonthEnd(month, verizon) {
   const qs = new URLSearchParams();
   if (month) qs.set("month", month);
+  setVerizonParams(qs, verizon);
   const r = await fetch(`${BASE}/reconcile/month-end${qs.toString() ? `?${qs}` : ""}`, {
     headers: await authHeaders(),
   });
@@ -327,11 +338,12 @@ export async function fetchMonthEnd(month) {
   return r.json();
 }
 
-export async function downloadMonthEndXlsx(month) {
+export async function downloadMonthEndXlsx(month, verizon) {
   const headers = await authHeaders();
   delete headers["Content-Type"];
   const qs = new URLSearchParams();
   if (month) qs.set("month", month);
+  setVerizonParams(qs, verizon);
   const r = await fetch(`${BASE}/reconcile/month-end.xlsx${qs.toString() ? `?${qs}` : ""}`, { headers });
   if (!r.ok) {
     const body = await r.json().catch(() => ({}));

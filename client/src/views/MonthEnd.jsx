@@ -10,7 +10,11 @@ function previousMonth() {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1)).toISOString().slice(0, 7);
 }
 
-const COLS = "90px minmax(0,1fr) 140px 140px 100px";
+// Match the server defaults (exact per-line bill charge incl. surcharges, taxes, fees).
+const DEFAULT_VERIZON_LINES = 2;
+const DEFAULT_VERIZON_LINE_AMOUNT = 37.49;
+
+const COLS ="90px minmax(0,1fr) 140px 140px 100px";
 
 function TxnTable({ rows }) {
   if (!rows.length) return <p style={styles.empty}>None</p>;
@@ -43,24 +47,32 @@ export default function MonthEnd() {
   const [loading, setLoading] = useState(true);
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState(null);
+  const [linesInput, setLinesInput] = useState(String(DEFAULT_VERIZON_LINES));
+  const [amountInput, setAmountInput] = useState(DEFAULT_VERIZON_LINE_AMOUNT.toFixed(2));
+
+  // Empty/invalid input falls back to the defaults so bad values are never sent.
+  const verizonLines = /^\d{1,3}$/.test(linesInput.trim()) ? Number(linesInput.trim()) : DEFAULT_VERIZON_LINES;
+  const verizonLineAmount = /^\d{1,7}(\.\d{1,2})?$/.test(amountInput.trim())
+    ? Number(amountInput.trim())
+    : DEFAULT_VERIZON_LINE_AMOUNT;
 
   useEffect(() => {
     if (!/^\d{4}-\d{2}$/.test(month)) return;
     let cancelled = false;
     setLoading(true);
     setError(null);
-    fetchMonthEnd(month)
+    fetchMonthEnd(month, { verizonLines, verizonLineAmount })
       .then((res) => { if (!cancelled) setData(res); })
       .catch((e) => { if (!cancelled) { setError(e.message); setData(null); } })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [month]);
+  }, [month, verizonLines, verizonLineAmount]);
 
   async function handleDownload() {
     setDownloading(true);
     setError(null);
     try {
-      await downloadMonthEndXlsx(month);
+      await downloadMonthEndXlsx(month, { verizonLines, verizonLineAmount });
     } catch (e) {
       setError(e.message);
     } finally {
@@ -78,6 +90,28 @@ export default function MonthEnd() {
           onChange={(e) => setMonth(e.target.value)}
           style={styles.dateInput}
         />
+        <label style={styles.fieldLabel}>
+          Verizon per-line amount ($)
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            value={amountInput}
+            onChange={(e) => setAmountInput(e.target.value)}
+            style={{ ...styles.dateInput, width: 90 }}
+          />
+        </label>
+        <label style={styles.fieldLabel}>
+          Lines
+          <input
+            type="number"
+            min="0"
+            step="1"
+            value={linesInput}
+            onChange={(e) => setLinesInput(e.target.value)}
+            style={{ ...styles.dateInput, width: 60 }}
+          />
+        </label>
         <button onClick={handleDownload} disabled={downloading || !data} style={styles.chip}>
           {downloading ? "Downloading…" : "Download Excel"}
         </button>
@@ -137,6 +171,7 @@ const styles = {
     borderRadius: "var(--radius)", color: "var(--text)", fontSize: 12,
     fontFamily: "var(--font-mono)", outline: "none",
   },
+  fieldLabel: { display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)" },
   count: { fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", marginLeft: "auto" },
   errorBox: {
     padding: "10px 14px", marginBottom: 16, background: "var(--surface)",
