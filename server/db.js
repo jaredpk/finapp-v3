@@ -1147,6 +1147,7 @@ export async function getMonthEndRows(startDate, endDate) {
             TO_CHAR(c.date, 'YYYY-MM-DD') AS date,
             c.merchant,
             COALESCE(an.nickname, c.account) AS account,
+            c.account AS account_raw,
             c.amount::float AS amount,
             cat.name AS category
      FROM contributions c
