@@ -312,6 +312,63 @@ export async function downloadXlsx(startDate, endDate, offset) {
   return { filename, ...readTruncation(r) };
 }
 
+// ── Month-end reconciliation ──────────────────────────────────────────────────
+// month is YYYY-MM (server defaults to the previous full month when omitted).
+// Optional { verizonLines, verizonLineAmount, verizonAccountCredit,
+// verizonAccountLines } are only sent when valid.
+function setVerizonParams(qs, { verizonLines, verizonLineAmount, verizonAccountCredit, verizonAccountLines } = {}) {
+  if (Number.isInteger(verizonLines) && verizonLines >= 0 && verizonLines <= 999) {
+    qs.set("verizonLines", String(verizonLines));
+  }
+  if (Number.isFinite(verizonLineAmount) && verizonLineAmount >= 0 && verizonLineAmount < 1e7) {
+    qs.set("verizonLineAmount", (Math.round(verizonLineAmount * 100) / 100).toFixed(2));
+  }
+  if (Number.isFinite(verizonAccountCredit) && verizonAccountCredit >= 0 && verizonAccountCredit < 1e7) {
+    qs.set("verizonAccountCredit", (Math.round(verizonAccountCredit * 100) / 100).toFixed(2));
+  }
+  if (Number.isInteger(verizonAccountLines) && verizonAccountLines >= 1 && verizonAccountLines <= 999) {
+    qs.set("verizonAccountLines", String(verizonAccountLines));
+  }
+}
+
+export async function fetchMonthEnd(month, verizon) {
+  const qs = new URLSearchParams();
+  if (month) qs.set("month", month);
+  setVerizonParams(qs, verizon);
+  const r = await fetch(`${BASE}/reconcile/month-end${qs.toString() ? `?${qs}` : ""}`, {
+    headers: await authHeaders(),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body.error || `Month-end request failed: ${r.status}`);
+  }
+  return r.json();
+}
+
+export async function downloadMonthEndXlsx(month, verizon) {
+  const headers = await authHeaders();
+  delete headers["Content-Type"];
+  const qs = new URLSearchParams();
+  if (month) qs.set("month", month);
+  setVerizonParams(qs, verizon);
+  const r = await fetch(`${BASE}/reconcile/month-end.xlsx${qs.toString() ? `?${qs}` : ""}`, { headers });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body.error || "Export failed");
+  }
+  const blob = await r.blob();
+  const disposition = r.headers.get("Content-Disposition") || "";
+  const match = disposition.match(/filename="([^"]+)"/);
+  const filename = match ? match[1] : `month-end-${month || "export"}.xlsx`;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+  return { filename };
+}
+
 export async function importTransactions(transactions) {
   const r = await fetch(`${BASE}/import`, {
     method: "POST",

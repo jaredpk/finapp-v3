@@ -4,6 +4,7 @@ import {
   ResponsiveContainer, CartesianGrid, Legend,
 } from "recharts";
 import { fetchReportSummary } from "../api.js";
+import MonthEnd from "./MonthEnd.jsx";
 
 const fmt = (n) =>
   n == null ? "—" : "$" + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -247,6 +248,9 @@ export default function Reports() {
           </div>
         )}
       </div>
+
+      {/* Month-end reconciliation */}
+      <MonthEnd />
     </div>
   );
 }

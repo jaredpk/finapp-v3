@@ -20,7 +20,7 @@ import {
   getUserItems, upsertUserItem, removeUserItem,
   getCursor, saveCursor, upsertTransactions,
   clearCursors, listTransactionIds, getTransactionsByIds,
-  getTransactions, getVisibleTransactions, getTransactionStats, getSpendingByCategory, getReportSummary,
+  getTransactions, getVisibleTransactions, getTransactionStats, getSpendingByCategory, getReportSummary, getMonthEndRows,
   deleteRemovedTransactions, populateSuggestedCategories, applySuggestedCategories,
   findDuplicateTransactions, deduplicateTransactions,
   getSuppressions, recordSuppression, tryAdvisoryLock, releaseAdvisoryLock,
@@ -51,6 +51,10 @@ import {
   getGeminiUsageByFeature,
 } from "./db.js";
 import pool from "./db.js";
+import {
+  buildMonthEndReconciliation, buildMonthEndSheetRows, monthEndSheetName,
+  isValidMonth, previousMonth, monthRange, parseMonthEndConfig,
+} from "./monthEndReconciliation.js";
 import { gmailConfigured, getGmailAuthUrl, exchangeGmailAuthCode, gmailConnected, getGrantedScopes, canSendMail, checkGmailToken } from "./gmail.js";
 import { buildDigestEmail, sendAlert, sendTestEmail } from "./alertEmail.js";
 import { receiptScanConfigured, runReceiptScan } from "./receiptScan.js";
@@ -1653,6 +1657,56 @@ app.get("/api/export-xlsx", requireAuth, async (req, res) => {
     res.send(buf);
   } catch (err) {
     console.error("Export error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Month-end reconciliation ─────────────────────────────────────────────────
+// Kids + kids-health spend (50% share), a Verizon allocation, and review lists
+// of uncategorized / Health transactions. `month` is YYYY-MM and defaults to the
+// previous full month; verizonLines / verizonLineAmount / verizonAccountCredit /
+// verizonAccountLines optionally override the defaults. See monthEndReconciliation.js.
+async function loadMonthEnd(req) {
+  const month = req.query.month || previousMonth();
+  if (!isValidMonth(month)) return { status: 400, error: "month must be YYYY-MM" };
+  const parsed = parseMonthEndConfig({
+    verizonLines: req.query.verizonLines,
+    verizonLineAmount: req.query.verizonLineAmount,
+    verizonAccountCredit: req.query.verizonAccountCredit,
+    verizonAccountLines: req.query.verizonAccountLines,
+  });
+  if (parsed.error) return { status: 400, error: parsed.error };
+  const { startDate, endDate } = monthRange(month);
+  const rows = await getMonthEndRows(startDate, endDate);
+  return { result: buildMonthEndReconciliation({ month, rows, config: parsed.config }) };
+}
+
+app.get("/api/reconcile/month-end", requireAuth, async (req, res) => {
+  try {
+    const out = await loadMonthEnd(req);
+    if (out.error) return res.status(out.status).json({ error: out.error });
+    res.json(out.result);
+  } catch (err) {
+    console.error("Month-end reconciliation error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/reconcile/month-end.xlsx", requireAuth, async (req, res) => {
+  try {
+    const out = await loadMonthEnd(req);
+    if (out.error) return res.status(out.status).json({ error: out.error });
+    const { utils, write } = xlsxLib;
+    const wb = utils.book_new();
+    const ws = utils.aoa_to_sheet(buildMonthEndSheetRows(out.result));
+    ws["!cols"] = [{ wch: 28 }, { wch: 30 }, { wch: 20 }, { wch: 22 }, { wch: 12 }];
+    utils.book_append_sheet(wb, ws, monthEndSheetName(out.result.month));
+    const buf = write(wb, { type: "buffer", bookType: "xlsx" });
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="month-end-${out.result.month}.xlsx"`);
+    res.send(buf);
+  } catch (err) {
+    console.error("Month-end export error:", err);
     res.status(500).json({ error: err.message });
   }
 });
