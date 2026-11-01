@@ -49,12 +49,16 @@ import {
   getTransactionDateAmountSet, parseAuditXlsx,
   reviewTransactions, unreviewTransaction, getGmailRefreshToken,
   getGeminiUsageByFeature,
+  getExistingTransactionIds, importHealthEquityRows,
 } from "./db.js";
 import pool from "./db.js";
 import {
   buildMonthEndReconciliation, buildMonthEndSheetRows, monthEndSheetName,
-  isValidMonth, previousMonth, monthRange, parseMonthEndConfig,
+  isValidMonth, previousMonth, monthRange, parseMonthEndConfig, HEALTH_EQUITY_RE,
 } from "./monthEndReconciliation.js";
+import {
+  parseHealthEquityFile, buildHealthEquityPreview, HealthEquityParseError, HE_ACCOUNT_DEFAULT,
+} from "./healthEquityImport.js";
 import { gmailConfigured, getGmailAuthUrl, exchangeGmailAuthCode, gmailConnected, getGrantedScopes, canSendMail, checkGmailToken } from "./gmail.js";
 import { buildDigestEmail, sendAlert, sendTestEmail } from "./alertEmail.js";
 import { receiptScanConfigured, runReceiptScan } from "./receiptScan.js";
@@ -1514,6 +1518,60 @@ app.post("/api/simplifi/import", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("Simplifi import error:", err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ── HealthEquity HSA import ───────────────────────────────────────────────────
+// Body { file: <base64>, filename, account }. Preview never writes; import
+// inserts only rows whose id is not already present.
+const HE_MAX_BYTES = 10 * 1024 * 1024;
+const HE_EXT_RE = /\.(xls|xlsx|csv|html?)$/i;
+
+function readHealthEquityRequest(req) {
+  const { file, filename, account } = req.body || {};
+  if (!file || typeof file !== "string") return { status: 400, error: "file required (base64)" };
+  if (filename && (typeof filename !== "string" || !HE_EXT_RE.test(filename))) {
+    return { status: 400, error: "Unsupported file type. Upload the HealthEquity export (.xls, .xlsx, .csv or .html)." };
+  }
+  const acct = String(account ?? "").trim() || HE_ACCOUNT_DEFAULT;
+  if (!HEALTH_EQUITY_RE.test(acct)) {
+    return { status: 400, error: 'Account name must contain "HealthEquity" (e.g. "HealthEquity HSA") so the month-end check can find it.' };
+  }
+  if (file.length > HE_MAX_BYTES * 1.4) return { status: 400, error: "File is too large (10 MB max)." };
+  const buf = Buffer.from(file, "base64");
+  if (!buf.length) return { status: 400, error: "The file is empty." };
+  if (buf.length > HE_MAX_BYTES) return { status: 400, error: "File is too large (10 MB max)." };
+  let parsed;
+  try {
+    parsed = parseHealthEquityFile(buf);
+  } catch (err) {
+    if (err instanceof HealthEquityParseError) return { status: 400, error: err.message };
+    throw err;
+  }
+  return { acct, filename: filename || null, ...parsed };
+}
+
+app.post("/api/healthequity/preview", requireAuth, async (req, res) => {
+  try {
+    const r = readHealthEquityRequest(req);
+    if (r.error) return res.status(400).json({ error: r.error });
+    const existing = await getExistingTransactionIds(r.rows.map((x) => x.id));
+    res.json(buildHealthEquityPreview({ filename: r.filename, rows: r.rows, skipped: r.skipped, existingIds: existing }));
+  } catch (err) {
+    console.error("HealthEquity preview error:", err);
+    res.status(500).json({ error: "Could not preview this file." });
+  }
+});
+
+app.post("/api/healthequity/import", requireAuth, async (req, res) => {
+  try {
+    const r = readHealthEquityRequest(req);
+    if (r.error) return res.status(400).json({ error: r.error });
+    const result = await importHealthEquityRows(r.rows, r.acct);
+    res.json({ inserted: result.inserted, already_imported: result.already_imported, skipped: r.skipped.length, categorized_transfer: result.categorized_transfer });
+  } catch (err) {
+    console.error("HealthEquity import error:", err);
+    res.status(500).json({ error: "Import failed; nothing was saved." });
   }
 });
 

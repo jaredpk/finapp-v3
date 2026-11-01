@@ -398,6 +398,25 @@ export async function importSimplifi(csvText, newMappings = {}, newAccountMappin
   return r.json();
 }
 
+// ── HealthEquity HSA import ───────────────────────────────────────────────────
+// The server answers 400 with { error } for bad files/accounts; surface that.
+async function healthEquityPost(path, fileBase64, filename, account) {
+  const r = await fetch(`${BASE}/healthequity/${path}`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ file: fileBase64, filename, account }),
+  });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || `Request failed (${r.status})`);
+  return body;
+}
+
+export const previewHealthEquity = (fileBase64, filename, account) =>
+  healthEquityPost("preview", fileBase64, filename, account);
+
+export const importHealthEquity = (fileBase64, filename, account) =>
+  healthEquityPost("import", fileBase64, filename, account);
+
 export async function fetchImportedAccounts() {
   const r = await fetch(`${BASE}/import/accounts`, { headers: await authHeaders() });
   return r.json();

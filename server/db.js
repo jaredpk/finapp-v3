@@ -1958,6 +1958,56 @@ export async function upsertCsvTransaction(t) {
   return rowCount > 0;
 }
 
+// ── HealthEquity import ───────────────────────────────────────────────────────
+export async function getExistingTransactionIds(ids) {
+  if (!ids.length) return new Set();
+  const { rows } = await pool.query(`SELECT id FROM transactions WHERE id = ANY($1::text[])`, [ids]);
+  return new Set(rows.map((r) => r.id));
+}
+
+// Writes only NEW rows (ON CONFLICT DO NOTHING, so existing rows and their
+// assignments are never touched) in one transaction. Contribution/interest rows
+// that were actually inserted are filed under the "Transfer" category; card rows
+// stay uncategorized for review.
+export async function importHealthEquityRows(rows, account) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    let inserted = 0, categorizedTransfer = 0;
+    let transferId = null;
+    for (const r of rows) {
+      const { rowCount } = await client.query(
+        `INSERT INTO transactions (id, date, merchant, amount, account, status, currency, reviewed_at, original_description)
+         VALUES ($1, $2, $3, $4, $5, 'reviewed', 'USD', NOW(), $6)
+         ON CONFLICT (id) DO NOTHING`,
+        [r.id, r.date, r.merchant, r.amountDb, account, r.description]
+      );
+      if (rowCount === 0) continue;
+      inserted++;
+      if (r.kind === "card") continue;
+      if (!transferId) {
+        const found = await client.query(
+          `SELECT id FROM categories WHERE LOWER(TRIM(name)) = 'transfer' ORDER BY created_at LIMIT 1`
+        );
+        transferId = found.rows[0]?.id
+          ?? (await client.query(`INSERT INTO categories (name) VALUES ('Transfer') RETURNING id`)).rows[0].id;
+      }
+      const a = await client.query(
+        `INSERT INTO assignments (transaction_id, category_id) VALUES ($1, $2) ON CONFLICT (transaction_id) DO NOTHING`,
+        [r.id, transferId]
+      );
+      categorizedTransfer += a.rowCount;
+    }
+    await client.query("COMMIT");
+    return { inserted, already_imported: rows.length - inserted, categorized_transfer: categorizedTransfer };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 // ── Suppressions ──────────────────────────────────────────────────────────────
 // Every code path that declines to store a transaction writes here first. Silent
 // discards are what let three real July credits disappear without a trace.

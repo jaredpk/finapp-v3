@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { fetchMonthEnd, downloadMonthEndXlsx } from "../api.js";
+import HealthEquityImport from "../components/HealthEquityImport.jsx";
 
 const fmtSigned = (n) =>
   n == null ? "—" : (n < 0 ? "-" : "") + "$" + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -49,6 +50,8 @@ export default function MonthEnd() {
   const [loading, setLoading] = useState(true);
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
   const [linesInput, setLinesInput] = useState(String(DEFAULT_VERIZON_LINES));
   const [amountInput, setAmountInput] = useState(DEFAULT_VERIZON_LINE_AMOUNT.toFixed(2));
   const [creditInput, setCreditInput] = useState(DEFAULT_VERIZON_ACCOUNT_CREDIT.toFixed(2));
@@ -77,7 +80,7 @@ export default function MonthEnd() {
       .catch((e) => { if (!cancelled) { setError(e.message); setData(null); } })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [month, verizonLines, verizonLineAmount, verizonAccountCredit, verizonAccountLines]);
+  }, [month, verizonLines, verizonLineAmount, verizonAccountCredit, verizonAccountLines, reloadKey]);
 
   async function handleDownload() {
     setDownloading(true);
@@ -148,13 +151,17 @@ export default function MonthEnd() {
         <button onClick={handleDownload} disabled={downloading || !data} style={styles.chip}>
           {downloading ? "Downloading…" : "Download Excel"}
         </button>
+        <button onClick={() => setImportOpen(true)} style={styles.chip}>Import HealthEquity</button>
         {loading && <span style={styles.count}>Loading…</span>}
       </div>
 
       {error && <div style={styles.errorBox}>{error}</div>}
 
       {data?.health_equity?.banner && !loading && !error && (
-        <div role="alert" style={styles.warnBanner}>{data.health_equity.banner}</div>
+        <div role="alert" style={styles.warnBanner}>
+          {data.health_equity.banner}
+          <button onClick={() => setImportOpen(true)} style={styles.bannerBtn}>Import HealthEquity file</button>
+        </div>
       )}
 
       {data && (
@@ -191,6 +198,14 @@ export default function MonthEnd() {
           <TxnTable rows={data.review.health} />
         </>
       )}
+      {importOpen && (
+        <HealthEquityImport
+          onClose={(imported) => {
+            setImportOpen(false);
+            if (imported) setReloadKey((k) => k + 1);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -222,6 +237,11 @@ const styles = {
     background: "#fbbf24", border: "1px solid #b45309",
     borderRadius: "var(--radius)", color: "#1f1300", fontSize: 14, fontWeight: 700,
     fontFamily: "var(--font-mono)",
+  },
+  bannerBtn: {
+    marginLeft: 12, padding: "6px 14px", background: "#1f1300", border: "1px solid #1f1300",
+    borderRadius: 99, color: "#fff", fontSize: 12, fontWeight: 700,
+    fontFamily: "var(--font-mono)", cursor: "pointer",
   },
   stats: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10, marginBottom: 12 },
   stat: { background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", padding: "14px 18px" },
