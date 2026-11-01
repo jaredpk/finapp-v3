@@ -1176,7 +1176,8 @@ app.get("/api/reports/summary", requireApiKeyOrAuth, async (req, res) => {
     if (end - start > 5 * 366 * 86400000) {
       return res.status(400).json({ error: "Range cannot exceed 5 years" });
     }
-    const summary = await getReportSummary({ startDate, endDate });
+    const includeTransfers = req.query.include_transfers === "1";
+    const summary = await getReportSummary({ startDate, endDate, includeTransfers });
     res.json(summary);
   } catch (err) {
     console.error("Report summary failed:", err.message);

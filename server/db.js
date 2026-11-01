@@ -983,10 +983,20 @@ export async function getTransactionStats({ startDate, endDate } = {}) {
 
 const UNCATEGORIZED_COLOR = "#6b7280";
 
-// Mirrors Dashboard.jsx's isTransfer: internal money movement stays out of the
-// income/spend totals but still shows in the by-category breakdown.
-function isTransferCategory(name) {
-  return /^transfer/i.test(name || "");
+// Category names (case-insensitive, exact match) that are money movement rather
+// than real income/spend. By default the report leaves them out of everything
+// (income, spend, net, by-category lists, top merchants) and reports what it
+// dropped under `excluded`. `include_transfers=1` puts them back. Edit here.
+export const REPORT_EXCLUDED_CATEGORIES = [
+  "Transfer",
+  "Credit Card Payment",
+  "Jared Savings",
+  "Emergency Fund",
+];
+const REPORT_EXCLUDED_LOWER = REPORT_EXCLUDED_CATEGORIES.map((n) => n.toLowerCase());
+
+function isExcludedReportCategory(name) {
+  return REPORT_EXCLUDED_LOWER.includes(String(name || "").toLowerCase());
 }
 
 const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -1010,12 +1020,16 @@ function monthKeysBetween(startDate, endDate) {
 //   { month: 'YYYY-MM', category_id, name, color, spend, income }
 // where spend/income are that category's positive-outflow and inflow sums for
 // the month. Duplicate (month, category) rows are tolerated and summed.
-export function buildReportSummary({ startDate, endDate, rows = [], merchantRows = [] }) {
+export function buildReportSummary({ startDate, endDate, rows = [], merchantRows = [], includeTransfers = false }) {
   const months = monthKeysBetween(startDate, endDate);
   const monthBuckets = new Map(months.map((m) => [m, { income: 0, spend: 0, cats: new Map() }]));
   const totalCats = new Map();
   let totalIncome = 0;
   let totalSpend = 0;
+  // What the default exclusion left out, keyed by lowercased category name.
+  const excludedCats = new Map();
+  let excludedIn = 0;
+  let excludedOut = 0;
 
   const addCat = (map, r, spend) => {
     const key = r.category_id ?? "__uncategorized__";
@@ -1034,12 +1048,20 @@ export function buildReportSummary({ startDate, endDate, rows = [], merchantRows
     if (!bucket) continue; // outside the requested range
     const spend = Number(r.spend) || 0;
     const income = Number(r.income) || 0;
-    if (!isTransferCategory(r.name)) {
-      bucket.income += income;
-      bucket.spend += spend;
-      totalIncome += income;
-      totalSpend += spend;
+    if (!includeTransfers && isExcludedReportCategory(r.name)) {
+      excludedIn += income;
+      excludedOut += spend;
+      const key = String(r.name).toLowerCase();
+      const e = excludedCats.get(key) || { category: r.name, in: 0, out: 0 };
+      e.in += income;
+      e.out += spend;
+      excludedCats.set(key, e);
+      continue;
     }
+    bucket.income += income;
+    bucket.spend += spend;
+    totalIncome += income;
+    totalSpend += spend;
     if (spend > 0) {
       addCat(bucket.cats, r, spend);
       addCat(totalCats, r, spend);
@@ -1075,6 +1097,13 @@ export function buildReportSummary({ startDate, endDate, rows = [], merchantRows
       amount: round2(Number(m.amount) || 0),
       count: Number(m.count) || 0,
     })),
+    excluded: {
+      total_in: round2(excludedIn),
+      total_out: round2(excludedOut),
+      by_category: [...excludedCats.values()]
+        .map((e) => ({ category: e.category, in: round2(e.in), out: round2(e.out) }))
+        .sort((a, b) => b.out - a.out),
+    },
   };
 }
 
@@ -1139,7 +1168,7 @@ export async function getMonthEndRows(startDate, endDate) {
 // Omitting it must behave exactly as before: GET /api/reports/summary calls
 // this with { startDate, endDate } only, so the unfiltered path below runs the
 // same two queries with the same parameters it always did.
-export async function getReportSummary({ startDate, endDate, category }) {
+export async function getReportSummary({ startDate, endDate, category, includeTransfers = false }) {
   // One pass over transactions: the CTE explodes splits so a split transaction
   // contributes its split amounts to each split's category instead of its full
   // amount to the assigned category. Any leftover (splits that don't sum to
@@ -1157,9 +1186,9 @@ export async function getReportSummary({ startDate, endDate, category }) {
   //     categories at once, so there is no honest per-category merchant total
   //     to give); top_merchants therefore still covers everything, which the
   //     tool description says out loud.
-  //   - filtering to a Transfer* category yields by_category amounts but zero
-  //     income/spend, because buildReportSummary keeps transfers out of the
-  //     totals. That is the existing convention, not an artefact of the filter.
+  //   - filtering to an excluded category (REPORT_EXCLUDED_CATEGORIES) yields
+  //     empty/zero results unless includeTransfers is set; the dropped amounts
+  //     appear under `excluded`.
   // The filtered query takes a third parameter; the merchant query keeps
   // `params` untouched, since binding it a parameter it doesn't reference is an
   // error, not a no-op.
@@ -1207,19 +1236,59 @@ export async function getReportSummary({ startDate, endDate, category }) {
        ORDER BY 1, spend DESC`,
       monthlyParams
     ),
-    pool.query(
-      `SELECT COALESCE(mo.merchant_name, t.merchant, t.name) AS merchant,
-              SUM(t.amount)::float AS amount, COUNT(*)::int AS count
-       FROM transactions t
-       LEFT JOIN merchant_overrides mo ON mo.transaction_id = t.id
-       WHERE t.status != 'pending'
-         AND (t.hidden IS NOT TRUE)
-         AND (t.account NOT IN (SELECT account_id FROM hidden_accounts))
-         AND t.amount > 0
-         AND t.date >= $1 AND t.date <= $2
-       GROUP BY 1 ORDER BY amount DESC LIMIT 15`,
-      params
-    ),
+    // Top merchants. Included: the original whole-transaction query. Excluded
+    // (default): the same split explosion as above so a split line's own
+    // category decides, dropping lines in REPORT_EXCLUDED_CATEGORIES.
+    includeTransfers
+      ? pool.query(
+          `SELECT COALESCE(mo.merchant_name, t.merchant, t.name) AS merchant,
+                  SUM(t.amount)::float AS amount, COUNT(*)::int AS count
+           FROM transactions t
+           LEFT JOIN merchant_overrides mo ON mo.transaction_id = t.id
+           WHERE t.status != 'pending'
+             AND (t.hidden IS NOT TRUE)
+             AND (t.account NOT IN (SELECT account_id FROM hidden_accounts))
+             AND t.amount > 0
+             AND t.date >= $1 AND t.date <= $2
+           GROUP BY 1 ORDER BY amount DESC LIMIT 15`,
+          params
+        )
+      : pool.query(
+          `WITH base AS (
+             SELECT t.id, t.amount::numeric AS amount, a.category_id AS assigned_category_id,
+                    COALESCE(mo.merchant_name, t.merchant, t.name) AS merchant
+             FROM transactions t
+             LEFT JOIN assignments a ON a.transaction_id = t.id
+             LEFT JOIN merchant_overrides mo ON mo.transaction_id = t.id
+             WHERE t.status != 'pending'
+               AND (t.hidden IS NOT TRUE)
+               AND (t.account NOT IN (SELECT account_id FROM hidden_accounts))
+               AND t.date >= $1 AND t.date <= $2
+           ),
+           split_totals AS (
+             SELECT transaction_id, SUM(amount)::numeric AS total
+             FROM splits GROUP BY transaction_id
+           ),
+           contributions AS (
+             SELECT b.id, b.merchant, s.category_id, s.amount::numeric AS amount
+             FROM base b JOIN splits s ON s.transaction_id = b.id
+             UNION ALL
+             SELECT b.id, b.merchant, b.assigned_category_id, (b.amount - st.total) AS amount
+             FROM base b JOIN split_totals st ON st.transaction_id = b.id
+             WHERE b.amount - st.total <> 0
+             UNION ALL
+             SELECT b.id, b.merchant, b.assigned_category_id, b.amount
+             FROM base b LEFT JOIN split_totals st ON st.transaction_id = b.id
+             WHERE st.transaction_id IS NULL
+           )
+           SELECT c.merchant, SUM(c.amount)::float AS amount, COUNT(DISTINCT c.id)::int AS count
+           FROM contributions c
+           LEFT JOIN categories cat ON cat.id = c.category_id
+           WHERE c.amount > 0
+             AND (cat.name IS NULL OR LOWER(cat.name) <> ALL($3::text[]))
+           GROUP BY 1 ORDER BY amount DESC LIMIT 15`,
+          [...params, REPORT_EXCLUDED_LOWER]
+        ),
     // Does a category by that name exist at all? A name that matches nothing —
     // a typo, or a plaid_category handed to a budget-category filter — would
     // otherwise return every month with zeros, which reads exactly like "you
@@ -1232,7 +1301,7 @@ export async function getReportSummary({ startDate, endDate, category }) {
   if (category && known.rowCount === 0) {
     throw new Error(`Unknown budget category: "${category}" — no user category has that name`);
   }
-  return buildReportSummary({ startDate, endDate, rows, merchantRows });
+  return buildReportSummary({ startDate, endDate, rows, merchantRows, includeTransfers });
 }
 
 // Full-fidelity upsert for Quadratic imports — uses real Plaid transaction_ids and all extended columns.

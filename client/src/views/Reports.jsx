@@ -52,6 +52,7 @@ export default function Reports() {
   const [preset, setPreset] = useState("6M");
   const [startDate, setStartDate] = useState(defaultStart);
   const [endDate, setEndDate] = useState(defaultEnd);
+  const [includeTransfers, setIncludeTransfers] = useState(false);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -61,12 +62,12 @@ export default function Reports() {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    fetchReportSummary(startDate, endDate)
+    fetchReportSummary(startDate, endDate, includeTransfers)
       .then((res) => { if (!cancelled) setData(res); })
       .catch((e) => { if (!cancelled) { setError(e.message); setData(null); } })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [startDate, endDate]);
+  }, [startDate, endDate, includeTransfers]);
 
   function applyPreset(p) {
     const [s, e] = p.range();
@@ -143,8 +144,21 @@ export default function Reports() {
           onChange={(e) => { setPreset(null); setEndDate(e.target.value); }}
           style={styles.dateInput}
         />
+        <label style={styles.toggle}>
+          <input
+            type="checkbox"
+            checked={includeTransfers}
+            onChange={(e) => setIncludeTransfers(e.target.checked)}
+          />
+          Include transfers & savings
+        </label>
         {loading && <span style={styles.count}>Loading…</span>}
       </div>
+      {!includeTransfers && data?.excluded && (
+        <p style={styles.excludedNote}>
+          Excluded transfers & savings: {fmt(data.excluded.total_out)} out / {fmt(data.excluded.total_in)} in
+        </p>
+      )}
 
       {error && <div style={styles.errorBox}>{error}</div>}
 
@@ -276,6 +290,8 @@ const styles = {
     fontFamily: "var(--font-mono)", outline: "none",
   },
   dateSep: { color: "var(--muted)", fontSize: 12, fontFamily: "var(--font-mono)" },
+  toggle: { display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-mono)", cursor: "pointer", marginLeft: 8 },
+  excludedNote: { fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", marginTop: -12, marginBottom: 16 },
   count: { fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", marginLeft: "auto" },
 
   errorBox: {
