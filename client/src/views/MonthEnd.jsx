@@ -191,6 +191,15 @@ export default function MonthEnd() {
           <p style={styles.subTitle}>Kids ({data.kids.rows.length})</p>
           <TxnTable rows={data.kids.rows} />
 
+          {data.personal_jared && (
+            <>
+              <p style={styles.subTitle}>
+                Personal - Jared ({data.personal_jared.rows.length}) — listed only, not in total due — Subtotal {fmtSigned(data.personal_jared.subtotal)}
+              </p>
+              <TxnTable rows={data.personal_jared.rows} />
+            </>
+          )}
+
           <p style={styles.subTitle}>Review: Uncategorized ({data.review.uncategorized.length}) — not in totals</p>
           <TxnTable rows={data.review.uncategorized} />
 

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildMonthEndReconciliation, buildMonthEndSheetRows, parseMonthEndConfig,
-  isValidMonth, previousMonth, monthRange, shareOfCents,
+  isValidMonth, previousMonth, monthRange, shareOfCents, isPersonalJaredCategory,
 } from "../monthEndReconciliation.js";
 
 const row = (id, date, merchant, category, amount, account = "Chase") => ({
@@ -286,4 +286,102 @@ test("health equity: sheet first row is the banner then a blank row when not imp
     buildMonthEndReconciliation({ month: "2026-10", rows: [KIDS_ROW, row("2", "2026-10-04", "P", "", 1, "Health Equity")] })
   );
   assert.deepEqual(present[0], ["KIDS (Kids and Kids health) - 2026-10"]);
+});
+
+const PJ_TITLE = "PERSONAL - JARED (listed only - not included in total due)";
+
+test("personal jared: matches case-insensitively with trim; near-misses do not match", () => {
+  for (const n of ["Personal - Jared", "personal - jared", " Personal - Jared "]) {
+    assert.equal(isPersonalJaredCategory(n), true, n);
+  }
+  for (const n of ["Personal - Alta", "Personal Income", "Personal - Jared Savings", "", null]) {
+    assert.equal(isPersonalJaredCategory(n), false, String(n));
+  }
+  const r = buildMonthEndReconciliation({
+    month: MONTH,
+    rows: [
+      row("1", "2026-10-02", "A", "personal - jared", 10),
+      row("2", "2026-10-03", "B", " Personal - Jared ", 5),
+      row("3", "2026-10-04", "C", "Personal - Alta", 7),
+      row("4", "2026-10-05", "D", "Personal Income", 8),
+      row("5", "2026-10-06", "E", "Personal - Jared Savings", 9),
+    ],
+  });
+  assert.deepEqual(r.personal_jared.rows.map((x) => x.transaction_id), ["1", "2"]);
+  assert.equal(r.personal_jared.subtotal, 15);
+});
+
+test("personal jared: refund reduces subtotal; rows sorted by date; empty is rows [] subtotal 0", () => {
+  const r = buildMonthEndReconciliation({
+    month: MONTH,
+    rows: [
+      row("2", "2026-10-09", "Refund", "Personal - Jared", -20.25),
+      row("1", "2026-10-02", "Shop", "Personal - Jared", 50.5),
+    ],
+  });
+  assert.deepEqual(r.personal_jared.rows.map((x) => x.date), ["2026-10-02", "2026-10-09"]);
+  assert.equal(r.personal_jared.subtotal, 30.25);
+  const e = buildMonthEndReconciliation({ month: MONTH, rows: [] });
+  assert.deepEqual(e.personal_jared, { rows: [], subtotal: 0 });
+});
+
+test("personal jared: kids, verizon, total_due and review lists unchanged by its rows", () => {
+  const base = [
+    row("1", "2026-10-02", "School", "Kids", 100),
+    row("2", "2026-10-03", "Mystery", "", 4),
+    row("3", "2026-10-04", "Clinic", "Medical", 6),
+  ];
+  const pj = [row("9", "2026-10-05", "Gift", "Personal - Jared", 77), row("10", "2026-10-06", "Back", "Personal - Jared", -7)];
+  const a = buildMonthEndReconciliation({ month: MONTH, rows: base });
+  const b = buildMonthEndReconciliation({ month: MONTH, rows: [...base, ...pj] });
+  assert.deepEqual(b.kids, a.kids);
+  assert.deepEqual(b.verizon, a.verizon);
+  assert.equal(b.total_due, a.total_due);
+  assert.equal(b.total_due, 85.27);
+  assert.deepEqual(b.review, a.review);
+  assert.equal(b.review.uncategorized.length, 1);
+  assert.equal(b.review.health.length, 1);
+  assert.equal(b.personal_jared.subtotal, 70);
+});
+
+test("personal jared: sheet block sits after TOTAL DUE and before REVIEW - UNCATEGORIZED with exact title and Subtotal row", () => {
+  const r = buildMonthEndReconciliation({
+    month: MONTH,
+    rows: [row("1", "2026-10-02", "School", "Kids", 100), row("2", "2026-10-03", "Gift", "Personal - Jared", 12.5)],
+  });
+  const rows = buildMonthEndSheetRows(r);
+  const idx = (pred) => rows.findIndex(pred);
+  const total = idx((x) => x[3] === "TOTAL DUE");
+  const pj = idx((x) => x[0] === PJ_TITLE);
+  const unc = idx((x) => x[0] === "REVIEW - UNCATEGORIZED (not included in totals)");
+  const health = idx((x) => x[0] === "REVIEW - HEALTH (not included in totals)");
+  assert.ok(total >= 0 && total < pj && pj < unc && unc < health);
+  assert.deepEqual(rows[pj + 1], ["Date", "Merchant", "Category", "Account", "Amount"]);
+  assert.deepEqual(rows[pj + 2], ["2026-10-03", "Gift", "Personal - Jared", "Chase", 12.5]);
+  assert.deepEqual(rows[pj + 3], ["", "", "", "Subtotal", 12.5]);
+  assert.deepEqual(rows[pj + 4], []);
+  assert.equal(pj + 5, unc);
+  assert.equal(rows.filter((x) => x[3] === "50% share").length, 2); // kids + verizon only
+});
+
+test("personal jared: empty month still prints heading, header and Subtotal 0", () => {
+  const rows = buildMonthEndSheetRows(buildMonthEndReconciliation({ month: MONTH, rows: [] }));
+  const pj = rows.findIndex((x) => x[0] === PJ_TITLE);
+  assert.ok(pj >= 0);
+  assert.deepEqual(rows[pj + 2], ["", "", "", "Subtotal", 0]);
+});
+
+test("personal jared: a split line categorized Personal - Jared appears by category", () => {
+  const r = buildMonthEndReconciliation({
+    month: MONTH,
+    rows: [
+      row("t1", "2026-10-04", "Target", "Kids", 30),
+      row("t1", "2026-10-04", "Target", "Personal - Jared", 20),
+    ],
+  });
+  assert.equal(r.personal_jared.rows.length, 1);
+  assert.equal(r.personal_jared.rows[0].transaction_id, "t1");
+  assert.equal(r.personal_jared.rows[0].amount, 20);
+  assert.equal(r.personal_jared.subtotal, 20);
+  assert.equal(r.kids.subtotal, 30);
 });
