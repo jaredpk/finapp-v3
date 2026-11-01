@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect } from "react";
 import { saveAssignment, saveMerchantOverride, deleteTransaction, unhideTransactionApi, replaceSplitsApi, reviewTransactions, fetchTransactionStats, fetchNeedsReviewTransactions, proposeBulkUpdate, applyBulkUpdate } from "../api.js";
-import { stillNeedsReview, needsReviewBanner, needsReviewCsvLabel } from "../needsReviewFilter.js";
+import { stillNeedsReview, needsReviewBanner, needsReviewCsvLabel, needsReviewApprovalCounts } from "../needsReviewFilter.js";
 import { buildCsv, transactionCsvRows, csvFilename, downloadCsv, CSV_HEADERS } from "../csvExport.js";
 
 const toNum = (n) => n == null ? null : parseFloat(n);
@@ -222,10 +222,17 @@ export default function Transactions({
   // the chip counts needsApproval (reviewed_at IS NULL). Same two words, two
   // numbers, one screen. The chip's name now matches the field behind it.
   const loadedNeedsApproval = loadedStats.needsApproval;
-  const approvalChipLabel = serverStats
+  // Needs Review mode: the chip filter and "Approve all shown" act on the
+  // needs-review set, so the label counts that set, not the loaded window.
+  const nrApproval = needsReviewOnly ? needsReviewApprovalCounts(sourceRows, hiddenAccounts) : null;
+  const approvalChipLabel = nrApproval
+    ? `${fmtCount(nrApproval.awaiting)} of ${fmtCount(nrApproval.total)}`
+    : serverStats
     ? `${fmtCount(loadedNeedsApproval)} of ${fmtCount(serverStats.needsApproval)}`
     : fmtCount(loadedNeedsApproval);
-  const approvalChipTitle = serverStats
+  const approvalChipTitle = nrApproval
+    ? `Filters the list down to transactions waiting for approval. ${fmtCount(nrApproval.awaiting)} of the ${fmtCount(nrApproval.total)} transactions needing review are awaiting approval — this filter and "Approve all shown" act on those.`
+    : serverStats
     ? `Filters the loaded rows down to transactions waiting for approval. ${fmtCount(loadedNeedsApproval)} of the ${fmtCount(serverStats.needsApproval)} awaiting approval across all transactions are among the ${fmtCount(loadedCount)} rows loaded here — this filter and "Approve all shown" reach only those. The rest are in older rows this page has not fetched and cannot be approved from this screen.`
     : `Filters the loaded rows down to transactions waiting for approval. Counted over the ${fmtCount(loadedCount)} rows loaded here, not over every transaction on record.`;
 
@@ -605,6 +612,7 @@ export default function Transactions({
             <span>
               {needsReviewBanner({
                 count: sourceRows.length,
+                visible: filtered.length,
                 truncated: nrFetch.truncated,
                 limit: nrFetch.limit,
                 dateFiltered: datePreset !== "all",
@@ -910,7 +918,7 @@ export default function Transactions({
                         onChange={(e) => handleCategoryChange(t.transaction_id, e.target.value)}
                         style={{
                           ...styles.catSelect,
-                          borderColor: unassigned ? "var(--red)" : "var(--border)",
+                          border: `1px solid ${unassigned ? "var(--red)" : "var(--border)"}`,
                           opacity: isSaving ? 0.5 : 1,
                         }}
                       >
@@ -1167,7 +1175,7 @@ const styles = {
   // The clickable Needs Review tile: a <button> restyled to match .stat. Hover
   // and focus-visible rings come from the .stat-btn rule in the global CSS.
   statBtn:       { textAlign: "left", font: "inherit", cursor: "pointer", color: "inherit" },
-  statBtnActive: { borderColor: "var(--red, #ef4444)", boxShadow: "inset 0 0 0 1px var(--red, #ef4444)", background: "rgba(185,28,28,0.08)" },
+  statBtnActive: { border: "1px solid var(--red, #ef4444)", boxShadow: "inset 0 0 0 1px var(--red, #ef4444)", background: "rgba(185,28,28,0.08)" },
   nrBanner: {
     display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap",
     padding: "8px 12px", marginBottom: 14, border: "1px solid var(--red, #ef4444)", borderRadius: "var(--radius)",
