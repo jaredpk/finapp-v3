@@ -75,6 +75,32 @@ export function isUncategorized(name) {
   return norm(name) === "";
 }
 
+// Account label or raw account string that identifies a HealthEquity (HSA) import.
+export const HEALTH_EQUITY_RE = /health\s*equity/i;
+
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+// "Health Equity for October 2026 not imported" (no Date/timezone involved).
+export function healthEquityBanner(month) {
+  const [y, m] = month.split("-");
+  return `Health Equity for ${MONTH_NAMES[Number(m) - 1]} ${y} not imported`;
+}
+
+// Rows are already filtered in SQL (not pending, not hidden, not hidden
+// account); the pending/hidden checks here are a defensive repeat of that.
+function healthEquityStatus(month, rows) {
+  const rowCount = rows.filter(
+    (r) =>
+      r.pending !== true && r.status !== "pending" && r.hidden !== true &&
+      (HEALTH_EQUITY_RE.test(String(r.account ?? "")) || HEALTH_EQUITY_RE.test(String(r.account_raw ?? "")))
+  ).length;
+  const imported = rowCount > 0;
+  return { imported, row_count: rowCount, banner: imported ? null : healthEquityBanner(month) };
+}
+
 function shapeRow(r) {
   const cents = toCents(r.amount);
   return {
@@ -146,6 +172,7 @@ export function buildMonthEndReconciliation({ month, rows = [], config = {} } = 
       credit_label: `Account credit: ${fmt(accountCreditCents)} x ${cfg.verizonLines}/${cfg.verizonAccountLines} lines = -${fmt(creditAllocatedCents)}`,
     },
     total_due: money(totalDueCents),
+    health_equity: healthEquityStatus(month, rows),
     review: {
       uncategorized: uncategorized.map(publicRow),
       health: health.map(publicRow),
@@ -164,6 +191,11 @@ export function buildMonthEndSheetRows(result) {
   const header = ["Date", "Merchant", "Category", "Account", "Amount"];
   const line = (r) => [r.date, r.merchant, r.category, r.account, r.amount];
   const out = [];
+
+  if (result.health_equity?.banner) {
+    out.push([result.health_equity.banner]);
+    out.push([]);
+  }
 
   out.push([`KIDS (Kids and Kids health) - ${result.month}`]);
   out.push(header);

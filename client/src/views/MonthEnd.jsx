@@ -153,6 +153,10 @@ export default function MonthEnd() {
 
       {error && <div style={styles.errorBox}>{error}</div>}
 
+      {data?.health_equity?.banner && !loading && !error && (
+        <div role="alert" style={styles.warnBanner}>{data.health_equity.banner}</div>
+      )}
+
       {data && (
         <>
           <div style={styles.stats}>
@@ -212,6 +216,12 @@ const styles = {
     padding: "10px 14px", marginBottom: 16, background: "var(--surface)",
     border: "1px solid var(--red)", borderRadius: "var(--radius)",
     color: "var(--red)", fontSize: 12, fontFamily: "var(--font-mono)",
+  },
+  warnBanner: {
+    width: "100%", boxSizing: "border-box", padding: "12px 16px", marginBottom: 16,
+    background: "#fbbf24", border: "1px solid #b45309",
+    borderRadius: "var(--radius)", color: "#1f1300", fontSize: 14, fontWeight: 700,
+    fontFamily: "var(--font-mono)",
   },
   stats: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10, marginBottom: 12 },
   stat: { background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", padding: "14px 18px" },

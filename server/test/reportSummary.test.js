@@ -102,7 +102,7 @@ test("income, spend, and net math match hand-computed sums", () => {
   assert.equal(out.totals.net, 2199.75);
 });
 
-test("transfer categories are excluded from income/spend totals but stay in the by-category list", () => {
+test("excluded categories are left out of totals and by-category lists by default", () => {
   const out = buildReportSummary({
     startDate: "2026-01-01",
     endDate: "2026-01-31",
@@ -115,11 +115,82 @@ test("transfer categories are excluded from income/spend totals but stay in the 
   assert.equal(m.spend, 500);
   assert.equal(m.income, 0);
   assert.equal(m.net, -500);
-  assert.deepEqual(
-    m.by_category.map((c) => [c.name, c.amount]),
-    [["Transfer", 1900], ["Groceries", 500]]
-  );
+  assert.deepEqual(m.by_category.map((c) => [c.name, c.amount]), [["Groceries", 500]]);
+  assert.deepEqual(out.totals.by_category.map((c) => c.name), ["Groceries"]);
   assert.equal(out.totals.spend, 500);
+});
+
+test("every configured exclusion name matches case-insensitively and exactly", () => {
+  const out = buildReportSummary({
+    startDate: "2026-01-01",
+    endDate: "2026-01-31",
+    rows: [
+      row("2026-01", "a", "transfer", "#000", 10),
+      row("2026-01", "b", "CREDIT CARD PAYMENT", "#000", 20),
+      row("2026-01", "c", "Jared Savings", "#000", 30, 5),
+      row("2026-01", "d", "Emergency Fund", "#000", 40),
+      // Not an exact match: stays in.
+      row("2026-01", "e", "Transfer Fees", "#000", 7),
+    ],
+  });
+  assert.equal(out.totals.spend, 7);
+  assert.deepEqual(out.totals.by_category.map((c) => c.name), ["Transfer Fees"]);
+  assert.equal(out.excluded.total_out, 100);
+  assert.equal(out.excluded.total_in, 5);
+});
+
+test("includeTransfers puts excluded categories back and reports nothing excluded", () => {
+  const out = buildReportSummary({
+    startDate: "2026-01-01",
+    endDate: "2026-01-31",
+    includeTransfers: true,
+    rows: [
+      row("2026-01", "cat-groc", "Groceries", "#22c55e", 500),
+      row("2026-01", "cat-xfer", "Transfer", "#64748b", 1900, 1900),
+    ],
+  });
+  assert.equal(out.totals.spend, 2400);
+  assert.equal(out.totals.income, 1900);
+  assert.deepEqual(out.monthly[0].by_category.map((c) => c.name), ["Transfer", "Groceries"]);
+  assert.deepEqual(out.excluded, { total_in: 0, total_out: 0, by_category: [] });
+});
+
+test("split lines are judged by their own category", () => {
+  // $100 charge assigned to Shopping, split $60 to Transfer and $40 Groceries.
+  const out = buildReportSummary({
+    startDate: "2026-01-01",
+    endDate: "2026-01-31",
+    rows: [
+      row("2026-01", "cat-xfer", "Transfer", "#64748b", 60),
+      row("2026-01", "cat-groc", "Groceries", "#22c55e", 40),
+    ],
+  });
+  assert.equal(out.totals.spend, 40);
+  assert.equal(out.excluded.total_out, 60);
+});
+
+test("excluded totals sum across months and categories, sorted by out", () => {
+  const out = buildReportSummary({
+    startDate: "2026-01-01",
+    endDate: "2026-02-28",
+    rows: [
+      row("2026-01", "x", "Transfer", "#000", 100, 50.1),
+      row("2026-02", "x", "Transfer", "#000", 200, 0.2),
+      row("2026-02", "y", "Emergency Fund", "#000", 500, 0),
+      row("2026-02", "z", "Groceries", "#000", 10),
+      // Outside the range: ignored, not counted as excluded.
+      row("2026-03", "x", "Transfer", "#000", 999),
+    ],
+  });
+  assert.deepEqual(out.excluded, {
+    total_in: 50.3,
+    total_out: 800,
+    by_category: [
+      { category: "Emergency Fund", in: 0, out: 500 },
+      { category: "Transfer", in: 50.3, out: 300 },
+    ],
+  });
+  assert.equal(out.totals.spend, 10);
 });
 
 test("months are bucketed across year boundaries and empty months are filled in", () => {

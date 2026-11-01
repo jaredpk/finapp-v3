@@ -175,10 +175,11 @@ export async function saveAssignment(transaction_id, category_id) {
 }
 
 // ── Reports ───────────────────────────────────────────────────────────────────
-export async function fetchReportSummary(startDate, endDate) {
+export async function fetchReportSummary(startDate, endDate, includeTransfers = false) {
   const qs = new URLSearchParams();
   if (startDate) qs.set("start_date", startDate);
   if (endDate) qs.set("end_date", endDate);
+  if (includeTransfers) qs.set("include_transfers", "1");
   const r = await fetch(`${BASE}/reports/summary${qs.toString() ? `?${qs}` : ""}`, {
     headers: await authHeaders(),
   });

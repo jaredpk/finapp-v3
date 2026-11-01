@@ -193,3 +193,97 @@ test2("kids matches 'Healthcare - Kids'; health review excludes kids", () => {
   assert2.ok(_isHealth("Medical"));
   assert2.ok(!_isHealth("Healthcare - Kids"));
 });
+
+// ── HealthEquity import banner ───────────────────────────────────────────────
+const KIDS_ROW = row("1", "2026-10-02", "School", "Kids", 100);
+
+test("health equity: no rows -> not imported, exact banner for 2026-10", () => {
+  const r = buildMonthEndReconciliation({ month: "2026-10", rows: [] });
+  assert.deepEqual(r.health_equity, {
+    imported: false,
+    row_count: 0,
+    banner: "Health Equity for October 2026 not imported",
+  });
+});
+
+test("health equity: only non-HE rows -> not imported; banner for 2026-01 is January 2026", () => {
+  const r = buildMonthEndReconciliation({ month: "2026-01", rows: [KIDS_ROW, row("2", "2026-01-03", "Shop", "", 5, "Health Savings")] });
+  assert.deepEqual(r.health_equity, {
+    imported: false,
+    row_count: 0,
+    banner: "Health Equity for January 2026 not imported",
+  });
+});
+
+test("health equity: imported via nickname-style label, uncategorized included", () => {
+  const r = buildMonthEndReconciliation({
+    month: MONTH,
+    rows: [KIDS_ROW, row("2", "2026-10-04", "Pharmacy", "", 12.5, "HealthEquity HSA")],
+  });
+  assert.deepEqual(r.health_equity, { imported: true, row_count: 1, banner: null });
+});
+
+test("health equity: imported via raw account string when nickname does not match", () => {
+  const r = buildMonthEndReconciliation({
+    month: MONTH,
+    rows: [{ ...row("2", "2026-10-04", "Dentist", "Medical", 30, "My HSA"), account_raw: "acct_Health Equity_1234" }],
+  });
+  assert.deepEqual(r.health_equity, { imported: true, row_count: 1, banner: null });
+});
+
+test("health equity: case and spacing variants all match", () => {
+  const r = buildMonthEndReconciliation({
+    month: MONTH,
+    rows: [
+      row("1", "2026-10-02", "A", "Medical", 1, "HEALTHEQUITY HSA"),
+      row("2", "2026-10-03", "B", "Medical", 1, "Health Equity"),
+      row("3", "2026-10-04", "C", "Medical", 1, "health   equity"),
+      row("4", "2026-10-05", "D", "Medical", 1, "Chase"),
+    ],
+  });
+  assert.equal(r.health_equity.imported, true);
+  assert.equal(r.health_equity.row_count, 3);
+  assert.equal(r.health_equity.banner, null);
+});
+
+test("health equity: pending and hidden rows do not count (SQL also excludes them)", () => {
+  const r = buildMonthEndReconciliation({
+    month: MONTH,
+    rows: [
+      { ...row("1", "2026-10-02", "A", "Medical", 1, "Health Equity"), pending: true },
+      { ...row("2", "2026-10-03", "B", "Medical", 1, "Health Equity"), hidden: true },
+      { ...row("3", "2026-10-04", "C", "Medical", 1, "Health Equity"), status: "pending" },
+    ],
+  });
+  assert.deepEqual(r.health_equity, {
+    imported: false,
+    row_count: 0,
+    banner: "Health Equity for October 2026 not imported",
+  });
+});
+
+test("health equity: totals are unchanged by the check", () => {
+  const without = buildMonthEndReconciliation({ month: MONTH, rows: [KIDS_ROW] });
+  const withHe = buildMonthEndReconciliation({
+    month: MONTH,
+    rows: [KIDS_ROW, row("2", "2026-10-04", "Pharmacy", "", 12.5, "Health Equity")],
+  });
+  assert.equal(without.kids.subtotal, 100);
+  assert.equal(without.kids.share, 50);
+  assert.equal(without.total_due, 85.27);
+  assert.equal(withHe.kids.subtotal, 100);
+  assert.equal(withHe.kids.share, 50);
+  assert.equal(withHe.total_due, 85.27);
+});
+
+test("health equity: sheet first row is the banner then a blank row when not imported; unchanged when imported", () => {
+  const missing = buildMonthEndSheetRows(buildMonthEndReconciliation({ month: "2026-10", rows: [KIDS_ROW] }));
+  assert.deepEqual(missing[0], ["Health Equity for October 2026 not imported"]);
+  assert.deepEqual(missing[1], []);
+  assert.deepEqual(missing[2], ["KIDS (Kids and Kids health) - 2026-10"]);
+
+  const present = buildMonthEndSheetRows(
+    buildMonthEndReconciliation({ month: "2026-10", rows: [KIDS_ROW, row("2", "2026-10-04", "P", "", 1, "Health Equity")] })
+  );
+  assert.deepEqual(present[0], ["KIDS (Kids and Kids health) - 2026-10"]);
+});
