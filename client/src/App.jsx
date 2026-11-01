@@ -9,6 +9,7 @@ import Budget from "./views/Budget.jsx";
 import Benefits from "./views/Benefits.jsx";
 import CashFlow from "./views/CashFlow.jsx";
 import Reports from "./views/Reports.jsx";
+import Reconciliations from "./views/Reconciliations.jsx";
 import AskAI from "./views/AskAI.jsx";
 import PropertyFinance from "./views/PropertyFinance.jsx";
 import Settings from "./views/Settings.jsx";
@@ -192,6 +193,7 @@ function AuthenticatedApp({ user }) {
     benefits: Benefits,
     cashflow: CashFlow,
     reports: Reports,
+    reconciliations: Reconciliations,
     askai: AskAI,
     property: PropertyFinance,
     settings: Settings,
