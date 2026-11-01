@@ -66,7 +66,7 @@ test("verizon config overrides", () => {
   assert.equal(r.total_due, 38.25);
 });
 
-test("review lists: uncategorized and exact Health only, excluded from totals and kids", () => {
+test("review lists: uncategorized and health-related only, excluded from totals and kids", () => {
   const r = buildMonthEndReconciliation({
     month: MONTH,
     rows: [
@@ -78,7 +78,7 @@ test("review lists: uncategorized and exact Health only, excluded from totals an
     ],
   });
   assert.deepEqual(r.review.uncategorized.map((x) => x.transaction_id), ["1", "2"]);
-  assert.deepEqual(r.review.health.map((x) => x.transaction_id), ["3"]);
+  assert.deepEqual(r.review.health.map((x) => x.transaction_id), ["3", "6"]);
   assert.equal(r.kids.rows.length, 1);
   assert.equal(r.kids.subtotal, 60);
   assert.equal(r.total_due, 30 + 30);
@@ -118,4 +118,16 @@ test("month and config validation helpers", () => {
   });
   assert.ok(parseMonthEndConfig({ verizonLines: "-1" }).error);
   assert.ok(parseMonthEndConfig({ verizonLineAmount: "abc" }).error);
+});
+
+import { isKidsCategory as _isKids, isHealthCategory as _isHealth } from "../monthEndReconciliation.js";
+import test2 from "node:test";
+import assert2 from "node:assert/strict";
+test2("kids matches 'Healthcare - Kids'; health review excludes kids", () => {
+  assert2.ok(_isKids("Healthcare - Kids"));
+  assert2.ok(_isKids("Kids - Healthcare"));
+  assert2.ok(!_isKids("Health"));
+  assert2.ok(_isHealth("Health"));
+  assert2.ok(_isHealth("Medical"));
+  assert2.ok(!_isHealth("Healthcare - Kids"));
 });

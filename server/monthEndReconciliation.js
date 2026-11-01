@@ -46,13 +46,15 @@ export function shareOfCents(cents, share) {
 
 const norm = (s) => String(s ?? "").trim().toLowerCase();
 
-// "Kids", "Kids - Healthcare", "Kids Healthcare", "Kids Health", ...
+// "Kids", "Kids - Healthcare", "Healthcare - Kids", "Kids Health", ...
 export function isKidsCategory(name) {
-  return norm(name).startsWith("kids");
+  return /\bkids?\b/.test(norm(name));
 }
 
+// Health-related categories to review (kids ones are handled separately).
 export function isHealthCategory(name) {
-  return norm(name) === "health";
+  const n = norm(name);
+  return !isKidsCategory(n) && /health|medical|dental|vision|pharm|doctor/.test(n);
 }
 
 export function isUncategorized(name) {
