@@ -84,6 +84,23 @@ export async function fetchTransactions() {
   return r.json();
 }
 
+// The rows behind the Transactions "Needs Review" tile — visible, no category,
+// no splits, every date, newest first — fetched from the server because the
+// 2000-row window fetchTransactions returns misses the older ones. Same
+// { transactions, truncated, limit, count } shape as fetchTransactionsForMonth;
+// `truncated` is true when even this set hit the server's row cap. Unlike the
+// plain GETs this throws on a non-2xx so the caller can show an error instead
+// of an empty list that looks like "nothing needs review".
+export async function fetchNeedsReviewTransactions() {
+  const r = await fetch(`${BASE}/transactions?needs_review=1&limit=${NEEDS_REVIEW_TXN_LIMIT}`, {
+    headers: await authHeaders(),
+  });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok || !Array.isArray(body.transactions)) throw new Error(body.error || "Failed to fetch transactions needing review");
+  return { ...body, ...readTruncation(r) };
+}
+const NEEDS_REVIEW_TXN_LIMIT = 10000; // server's hard ceiling (TRANSACTIONS_MAX_LIMIT)
+
 // True totals — { total, spend, needsReview, needsApproval } — computed in SQL
 // over every transaction, not over the capped page fetchTransactions returns.
 // Optional YYYY-MM-DD bounds; omit both for the whole table. A failure comes

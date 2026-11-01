@@ -9,6 +9,7 @@ const NAV = [
   { id: "benefits",     label: "Benefits",      icon: "◆" },
   { id: "cashflow",     label: "Cash Flow",     icon: "⇌" },
   { id: "reports",      label: "Reports",       icon: "▥" },
+  { id: "reconciliations", label: "Reconciliations", icon: "✓" },
   { id: "askai",        label: "Ask AI",        icon: "✦" },
   { id: "property",     label: "Property",      icon: "⌂" },
   { id: "settings",     label: "Settings",      icon: "⚙" },

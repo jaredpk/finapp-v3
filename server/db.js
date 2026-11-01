@@ -4,6 +4,7 @@ import xlsxLib from "xlsx";
 import { initPropertyFinanceSchema } from "./property/schema.js";
 import { initBenefitsSchema } from "./benefits/schema.js";
 import { groupDuplicates, isImportedId, sameSignedAmount } from "./transactionMatching.js";
+import { NEEDS_REVIEW_CONDITIONS } from "./needsReview.js";
 
 const { Pool } = pg;
 
@@ -849,8 +850,13 @@ export async function upsertTransactions(transactions) {
 // The xlsx export is the only caller that passes it today; it defaults to 0,
 // and OFFSET 0 is a no-op, so /api/transactions, the MCP get_transactions tool,
 // Ask AI and the reconcile route keep exactly the query they had.
-export async function getTransactions({ limit = 100, offset = 0, startDate, endDate, category } = {}) {
-  const conditions = [];
+//
+// `needsReview: true` (GET /api/transactions?needs_review=1) filters IN SQL to
+// the rows the Transactions "Needs Review" tile counts — visible, no category
+// assignment, no splits; see needsReview.js — so the LIMIT applies to that set
+// rather than to a window of the newest rows that is then filtered. Default off.
+export async function getTransactions({ limit = 100, offset = 0, startDate, endDate, category, needsReview = false } = {}) {
+  const conditions = needsReview ? [...NEEDS_REVIEW_CONDITIONS] : [];
   const params = [];
   let i = 1;
   if (startDate) { conditions.push(`t.date >= $${i++}`); params.push(startDate); }
@@ -1959,10 +1965,17 @@ export async function upsertCsvTransaction(t) {
 }
 
 // ── HealthEquity import ───────────────────────────────────────────────────────
-export async function getExistingTransactionIds(ids) {
-  if (!ids.length) return new Set();
-  const { rows } = await pool.query(`SELECT id FROM transactions WHERE id = ANY($1::text[])`, [ids]);
-  return new Set(rows.map((r) => r.id));
+// Stored HealthEquity rows (identified by id prefix, whatever the account is
+// called) inside [from, to] ('YYYY-MM-DD'). Dates come back as plain strings.
+export async function getExistingHealthEquityRows(from, to) {
+  if (!from || !to) return [];
+  const { rows } = await pool.query(
+    `SELECT id, TO_CHAR(date, 'YYYY-MM-DD') AS date, original_description, amount::float AS amount
+     FROM transactions
+     WHERE id LIKE 'csv\\_he\\_%' AND date >= $1::date AND date <= $2::date`,
+    [from, to]
+  );
+  return rows;
 }
 
 // Writes only NEW rows (ON CONFLICT DO NOTHING, so existing rows and their

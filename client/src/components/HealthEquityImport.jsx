@@ -155,6 +155,12 @@ export default function HealthEquityImport({ onClose, onImported }) {
                 <p style={styles.summaryLine}>
                   {preview.total_rows} rows found · {preview.new_rows} new · {preview.already_imported} already imported
                 </p>
+                {preview.backdated_new > 0 && (
+                  <div role="alert" style={styles.warnBox}>
+                    {preview.backdated_new} of the new rows are dated before your latest imported transaction. That usually
+                    means HealthEquity back-dated or changed a transaction. Check the list before importing.
+                  </div>
+                )}
                 {preview.skipped.length > 0 && (
                   <p style={styles.summaryLine}>
                     Skipped: {preview.skipped.map((s) => `${s.count} × ${s.reason}`).join("; ")}
@@ -216,6 +222,10 @@ const styles = {
   errorBox: {
     padding: "10px 14px", background: "var(--surface)", border: "1px solid var(--red)",
     borderRadius: "var(--radius)", color: "var(--red)", fontSize: 12, fontFamily: "var(--font-mono)",
+  },
+  warnBox: {
+    padding: "10px 14px", background: "rgba(245, 158, 11, 0.12)", border: "1px solid #f59e0b",
+    borderRadius: "var(--radius)", color: "#f59e0b", fontSize: 13, fontWeight: 600, lineHeight: 1.5,
   },
   success: {
     padding: "12px 14px", background: "var(--surface2)", border: "1px solid var(--border)",

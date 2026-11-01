@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useEffect } from "react";
-import { saveAssignment, saveMerchantOverride, deleteTransaction, unhideTransactionApi, replaceSplitsApi, reviewTransactions, fetchTransactionStats, proposeBulkUpdate, applyBulkUpdate } from "../api.js";
+import { saveAssignment, saveMerchantOverride, deleteTransaction, unhideTransactionApi, replaceSplitsApi, reviewTransactions, fetchTransactionStats, fetchNeedsReviewTransactions, proposeBulkUpdate, applyBulkUpdate } from "../api.js";
+import { stillNeedsReview, needsReviewBanner, needsReviewCsvLabel, needsReviewApprovalCounts } from "../needsReviewFilter.js";
 import { buildCsv, transactionCsvRows, csvFilename, downloadCsv, CSV_HEADERS } from "../csvExport.js";
 
 const toNum = (n) => n == null ? null : parseFloat(n);
@@ -77,6 +78,38 @@ export default function Transactions({
   const [splitSaving, setSplitSaving]     = useState(false);
   const [detailExpanded, setDetailExpanded] = useState(null);
 
+  // "Needs Review" tile mode. The page only holds the newest ~2000 rows but the
+  // tile counts the whole table, so with the mode on the list is the server's
+  // needs-review set (all dates), not a client-side filter of the loaded window.
+  // The fetch re-runs when `transactions` is reloaded (hide, approve, import) so
+  // the set never goes stale; the old rows stay on screen meanwhile. Category
+  // and split edits just drop rows locally via stillNeedsReview below.
+  const [needsReviewOnly, setNeedsReviewOnly] = useState(false);
+  const [nrFetch, setNrFetch] = useState({ rows: null, truncated: false, limit: null });
+  const [nrLoading, setNrLoading] = useState(false);
+  const [nrError, setNrError] = useState(null);
+
+  useEffect(() => {
+    if (!needsReviewOnly) return undefined;
+    let cancelled = false;
+    setNrLoading(true);
+    setNrError(null);
+    fetchNeedsReviewTransactions()
+      .then((res) => {
+        if (cancelled) return;
+        setNrFetch({ rows: res.transactions, truncated: res.truncated, limit: res.limit });
+      })
+      .catch((err) => { if (!cancelled) setNrError(err.message || "Failed to load transactions needing review"); })
+      .finally(() => { if (!cancelled) setNrLoading(false); });
+    return () => { cancelled = true; };
+  }, [needsReviewOnly, transactions]);
+
+  // Everything below that used to read `transactions` reads this instead.
+  const sourceRows = useMemo(
+    () => (needsReviewOnly ? stillNeedsReview(nrFetch.rows, assignments, splits) : transactions),
+    [needsReviewOnly, nrFetch.rows, assignments, splits, transactions]
+  );
+
   const acctMap = useMemo(() => {
     const m = {};
     (accounts || []).forEach((a) => {
@@ -86,8 +119,8 @@ export default function Transactions({
   }, [accounts]);
 
   const acctIds = useMemo(() => {
-    return [...new Set(transactions.map((t) => t.account_id).filter(Boolean))].sort();
-  }, [transactions]);
+    return [...new Set(sourceRows.map((t) => t.account_id).filter(Boolean))].sort();
+  }, [sourceRows]);
 
   // id -> name, for the CSV export's Category column. The table itself never
   // needs this — its <select> renders the category list directly — but a CSV
@@ -189,10 +222,17 @@ export default function Transactions({
   // the chip counts needsApproval (reviewed_at IS NULL). Same two words, two
   // numbers, one screen. The chip's name now matches the field behind it.
   const loadedNeedsApproval = loadedStats.needsApproval;
-  const approvalChipLabel = serverStats
+  // Needs Review mode: the chip filter and "Approve all shown" act on the
+  // needs-review set, so the label counts that set, not the loaded window.
+  const nrApproval = needsReviewOnly ? needsReviewApprovalCounts(sourceRows, hiddenAccounts) : null;
+  const approvalChipLabel = nrApproval
+    ? `${fmtCount(nrApproval.awaiting)} of ${fmtCount(nrApproval.total)}`
+    : serverStats
     ? `${fmtCount(loadedNeedsApproval)} of ${fmtCount(serverStats.needsApproval)}`
     : fmtCount(loadedNeedsApproval);
-  const approvalChipTitle = serverStats
+  const approvalChipTitle = nrApproval
+    ? `Filters the list down to transactions waiting for approval. ${fmtCount(nrApproval.awaiting)} of the ${fmtCount(nrApproval.total)} transactions needing review are awaiting approval — this filter and "Approve all shown" act on those.`
+    : serverStats
     ? `Filters the loaded rows down to transactions waiting for approval. ${fmtCount(loadedNeedsApproval)} of the ${fmtCount(serverStats.needsApproval)} awaiting approval across all transactions are among the ${fmtCount(loadedCount)} rows loaded here — this filter and "Approve all shown" reach only those. The rest are in older rows this page has not fetched and cannot be approved from this screen.`
     : `Filters the loaded rows down to transactions waiting for approval. Counted over the ${fmtCount(loadedCount)} rows loaded here, not over every transaction on record.`;
 
@@ -235,7 +275,7 @@ export default function Transactions({
     const max = maxAmount !== "" ? parseFloat(maxAmount) : null;
     const { from: dFrom, to: dTo } = effectiveDateRange;
 
-    let rows = transactions.filter((t) => {
+    let rows = sourceRows.filter((t) => {
       if (!showHidden && t.hidden) return false;
       if (hiddenAccounts?.has(t.account_id)) return false;
       if (reviewFilter && t.reviewed_at != null) return false;
@@ -271,7 +311,7 @@ export default function Transactions({
     });
 
     return rows;
-  }, [transactions, search, catFilter, acctFilter, minAmount, maxAmount, sort, assignments, splits, merchantOverrides, acctMap, effectiveDateRange, showHidden, hiddenAccounts, reviewFilter]);
+  }, [sourceRows, search, catFilter, acctFilter, minAmount, maxAmount, sort, assignments, splits, merchantOverrides, acctMap, effectiveDateRange, showHidden, hiddenAccounts, reviewFilter]);
 
   async function handleApprove(ids) {
     if (!ids.length || approving) return;
@@ -398,7 +438,7 @@ export default function Transactions({
 
   // Recalculate line 0 to be total - sum(lines 1+) so splits stay balanced.
   function recalcLine0(draft) {
-    const t = transactions.find(tx => tx.transaction_id === splitExpanded);
+    const t = sourceRows.find(tx => tx.transaction_id === splitExpanded);
     if (!t || draft.length < 2) return draft;
     const total = Math.abs(parseFloat(t.amount) || 0);
     const otherSum = draft.slice(1).reduce((sum, s) => sum + (parseFloat(s.amount) || 0), 0);
@@ -486,6 +526,10 @@ export default function Transactions({
       catFilter === "all" ? null
       : catFilter === "unassigned" ? "unassigned"
       : categoryNames[catFilter] || null;
+    // Needs-review mode draws from the server's whole needs-review set, not the
+    // loaded window, so the window-coverage flag does not apply; the file is
+    // named "needs-review" so it is never mistaken for a full export, and
+    // "-partial" only when that set itself hit the server cap.
     const csv = buildCsv(CSV_HEADERS, transactionCsvRows({
       transactions: filtered,
       accountNames: acctMap,
@@ -497,8 +541,8 @@ export default function Transactions({
     downloadCsv(csvFilename({
       from,
       to,
-      categoryLabel,
-      partial: coverageIncomplete,
+      categoryLabel: needsReviewOnly ? needsReviewCsvLabel(categoryLabel) : categoryLabel,
+      partial: needsReviewOnly ? nrFetch.truncated : coverageIncomplete,
       generatedOn: new Date().toISOString().slice(0, 10),
     }), csv);
   }
@@ -507,7 +551,9 @@ export default function Transactions({
   // export cannot reach, the totals are missing so no such number exists, or
   // the view is holding the whole table and there is no caveat at all.
   const exportCaveat =
-    notAllLoaded
+    needsReviewOnly
+      ? ` Only transactions needing a category are included (the needs-review filter is on), and the file is named "needs-review"${nrFetch.truncated ? ' and "-partial" because the server cap cut that list short' : ""}.`
+      : notAllLoaded
       ? ` These come from the ${fmtCount(loadedCount)} rows loaded here, not from all ${fmtCount(serverStats.total)} transactions on record — older rows this page has not fetched cannot be exported from this screen, and the file is named "-partial" to say so.`
       : statsFailed
         ? ` These come from the ${fmtCount(loadedCount)} rows loaded here. The totals request failed, so there may be older transactions this page never fetched and the export cannot reach — the file is named "-partial" because completeness could not be confirmed, not because anything in it is wrong.`
@@ -516,7 +562,7 @@ export default function Transactions({
     `Downloads the ${fmtCount(filtered.length)} transactions listed below as a CSV, with the filters and sort order you have set.${exportCaveat}` +
     ` Split transactions export as one row per split line.`;
 
-  const hasFilters = search || catFilter !== "all" || acctFilter !== "all" || minAmount || maxAmount || datePreset !== "all" || reviewFilter;
+  const hasFilters = search || catFilter !== "all" || acctFilter !== "all" || minAmount || maxAmount || datePreset !== "all" || reviewFilter || needsReviewOnly;
   const hiddenCount = transactions.filter(t => t.hidden && !hiddenAccounts?.has(t.account_id)).length;
 
   return (
@@ -533,12 +579,21 @@ export default function Transactions({
           <p style={styles.statLabel}>{statLabel("Total Spend")}</p>
           <p style={styles.statVal}>{stats.spend ? fmtRound(stats.spend) : "—"}</p>
         </div>
-        <div style={styles.stat}>
-          <p style={styles.statLabel}>{statLabel("Needs Review")}</p>
-          <p style={{ ...styles.statVal, color: stats.needsReview > 0 ? "var(--red)" : "var(--text)" }}>
+        {/* A real button so it is keyboard-focusable; toggles the server-backed
+            needs-review list (see needsReviewOnly above). */}
+        <button
+          type="button"
+          className="stat-btn"
+          style={{ ...styles.stat, ...styles.statBtn, ...(needsReviewOnly ? styles.statBtnActive : {}) }}
+          aria-pressed={needsReviewOnly}
+          onClick={() => setNeedsReviewOnly((v) => !v)}
+          title={needsReviewOnly ? "Showing only transactions needing a category — click to show all" : "Show only transactions needing a category"}
+        >
+          <span style={{ ...styles.statLabel, display: "block" }}>{statLabel("Needs Review")}</span>
+          <span style={{ ...styles.statVal, display: "block", color: stats.needsReview > 0 ? "var(--red)" : "var(--text)" }}>
             {fmtCount(stats.needsReview)}
-          </p>
-        </div>
+          </span>
+        </button>
         {/* Not a row count — the category list arrives whole, so it needs no
             "(loaded)" caveat. */}
         <div style={styles.stat}>
@@ -547,7 +602,29 @@ export default function Transactions({
         </div>
       </div>
 
-      {notAllLoaded && (
+      {needsReviewOnly && (
+        <div className="fade-up" style={styles.nrBanner} role="status">
+          {nrLoading && !nrFetch.rows ? (
+            <span>Loading transactions needing review…</span>
+          ) : nrError ? (
+            <span style={{ color: "var(--red, #ef4444)" }}>Could not load transactions needing review: {nrError}</span>
+          ) : (
+            <span>
+              {needsReviewBanner({
+                count: sourceRows.length,
+                visible: filtered.length,
+                truncated: nrFetch.truncated,
+                limit: nrFetch.limit,
+                dateFiltered: datePreset !== "all",
+              })}
+              {nrLoading ? " (refreshing…)" : ""}
+            </span>
+          )}
+          <button type="button" style={styles.clearBtn} onClick={() => setNeedsReviewOnly(false)}>Clear</button>
+        </div>
+      )}
+
+      {notAllLoaded && !needsReviewOnly && (
         <p className="fade-up" style={styles.partialNote}>
           Showing {fmtCount(loadedCount)} of {fmtCount(serverStats.total)} transactions — the most recent
           are loaded. The tiles above count all {fmtCount(serverStats.total)}; the search, filters and
@@ -622,7 +699,7 @@ export default function Transactions({
             {approving ? "Approving…" : `Approve all shown (${fmtCount(filtered.length)})`}
           </button>
         )}
-        {hiddenCount > 0 && (
+        {hiddenCount > 0 && !needsReviewOnly && (
           <label style={styles.showHiddenLabel}>
             <input type="checkbox" checked={showHidden} onChange={e => setShowHidden(e.target.checked)} style={{ marginRight: 4 }} />
             {hiddenCount} hidden
@@ -650,7 +727,7 @@ export default function Transactions({
         {hasFilters && (
           <button
             style={styles.clearBtn}
-            onClick={() => { setSearch(""); setCatFilter("all"); setAcctFilter("all"); setMinAmount(""); setMaxAmount(""); setDatePreset("all"); setDateFrom(""); setDateTo(""); setReviewFilter(false); }}
+            onClick={() => { setSearch(""); setCatFilter("all"); setAcctFilter("all"); setMinAmount(""); setMaxAmount(""); setDatePreset("all"); setDateFrom(""); setDateTo(""); setReviewFilter(false); setNeedsReviewOnly(false); }}
           >
             Clear
           </button>
@@ -659,7 +736,9 @@ export default function Transactions({
             reaches rows that were never fetched, and "12 of 3,847" would say it
             did. */}
         <span style={styles.count}>
-          {fmtCount(filtered.length)} of {fmtCount(loadedCount)}{notAllLoaded ? " loaded" : ""}
+          {needsReviewOnly
+            ? `${fmtCount(filtered.length)} of ${fmtCount(sourceRows.length)} needing review`
+            : `${fmtCount(filtered.length)} of ${fmtCount(loadedCount)}${notAllLoaded ? " loaded" : ""}`}
         </span>
       </div>
 
@@ -693,7 +772,7 @@ export default function Transactions({
             <>
               <div style={styles.bulkTable}>
                 {bulkProposal.changes.map((c) => {
-                  const t = transactions.find((x) => x.transaction_id === c.transactionId);
+                  const t = sourceRows.find((x) => x.transaction_id === c.transactionId);
                   if (!t) return null;
                   const curCat = categoryNames[assignments?.[t.transaction_id]] || "—";
                   const newCat = c.categoryId ? categoryNames[c.categoryId] : null;
@@ -737,7 +816,12 @@ export default function Transactions({
       {/* Table */}
       {filtered.length === 0 ? (
         <p style={styles.empty}>
-          {transactions.length === 0
+          {needsReviewOnly
+            ? (nrLoading && !nrFetch.rows ? "Loading…"
+              : nrError ? "Could not load transactions needing review."
+              : sourceRows.length === 0 ? "No transactions need review."
+              : "No results match your filters.")
+            : transactions.length === 0
             ? "No transactions yet."
             : notAllLoaded
               ? `No results match your filters in the ${fmtCount(loadedCount)} loaded rows — older transactions were not searched.`
@@ -834,7 +918,7 @@ export default function Transactions({
                         onChange={(e) => handleCategoryChange(t.transaction_id, e.target.value)}
                         style={{
                           ...styles.catSelect,
-                          borderColor: unassigned ? "var(--red)" : "var(--border)",
+                          border: `1px solid ${unassigned ? "var(--red)" : "var(--border)"}`,
                           opacity: isSaving ? 0.5 : 1,
                         }}
                       >
@@ -1088,6 +1172,15 @@ const styles = {
   stat:  { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius2)", padding: "14px 18px" },
   statLabel: { fontSize: 10, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontFamily: "var(--font-mono)", marginBottom: 6 },
   statVal:   { fontSize: 22, fontWeight: 700, color: "var(--text)" },
+  // The clickable Needs Review tile: a <button> restyled to match .stat. Hover
+  // and focus-visible rings come from the .stat-btn rule in the global CSS.
+  statBtn:       { textAlign: "left", font: "inherit", cursor: "pointer", color: "inherit" },
+  statBtnActive: { border: "1px solid var(--red, #ef4444)", boxShadow: "inset 0 0 0 1px var(--red, #ef4444)", background: "rgba(185,28,28,0.08)" },
+  nrBanner: {
+    display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap",
+    padding: "8px 12px", marginBottom: 14, border: "1px solid var(--red, #ef4444)", borderRadius: "var(--radius)",
+    background: "rgba(185,28,28,0.06)", color: "var(--text)", fontSize: 12, fontFamily: "var(--font-mono)", lineHeight: 1.5,
+  },
 
   toolbar: { display: "flex", alignItems: "center", gap: 8, marginBottom: 14, flexWrap: "wrap" },
   input: {
