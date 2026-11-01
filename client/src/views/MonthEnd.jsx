@@ -219,8 +219,8 @@ const styles = {
   },
   warnBanner: {
     width: "100%", boxSizing: "border-box", padding: "12px 16px", marginBottom: 16,
-    background: "rgba(245,158,11,0.15)", border: "1px solid var(--amber, #f59e0b)",
-    borderRadius: "var(--radius)", color: "var(--amber, #f59e0b)", fontSize: 14, fontWeight: 700,
+    background: "#fbbf24", border: "1px solid #b45309",
+    borderRadius: "var(--radius)", color: "#1f1300", fontSize: 14, fontWeight: 700,
     fontFamily: "var(--font-mono)",
   },
   stats: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10, marginBottom: 12 },
