@@ -1078,6 +1078,57 @@ export function buildReportSummary({ startDate, endDate, rows = [], merchantRows
   };
 }
 
+// Split-aware transaction rows for one month ('YYYY-MM' already validated by
+// the caller), for the month-end reconciliation. Same exclusions and split
+// explosion as getReportSummary (pending, hidden, hidden accounts; split
+// amounts under their split category, leftover under the assigned category,
+// unsplit transactions under the assigned category). Unassigned rows come back
+// with category null. Amounts keep their sign (positive = spend).
+export async function getMonthEndRows(startDate, endDate) {
+  const { rows } = await pool.query(
+    `WITH base AS (
+       SELECT t.id, t.date, t.amount::numeric AS amount, t.account,
+              COALESCE(mo.merchant_name, t.merchant, t.name) AS merchant,
+              a.category_id AS assigned_category_id
+       FROM transactions t
+       LEFT JOIN assignments a ON a.transaction_id = t.id
+       LEFT JOIN merchant_overrides mo ON mo.transaction_id = t.id
+       WHERE t.status != 'pending'
+         AND (t.hidden IS NOT TRUE)
+         AND (t.account NOT IN (SELECT account_id FROM hidden_accounts))
+         AND t.date >= $1 AND t.date <= $2
+     ),
+     split_totals AS (
+       SELECT transaction_id, SUM(amount)::numeric AS total
+       FROM splits GROUP BY transaction_id
+     ),
+     contributions AS (
+       SELECT b.id, b.date, b.account, b.merchant, s.category_id, s.amount::numeric AS amount
+       FROM base b JOIN splits s ON s.transaction_id = b.id
+       UNION ALL
+       SELECT b.id, b.date, b.account, b.merchant, b.assigned_category_id, (b.amount - st.total) AS amount
+       FROM base b JOIN split_totals st ON st.transaction_id = b.id
+       WHERE b.amount - st.total <> 0
+       UNION ALL
+       SELECT b.id, b.date, b.account, b.merchant, b.assigned_category_id, b.amount
+       FROM base b LEFT JOIN split_totals st ON st.transaction_id = b.id
+       WHERE st.transaction_id IS NULL
+     )
+     SELECT c.id AS transaction_id,
+            TO_CHAR(c.date, 'YYYY-MM-DD') AS date,
+            c.merchant,
+            COALESCE(an.nickname, c.account) AS account,
+            c.amount::float AS amount,
+            cat.name AS category
+     FROM contributions c
+     LEFT JOIN categories cat ON cat.id = c.category_id
+     LEFT JOIN account_nicknames an ON an.account_id = c.account
+     ORDER BY c.date, c.id`,
+    [startDate, endDate]
+  );
+  return rows;
+}
+
 // `category` is OPTIONAL and, when given, is a user BUDGET category NAME
 // (categories.name, matched case-insensitively) — not a plaid_category. It
 // exists because the common question is about one category over many months,

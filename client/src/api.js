@@ -312,6 +312,44 @@ export async function downloadXlsx(startDate, endDate, offset) {
   return { filename, ...readTruncation(r) };
 }
 
+// ── Month-end reconciliation ──────────────────────────────────────────────────
+// month is YYYY-MM (server defaults to the previous full month when omitted).
+export async function fetchMonthEnd(month) {
+  const qs = new URLSearchParams();
+  if (month) qs.set("month", month);
+  const r = await fetch(`${BASE}/reconcile/month-end${qs.toString() ? `?${qs}` : ""}`, {
+    headers: await authHeaders(),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body.error || `Month-end request failed: ${r.status}`);
+  }
+  return r.json();
+}
+
+export async function downloadMonthEndXlsx(month) {
+  const headers = await authHeaders();
+  delete headers["Content-Type"];
+  const qs = new URLSearchParams();
+  if (month) qs.set("month", month);
+  const r = await fetch(`${BASE}/reconcile/month-end.xlsx${qs.toString() ? `?${qs}` : ""}`, { headers });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body.error || "Export failed");
+  }
+  const blob = await r.blob();
+  const disposition = r.headers.get("Content-Disposition") || "";
+  const match = disposition.match(/filename="([^"]+)"/);
+  const filename = match ? match[1] : `month-end-${month || "export"}.xlsx`;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+  return { filename };
+}
+
 export async function importTransactions(transactions) {
   const r = await fetch(`${BASE}/import`, {
     method: "POST",
