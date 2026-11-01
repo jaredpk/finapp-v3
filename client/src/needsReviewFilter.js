@@ -1,0 +1,36 @@
+// Pure logic behind the Transactions page's clickable "Needs Review" tile.
+// No React, no fetch — testable with node --test (test/needsReviewFilter.test.js).
+//
+// The mode shows the server's needs-review set (GET /api/transactions?needs_review=1)
+// instead of the 2000-row window, so rows older than that window are reachable.
+
+// Rows of the fetched set that STILL need review given the page's live
+// assignments/splits. Categorising or splitting a row in this mode drops it from
+// the list immediately (the server set was a snapshot); the tile refetches its
+// own count separately. Same test the page's loaded-row stats use: a falsy
+// assignment (null category) and no splits.
+export function stillNeedsReview(rows, assignments, splits) {
+  return (rows || []).filter(
+    (t) => !assignments?.[t.transaction_id] && !splits?.[t.transaction_id]?.length
+  );
+}
+
+// The banner text. `truncated` means the server cap cut the needs-review set
+// itself, so the count is a floor, not the number of rows that need review.
+// `dateFiltered` is whether the page's own date preset is narrowing the set
+// client-side (the fetch is always all-dates).
+export function needsReviewBanner({ count, truncated, limit, dateFiltered }) {
+  const n = Number(count || 0).toLocaleString("en-US");
+  const scope = dateFiltered ? "date filter applied" : "all dates";
+  if (truncated) {
+    const cap = limit ? ` ${Number(limit).toLocaleString("en-US")}` : "";
+    return `Showing the newest ${n} transactions needing review (${scope}) — there are more than the${cap}-row limit, so older ones are not listed.`;
+  }
+  return `Showing ${n} ${count === 1 ? "transaction" : "transactions"} needing review (${scope})`;
+}
+
+// CSV filename label: the export must not be mistakable for a full export, so
+// the mode is named in the file; a category filter on top is appended.
+export function needsReviewCsvLabel(categoryLabel) {
+  return categoryLabel ? `needs-review ${categoryLabel}` : "needs-review";
+}

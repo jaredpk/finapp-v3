@@ -123,12 +123,81 @@ function classify(description) {
   return { kind: "card", merchant: base.split(",")[0].trim() || base || description };
 }
 
-export function healthEquityRowId(date, description, amountCents, balanceCents, occurrence = 1) {
-  const h = createHash("sha256")
-    .update(`${date}|${description}|${amountCents}|${balanceCents ?? ""}`)
-    .digest("hex")
-    .slice(0, 16);
-  return occurrence > 1 ? `csv_he_${h}_${occurrence}` : `csv_he_${h}`;
+const sha16 = (s) => createHash("sha256").update(s).digest("hex").slice(0, 16);
+
+// Compare descriptions across re-exports: case, whitespace, a 'Pending - ' tag
+// and '(Tax year: NNNN)' groups all vary between exports of the same row.
+export function normalizeDescription(description) {
+  return String(description ?? "")
+    .replace(/[\s ]+/g, " ")
+    .toLowerCase()
+    .trim()
+    .replace(/^pending\s*(?:-|:)\s*/, "")
+    .replace(/\(\s*tax year\s*:\s*\d+\s*\)/g, " ")
+    .replace(/[\s ]+/g, " ")
+    .replace(/[\s.,;:\-]+$/, "")
+    .trim();
+}
+
+// Lowercased 'Card Transaction ID: <id>' value, or null.
+export function extractCardTxnId(description) {
+  const m = String(description ?? "").match(/card\s*transaction\s*id\s*[:#]?\s*([A-Za-z0-9_-]+)/i);
+  return m ? m[1].toLowerCase() : null;
+}
+
+// Balance-independent ids (the running balance shifts whenever HealthEquity
+// back-dates a row, which used to re-key every later row).
+export const healthEquityCardRowId = (cardId) => `csv_he_${sha16(`card|${cardId}`)}`;
+export const healthEquityRowId = (date, normalizedDescription, amountCents, occurrenceFromOldest) =>
+  `csv_he_${sha16(`v2|${date}|${normalizedDescription}|${amountCents}|${occurrenceFromOldest}`)}`;
+
+// Pure plan shared by preview and import so they always agree.
+// fileRows: parseHealthEquityFile rows (newest first). existingRows: stored
+// csv_he_% rows in the file's date range, { id, date 'YYYY-MM-DD',
+// original_description, amount } with amount in the app sign (negated file sign).
+// Existing rows are treated as the OLDEST occurrences of each identical group,
+// so only the newest surplus rows count as new. A row the user deleted therefore
+// comes back as new on the next import (intended).
+export function planHealthEquityImport(fileRows, existingRows = []) {
+  const existingCards = new Set();
+  const existingGroups = new Map();
+  let latestExisting = null;
+  for (const e of existingRows) {
+    if (latestExisting === null || e.date > latestExisting) latestExisting = e.date;
+    const cardId = extractCardTxnId(e.original_description);
+    if (cardId) { existingCards.add(cardId); continue; }
+    const key = `${e.date}|${normalizeDescription(e.original_description)}|${Math.round(Number(e.amount) * 100)}`;
+    existingGroups.set(key, (existingGroups.get(key) || 0) + 1);
+  }
+
+  const keyOf = (r) => `${r.date}|${normalizeDescription(r.description)}|${-r.amountCents}`;
+  const groupSize = new Map();
+  for (const r of fileRows) {
+    if (extractCardTxnId(r.description)) continue;
+    groupSize.set(keyOf(r), (groupSize.get(keyOf(r)) || 0) + 1);
+  }
+
+  const newRows = [];
+  const alreadyImported = [];
+  const seenInGroup = new Map();
+  const seenCards = new Set();
+  for (const r of fileRows) {
+    const cardId = extractCardTxnId(r.description);
+    if (cardId) {
+      if (existingCards.has(cardId) || seenCards.has(cardId)) { alreadyImported.push(r); continue; }
+      seenCards.add(cardId);
+      newRows.push({ ...r, id: healthEquityCardRowId(cardId) });
+      continue;
+    }
+    const key = keyOf(r);
+    const pos = seenInGroup.get(key) || 0; // 0 = newest in file
+    seenInGroup.set(key, pos + 1);
+    const fromOldest = groupSize.get(key) - 1 - pos;
+    if (fromOldest < (existingGroups.get(key) || 0)) { alreadyImported.push(r); continue; }
+    newRows.push({ ...r, id: healthEquityRowId(r.date, normalizeDescription(r.description), r.amountCents, fromOldest) });
+  }
+  const backdatedNew = latestExisting === null ? 0 : newRows.filter((r) => r.date < latestExisting).length;
+  return { newRows, alreadyImported, backdatedNew };
 }
 
 const centsToDollars = (c) => (c === 0 ? 0 : c / 100);
@@ -154,7 +223,6 @@ export function parseHealthEquityFile(input) {
 
   const rows = [];
   const skipped = [];
-  const seen = new Map();
   for (let i = headerIdx + 1; i < table.length; i++) {
     const cells = table[i] || [];
     if (cells.every((c) => String(c ?? "").trim() === "")) continue;
@@ -174,16 +242,13 @@ export function parseHealthEquityFile(input) {
     if (!description) { skipped.push({ reason: "missing description", row: rowNo }); continue; }
     const balanceCents = parseMoneyToCents(cells[cols["hsa cash balance"]] ?? "");
 
-    const key = `${date}|${description}|${amountCents}|${balanceCents ?? ""}`;
-    const occurrence = (seen.get(key) || 0) + 1;
-    seen.set(key, occurrence);
     const { kind, merchant } = classify(description);
     rows.push({
-      id: healthEquityRowId(date, description, amountCents, balanceCents, occurrence),
       date,
       description,
       merchant,
       kind,
+      amountCents,
       amountDb: centsToDollars(-amountCents),
       balance: balanceCents === null ? null : centsToDollars(balanceCents),
     });
@@ -191,15 +256,14 @@ export function parseHealthEquityFile(input) {
   return { rows, skipped };
 }
 
-// Pure preview math. existingIds: Set/array of ids already in transactions.
-export function buildHealthEquityPreview({ filename, rows, skipped, existingIds = [] }) {
-  const existing = existingIds instanceof Set ? existingIds : new Set(existingIds);
+// Pure preview math. plan: result of planHealthEquityImport for these rows.
+export function buildHealthEquityPreview({ filename, rows, skipped, plan }) {
   const toCents = (n) => Math.round(n * 100);
-  let spend = 0, contributions = 0, interest = 0, already = 0;
+  let spend = 0, contributions = 0, interest = 0;
+  const already = plan.alreadyImported.length;
   const byMonth = new Map();
   let from = null, to = null;
   for (const r of rows) {
-    if (existing.has(r.id)) already++;
     const c = toCents(r.amountDb);
     if (r.kind === "card") spend += c;
     else if (r.kind === "contribution") contributions -= c;
@@ -215,8 +279,9 @@ export function buildHealthEquityPreview({ filename, rows, skipped, existingIds 
     filename: filename || null,
     total_rows: rows.length + skipped.length,
     importable: rows.length,
-    new_rows: rows.length - already,
+    new_rows: plan.newRows.length,
     already_imported: already,
+    backdated_new: plan.backdatedNew,
     skipped: [...reasons].map(([reason, count]) => ({ reason, count })),
     date_range: { from, to },
     totals: {

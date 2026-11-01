@@ -67,6 +67,11 @@ a { color: inherit; text-decoration: none; }
 }
 .pulse { animation: pulse 1.6s ease-in-out infinite; }
 
+/* Clickable stat tile (Transactions "Needs Review") */
+.stat-btn { transition: border-color 0.12s, background-color 0.12s; }
+.stat-btn:hover { border-color: var(--red, #ef4444) !important; }
+.stat-btn:focus-visible { outline: 2px solid var(--accent, #2563eb); outline-offset: 2px; }
+
 /* Spreadsheet-style grid (CashFlow) — row hover + hover-only affordances */
 .cf-grid tbody tr:hover td { background-color: rgba(7, 24, 51, 0.045); }
 .cf-grid .cf-hover-show { opacity: 0; transition: opacity 0.1s; }

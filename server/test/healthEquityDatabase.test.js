@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import pg from "pg";
-import { parseHealthEquityFile } from "../healthEquityImport.js";
+import { parseHealthEquityFile, planHealthEquityImport } from "../healthEquityImport.js";
+
+const planFor = (rows, existing) => planHealthEquityImport(rows, existing);
 
 // DB-backed half of the HealthEquity importer: idempotent insert, Transfer
 // assignment for contribution/interest only, and a user's later re-categorizing
@@ -80,8 +82,8 @@ test("import is idempotent, files Transfer for contributions/interest only, and 
   const [{ id: transferId }] = (await pool.query(`SELECT id FROM categories WHERE name='transfer'`)).rows;
   const [{ id: medicalId }] = (await pool.query(`SELECT id FROM categories WHERE name='Medical'`)).rows;
 
-  assert.equal((await db.getExistingTransactionIds(rows.map((r) => r.id))).size, 0);
-  const first = await db.importHealthEquityRows(rows, "HealthEquity HSA");
+  assert.equal((await db.getExistingHealthEquityRows("2026-01-01", "2026-12-31")).length, 0);
+  const first = await db.importHealthEquityRows(planFor(rows, []).newRows, "HealthEquity HSA");
   assert.deepEqual(first, { inserted: 3, already_imported: 0, categorized_transfer: 2 });
 
   const t = (await pool.query(`SELECT * FROM transactions ORDER BY date`)).rows;
@@ -99,12 +101,16 @@ test("import is idempotent, files Transfer for contributions/interest only, and 
 
   // The user re-files the interest row and categorizes the card row, then the
   // same file is imported again: nothing inserted, nothing altered.
-  const interest = rows.find((r) => r.kind === "interest");
+  const interest = (await pool.query(`SELECT id FROM transactions WHERE merchant='Interest'`)).rows[0];
   await pool.query(`UPDATE assignments SET category_id=$2 WHERE transaction_id=$1`, [interest.id, medicalId]);
   await pool.query(`INSERT INTO assignments (transaction_id, category_id) VALUES ($1,$2)`, [card.id, medicalId]);
-  assert.equal((await db.getExistingTransactionIds(rows.map((r) => r.id))).size, 3);
-  const again = await db.importHealthEquityRows(rows, "HealthEquity HSA");
-  assert.deepEqual(again, { inserted: 0, already_imported: 3, categorized_transfer: 0 });
+  const existing = await db.getExistingHealthEquityRows("2026-01-09", "2026-08-02");
+  assert.equal(existing.length, 3);
+  assert.equal(existing.find((e) => e.id === card.id).date, "2026-08-02");
+  const replan = planFor(rows, existing);
+  assert.equal(replan.newRows.length, 0);
+  const again = await db.importHealthEquityRows(replan.newRows, "HealthEquity HSA");
+  assert.deepEqual(again, { inserted: 0, already_imported: 0, categorized_transfer: 0 });
   const after = Object.fromEntries((await pool.query(`SELECT transaction_id, category_id FROM assignments`)).rows.map((a) => [a.transaction_id, a.category_id]));
   assert.equal(after[interest.id], medicalId);
   assert.equal(after[card.id], medicalId);
@@ -114,8 +120,72 @@ test("import is idempotent, files Transfer for contributions/interest only, and 
 test("a missing Transfer category is created on demand", { skip }, async () => {
   await pool.query(`TRUNCATE assignments, transactions; DELETE FROM categories`);
   const { rows } = parseHealthEquityFile(FILE);
-  const r = await db.importHealthEquityRows(rows, "HealthEquity HSA");
+  const r = await db.importHealthEquityRows(planFor(rows, []).newRows, "HealthEquity HSA");
   assert.equal(r.categorized_transfer, 2);
   const cats = (await pool.query(`SELECT name FROM categories`)).rows;
   assert.deepEqual(cats.map((c) => c.name), ["Transfer"]);
+});
+
+const reset = () => pool.query(`TRUNCATE assignments, transactions; DELETE FROM categories`);
+const count = async () => (await pool.query(`SELECT count(*)::int n FROM transactions`)).rows[0].n;
+async function importFile(html, account = "HealthEquity HSA") {
+  const { rows } = parseHealthEquityFile(html);
+  const dates = rows.map((r) => r.date).sort();
+  const existing = await db.getExistingHealthEquityRows(dates[0], dates[dates.length - 1]);
+  const p = planHealthEquityImport(rows, existing);
+  const res = await db.importHealthEquityRows(p.newRows, account);
+  return { plan: p, res };
+}
+const mk = (list) => `<table><tr><td>Date</td><td>Transaction</td><td>Amount</td><td>HSA Cash Balance</td></tr>${list.map((c) => tr(c)).join("")}</table>`;
+const MONTH1 = [
+  ["9/15/2026", "Employee Contribution (Tax year: 2026)", "$300.00", "$650.00"],
+  ["9/1/2026", "Interest for Aug-26", "$0.10", "$350.00"],
+  ["8/20/2026", "Fake Clinic, UT (Card Transaction ID: c2)", "($25.00)", "$349.90"],
+  ["8/15/2026", "Employee Contribution (Tax year: 2026)", "$300.00", "$374.90"],
+];
+
+test("re-importing the same file inserts nothing; next-month YTD inserts only the new rows", { skip }, async () => {
+  await reset();
+  assert.equal((await importFile(mk(MONTH1))).res.inserted, 4);
+  const again = await importFile(mk(MONTH1));
+  assert.equal(again.res.inserted, 0);
+  assert.equal(again.plan.alreadyImported.length, 4);
+  const next = [
+    ["10/15/2026", "Employee Contribution (Tax year: 2026)", "$300.00", "$950.00"],
+    ["10/2/2026", "Fake Clinic, UT (Card Transaction ID: c3)", "($50.00)", "$900.00"],
+    ...MONTH1,
+  ];
+  const n = await importFile(mk(next));
+  assert.equal(n.res.inserted, 2);
+  assert.equal(n.res.categorized_transfer, 1);
+  assert.equal(await count(), 6);
+  assert.equal((await importFile(mk(next))).res.inserted, 0);
+});
+
+test("back-dated row with shifted balances inserts only that row; old-scheme ids in the DB are matched by count", { skip }, async () => {
+  await reset();
+  // Rows stored under legacy (balance-based) ids, in the legacy account name too.
+  let i = 0;
+  for (const c of MONTH1) {
+    const r = parseHealthEquityFile(mk([c])).rows[0];
+    await pool.query(
+      `INSERT INTO transactions (id, date, merchant, amount, account, status, currency, original_description)
+       VALUES ($1,$2,$3,$4,'HealthEquity Old','reviewed','USD',$5)`,
+      [`csv_he_legacy${i++}`, r.date, r.merchant, r.amountDb, r.description]
+    );
+  }
+  const backdated = [
+    ["9/15/2026", "Employee Contribution (Tax year: 2026)", "$300.00", "$725.00"],
+    ["9/10/2026", "Employer Contribution (Tax year: 2026)", "$75.00", "$425.00"],
+    ["9/1/2026", "Interest for Aug-26", "$0.10", "$350.00"],
+    MONTH1[2], MONTH1[3],
+  ];
+  const { plan: p, res } = await importFile(mk(backdated));
+  assert.equal(p.newRows.length, 1);
+  assert.equal(p.backdatedNew, 1);
+  assert.equal(res.inserted, 1);
+  assert.equal(await count(), 5);
+  assert.equal((await importFile(mk(backdated))).res.inserted, 0);
+  // Legacy rows were never updated.
+  assert.equal((await pool.query(`SELECT count(*)::int n FROM transactions WHERE account='HealthEquity Old'`)).rows[0].n, 4);
 });

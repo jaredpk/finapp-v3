@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import xlsxLib from "xlsx";
 import {
   parseHealthEquityFile, buildHealthEquityPreview, parseMoneyToCents, parseHeDate,
+  planHealthEquityImport, normalizeDescription,
   HealthEquityParseError,
 } from "../healthEquityImport.js";
 
@@ -108,24 +109,154 @@ test("kinds and merchant cleanup", () => {
   assert.equal(m.Fake.merchant, "Fake Pharmacy & Co"); // entity decoded, cut at first comma
 });
 
-test("ids are stable, prefixed, and distinct across balances; collisions get an occurrence index", () => {
-  const a = parseHealthEquityFile(FIXTURE).rows;
-  const b = parseHealthEquityFile(FIXTURE).rows;
-  assert.deepEqual(a.map((r) => r.id), b.map((r) => r.id));
-  assert.ok(a.every((r) => /^csv_he_[0-9a-f]{16}$/.test(r.id)));
-  assert.equal(new Set(a.map((r) => r.id)).size, a.length);
+// ── planHealthEquityImport ───────────────────────────────────────────────────
+// file(): newest-first list of [date, description, fileAmount, balance] -> parsed rows.
+const file = (list) => parseHealthEquityFile(wrap(list.map((c) => tr([...c, ""])).join(""))).rows;
+// Simulates what is stored after importing: arbitrary (old-scheme) ids, app sign.
+const stored = (rows) => rows.map((r, i) => ({ id: `csv_he_old${i}`, date: r.date, original_description: r.description, amount: r.amountDb }));
+const plan = (rows, existing = []) => planHealthEquityImport(rows, existing);
 
-  const same = tr(["5/5/2026", "Twin Shop, UT (Card Transaction ID: q)", "($10.00)", "$50.00", ""]);
-  const twins = parseHealthEquityFile(wrap(same + same)).rows;
-  assert.equal(twins.length, 2);
-  assert.notEqual(twins[0].id, twins[1].id);
-  assert.match(twins[0].id, /^csv_he_[0-9a-f]{16}$/);
-  assert.match(twins[1].id, /^csv_he_[0-9a-f]{16}_2$/);
+const YTD = [
+  ["10/15/2026", "Employee Contribution (Tax year: 2026)", "$300.00", "$900.00"],
+  ["10/10/2026", "Acme Dental, UT (Card Transaction ID: c3)", "($50.00)", "$600.00"],
+  ["9/15/2026", "Employee Contribution (Tax year: 2026)", "$300.00", "$650.00"],
+  ["9/1/2026", "Interest for Aug-26", "$0.10", "$350.00"],
+  ["8/20/2026", "Acme Dental, UT (Card Transaction ID: c2)", "($25.00)", "$349.90"],
+  ["8/15/2026", "Employee Contribution (Tax year: 2026)", "$300.00", "$374.90"],
+];
 
-  // Same text, different running balance => different ids with no suffix.
-  const diff = parseHealthEquityFile(wrap(same + tr(["5/5/2026", "Twin Shop, UT (Card Transaction ID: q)", "($10.00)", "$40.00", ""]))).rows;
-  assert.ok(diff.every((r) => !r.id.endsWith("_2")));
-  assert.notEqual(diff[0].id, diff[1].id);
+test("normalizeDescription strips case, whitespace, Pending tag and Tax year groups", () => {
+  assert.equal(normalizeDescription("  Employee   Contribution (Tax year: 2026) (Tax year: 2026) "), "employee contribution");
+  assert.equal(normalizeDescription("Pending - Employee Contribution"), "employee contribution");
+  assert.equal(normalizeDescription("PENDING: Interest for Jul-26."), "interest for jul-26");
+  assert.equal(normalizeDescription("Interest for  Jul-26"), "interest for jul-26");
+});
+
+test("identical file => 0 new; first import => all new with unique prefixed ids", () => {
+  const rows = file(YTD);
+  const first = plan(rows);
+  assert.equal(first.newRows.length, 6);
+  assert.equal(first.alreadyImported.length, 0);
+  assert.equal(first.backdatedNew, 0);
+  assert.ok(first.newRows.every((r) => /^csv_he_[0-9a-f]{16}$/.test(r.id)));
+  assert.equal(new Set(first.newRows.map((r) => r.id)).size, 6);
+  const again = plan(rows, stored(rows));
+  assert.equal(again.newRows.length, 0);
+  assert.equal(again.alreadyImported.length, 6);
+});
+
+test("next-month YTD: exactly the new rows on top are new", () => {
+  const old = file(YTD);
+  const next = file([
+    ["11/15/2026", "Employee Contribution (Tax year: 2026)", "$300.00", "$1,150.00"],
+    ["11/2/2026", "Acme Dental, UT (Card Transaction ID: c4)", "($50.00)", "$850.00"],
+    ["10/31/2026", "Interest for Oct-26", "$0.12", "$900.12"],
+    ...YTD,
+  ]);
+  const p = plan(next, stored(old));
+  assert.equal(p.newRows.length, 3);
+  assert.deepEqual(p.newRows.map((r) => r.date), ["2026-11-15", "2026-11-02", "2026-10-31"]);
+  assert.equal(p.alreadyImported.length, 6);
+  assert.equal(p.backdatedNew, 0);
+});
+
+test("back-dated row mid-history shifts later balances but only 1 row is new", () => {
+  const old = file(YTD);
+  // Same history, plus a back-dated 9/10 contribution; every later (newer) balance shifts by 75.
+  const shifted = YTD.map((c, i) => (i < 4 ? [c[0], c[1], c[2], `$${(Number(c[3].slice(1)) + 75).toFixed(2)}`] : c));
+  const next = file([
+    shifted[0], shifted[1], shifted[2],
+    ["9/10/2026", "Employer Contribution (Tax year: 2026)", "$75.00", "$425.00"],
+    shifted[3], shifted[4], shifted[5],
+  ]);
+  const p = plan(next, stored(old));
+  assert.equal(p.newRows.length, 1);
+  assert.equal(p.newRows[0].description, "Employer Contribution (Tax year: 2026)");
+  assert.equal(p.alreadyImported.length, 6);
+  assert.equal(p.backdatedNew, 1);
+});
+
+test("ids are stable across runs and independent of the running balance", () => {
+  const a = plan(file(YTD)).newRows.map((r) => r.id);
+  const b = plan(file(YTD.map((c) => [c[0], c[1], c[2], "$1.00"]))).newRows.map((r) => r.id);
+  assert.deepEqual(a, b);
+  assert.deepEqual(a, plan(file(YTD)).newRows.map((r) => r.id));
+  // Card ids depend only on the Card Transaction ID.
+  const card = (date, desc) => plan(file([[date, desc, "($5.00)", "$1.00"]])).newRows[0].id;
+  assert.equal(card("3/3/2026", "Shop A (Card Transaction ID: ABC1)"), card("3/4/2026", "pending - SHOP A (card transaction id: abc1)"));
+  // None equal an old balance-based id shape input; v2 hash input differs by construction.
+  assert.match(a[0], /^csv_he_[0-9a-f]{16}$/);
+});
+
+test("old-scheme ids in storage are matched by count, not by id", () => {
+  const rows = file(YTD);
+  const existing = stored(rows).map((e, i) => ({ ...e, id: `csv_he_legacy${i}_2` }));
+  assert.equal(plan(rows, existing).newRows.length, 0);
+});
+
+test("description rewording does not duplicate non-card rows", () => {
+  const rows = file(YTD);
+  const reworded = file([
+    ["10/15/2026", "EMPLOYEE CONTRIBUTION", "$300.00", "$1.00"],
+    ["10/10/2026", "Acme Dental, UT (Card Transaction ID: c3)", "($50.00)", "$1.00"],
+    ["9/15/2026", "Pending - Employee   Contribution (Tax year: 2026)", "$300.00", "$1.00"],
+    ["9/1/2026", "interest for aug-26", "$0.10", "$1.00"],
+    ["8/20/2026", "Acme Dental, UT (Card Transaction ID: c2)", "($25.00)", "$1.00"],
+    ["8/15/2026", "Employee Contribution (Tax year: 2026) (Tax year: 2026)", "$300.00", "$1.00"],
+  ]);
+  assert.equal(plan(reworded, stored(rows)).newRows.length, 0);
+  // and the other direction: stored text reworded, file original
+  assert.equal(plan(rows, stored(reworded)).newRows.length, 0);
+});
+
+test("reworded CARD row with the same Card Transaction ID is already imported, even with other date/amount", () => {
+  const rows = file([["5/5/2026", "Fake Clinic, UT (Card Transaction ID: AbC123)", "($40.00)", "$10.00"]]);
+  const existing = [{ id: "csv_he_x", date: "2026-05-04", original_description: "Pending - FAKE CLINIC (card transaction id: abc123)", amount: 41 }];
+  const p = plan(rows, existing);
+  assert.equal(p.newRows.length, 0);
+  assert.equal(p.alreadyImported.length, 1);
+  assert.equal(plan(rows, []).newRows.length, 1);
+});
+
+test("two identical non-card rows: 2 on first import, 0 on re-import, 1 when a third appears", () => {
+  const two = file([
+    ["6/1/2026", "Employee Contribution", "$100.00", "$300.00"],
+    ["6/1/2026", "Employee Contribution", "$100.00", "$200.00"],
+  ]);
+  const first = plan(two);
+  assert.equal(first.newRows.length, 2);
+  assert.notEqual(first.newRows[0].id, first.newRows[1].id);
+  assert.equal(plan(two, stored(two)).newRows.length, 0);
+  const three = file([["6/1/2026", "Employee Contribution", "$100.00", "$400.00"], ...[
+    ["6/1/2026", "Employee Contribution", "$100.00", "$300.00"],
+    ["6/1/2026", "Employee Contribution", "$100.00", "$200.00"],
+  ]]);
+  const p = plan(three, stored(two));
+  assert.equal(p.newRows.length, 1);
+  assert.equal(p.alreadyImported.length, 2);
+  // The new row is the newest occurrence (index 2 from oldest), not a re-keyed old one.
+  assert.equal(p.newRows[0].id, plan(three).newRows[0].id);
+  assert.ok(!first.newRows.some((r) => r.id === p.newRows[0].id));
+});
+
+test("a user-deleted stored row comes back as 1 new row (intended: the file is the source of truth for what exists)", () => {
+  const rows = file(YTD);
+  const existing = stored(rows).filter((e) => e.date !== "2026-09-15");
+  const p = plan(rows, existing);
+  assert.equal(p.newRows.length, 1);
+  assert.equal(p.newRows[0].date, "2026-09-15");
+  assert.equal(p.backdatedNew, 1);
+});
+
+test("preview and import use the same plan", () => {
+  const { rows, skipped } = parseHealthEquityFile(wrap(YTD.map((c) => tr([...c, ""])).join("")));
+  const existing = stored(rows.slice(2));
+  const pl = plan(rows, existing);
+  const p = buildHealthEquityPreview({ filename: "x.xls", rows, skipped, plan: pl });
+  assert.equal(p.new_rows, pl.newRows.length);
+  assert.equal(p.already_imported, pl.alreadyImported.length);
+  assert.equal(p.new_rows, 2);
+  assert.equal(p.backdated_new, 0);
 });
 
 test("a real .xlsx and a .csv with the same headers are accepted", () => {
@@ -146,8 +277,8 @@ test("a real .xlsx and a .csv with the same headers are accepted", () => {
 
 test("preview math: counts, already imported, totals in file terms, months, range", () => {
   const { rows, skipped } = parseHealthEquityFile(FIXTURE);
-  const existing = new Set([rows[0].id, rows[1].id, "csv_he_unrelated"]);
-  const p = buildHealthEquityPreview({ filename: "th.xls", rows, skipped, existingIds: existing });
+  const existing = rows.slice(0, 2).map((r, i) => ({ id: `csv_he_old${i}`, date: r.date, original_description: r.description, amount: r.amountDb }));
+  const p = buildHealthEquityPreview({ filename: "th.xls", rows, skipped, plan: planHealthEquityImport(rows, existing) });
   assert.equal(p.filename, "th.xls");
   assert.equal(p.total_rows, 8);
   assert.equal(p.importable, 5);

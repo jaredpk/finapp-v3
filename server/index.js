@@ -49,7 +49,7 @@ import {
   getTransactionDateAmountSet, parseAuditXlsx,
   reviewTransactions, unreviewTransaction, getGmailRefreshToken,
   getGeminiUsageByFeature,
-  getExistingTransactionIds, importHealthEquityRows,
+  getExistingHealthEquityRows, importHealthEquityRows,
 } from "./db.js";
 import pool from "./db.js";
 import {
@@ -57,7 +57,7 @@ import {
   isValidMonth, previousMonth, monthRange, parseMonthEndConfig, HEALTH_EQUITY_RE,
 } from "./monthEndReconciliation.js";
 import {
-  parseHealthEquityFile, buildHealthEquityPreview, HealthEquityParseError, HE_ACCOUNT_DEFAULT,
+  parseHealthEquityFile, buildHealthEquityPreview, planHealthEquityImport, HealthEquityParseError, HE_ACCOUNT_DEFAULT,
 } from "./healthEquityImport.js";
 import { gmailConfigured, getGmailAuthUrl, exchangeGmailAuthCode, gmailConnected, getGrantedScopes, canSendMail, checkGmailToken } from "./gmail.js";
 import { buildDigestEmail, sendAlert, sendTestEmail } from "./alertEmail.js";
@@ -73,6 +73,7 @@ import {
   truncationHeaders, TRUNCATION_HEADERS, validateDateRange, parseOffset,
   buildExportInfoRows, exportInfoSheetName, exportFilename,
 } from "./limits.js";
+import { parseNeedsReview } from "./needsReview.js";
 import { registerPropertyFinanceRoutes } from "./property/routes.js";
 import { registerBenefitsRoutes, getBenefitsStatus } from "./benefits/routes.js";
 import { alertTiers } from "./benefits/periods.js";
@@ -731,6 +732,7 @@ app.get("/api/transactions", requireApiKeyOrAuth, async (req, res) => {
       startDate: req.query.start_date,
       endDate: req.query.end_date,
       category: req.query.category,
+      needsReview: parseNeedsReview(req.query.needs_review),
     });
     const { rows: transactions, truncated } = takeWithTruncation(rows, limit);
     res.set(truncationHeaders({ truncated, limit, count: transactions.length }));
@@ -1551,12 +1553,20 @@ function readHealthEquityRequest(req) {
   return { acct, filename: filename || null, ...parsed };
 }
 
+// One plan for both preview and import so they always agree.
+async function planHealthEquityRequest(r) {
+  if (!r.rows.length) return planHealthEquityImport([], []);
+  const dates = r.rows.map((x) => x.date).sort();
+  const existing = await getExistingHealthEquityRows(dates[0], dates[dates.length - 1]);
+  return planHealthEquityImport(r.rows, existing);
+}
+
 app.post("/api/healthequity/preview", requireAuth, async (req, res) => {
   try {
     const r = readHealthEquityRequest(req);
     if (r.error) return res.status(400).json({ error: r.error });
-    const existing = await getExistingTransactionIds(r.rows.map((x) => x.id));
-    res.json(buildHealthEquityPreview({ filename: r.filename, rows: r.rows, skipped: r.skipped, existingIds: existing }));
+    const plan = await planHealthEquityRequest(r);
+    res.json(buildHealthEquityPreview({ filename: r.filename, rows: r.rows, skipped: r.skipped, plan }));
   } catch (err) {
     console.error("HealthEquity preview error:", err);
     res.status(500).json({ error: "Could not preview this file." });
@@ -1567,8 +1577,9 @@ app.post("/api/healthequity/import", requireAuth, async (req, res) => {
   try {
     const r = readHealthEquityRequest(req);
     if (r.error) return res.status(400).json({ error: r.error });
-    const result = await importHealthEquityRows(r.rows, r.acct);
-    res.json({ inserted: result.inserted, already_imported: result.already_imported, skipped: r.skipped.length, categorized_transfer: result.categorized_transfer });
+    const plan = await planHealthEquityRequest(r);
+    const result = await importHealthEquityRows(plan.newRows, r.acct);
+    res.json({ inserted: result.inserted, already_imported: plan.alreadyImported.length + result.already_imported, skipped: r.skipped.length, categorized_transfer: result.categorized_transfer });
   } catch (err) {
     console.error("HealthEquity import error:", err);
     res.status(500).json({ error: "Import failed; nothing was saved." });
