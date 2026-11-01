@@ -295,3 +295,10 @@ test("preview math: counts, already imported, totals in file terms, months, rang
   assert.equal(p.skipped.reduce((n, s) => n + s.count, 0), 3);
   assert.ok(p.skipped.every((s) => s.reason && s.count === 1));
 });
+
+test("normalizeDescription ignores spacing around commas", async () => {
+  const { normalizeDescription } = await import("../healthEquityImport.js");
+  assert.equal(normalizeDescription("Foo Bar,Baz"), "foo bar, baz");
+  assert.equal(normalizeDescription("Foo Bar ,  Baz"), "foo bar, baz");
+  assert.equal(normalizeDescription("Foo Bar, Baz"), normalizeDescription("Foo Bar,Baz"));
+});

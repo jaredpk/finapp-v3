@@ -134,6 +134,7 @@ export function normalizeDescription(description) {
     .trim()
     .replace(/^pending\s*(?:-|:)\s*/, "")
     .replace(/\(\s*tax year\s*:\s*\d+\s*\)/g, " ")
+    .replace(/\s*,\s*/g, ", ")
     .replace(/[\s ]+/g, " ")
     .replace(/[\s.,;:\-]+$/, "")
     .trim();
