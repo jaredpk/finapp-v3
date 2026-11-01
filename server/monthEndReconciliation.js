@@ -15,6 +15,11 @@ export const DEFAULT_MONTH_END_CONFIG = {
   // dollars, per line: exact Oct 2026 bill charge = $30.00 plan + $4.89
   // surcharges + $2.60 taxes/fees
   verizonLineAmount: 37.49,
+  // dollars: the account-wide "$20 NURSES DISCOUNT 4+ PHNS" credit, spread
+  // evenly over every line on the account (9 lines on the Oct 2026 bill).
+  // 0 disables it.
+  verizonAccountCredit: 20.0,
+  verizonAccountLines: 9,
   share: 0.5,
 };
 
@@ -44,6 +49,13 @@ const toDollars = (cents) => cents / 100;
 // Half-up to the cent. Math.floor(x + 0.5) rounds .5 toward +infinity.
 export function shareOfCents(cents, share) {
   return Math.floor(cents * share + 0.5);
+}
+
+// Our lines' portion of the account-wide credit: round half-up of
+// creditCents * lines / accountLines, in pure integer math on the aggregate.
+function creditAllocationCents(creditCents, lines, accountLines) {
+  if (!accountLines) return 0;
+  return Math.floor((2 * creditCents * lines + accountLines) / (2 * accountLines));
 }
 
 const norm = (s) => String(s ?? "").trim().toLowerCase();
@@ -93,8 +105,11 @@ export function buildMonthEndReconciliation({ month, rows = [], config = {} } = 
   const kidsShareCents = shareOfCents(kidsSubtotalCents, cfg.share);
 
   const lineCents = toCents(cfg.verizonLineAmount);
-  const verizonTotalCents = cfg.verizonLines * lineCents;
-  const verizonShareCents = shareOfCents(verizonTotalCents, cfg.share);
+  const verizonGrossCents = cfg.verizonLines * lineCents;
+  const accountCreditCents = toCents(cfg.verizonAccountCredit);
+  const creditAllocatedCents = creditAllocationCents(accountCreditCents, cfg.verizonLines, cfg.verizonAccountLines);
+  const verizonNetCents = verizonGrossCents - creditAllocatedCents;
+  const verizonShareCents = shareOfCents(verizonNetCents, cfg.share);
 
   const totalDueCents = kidsShareCents + verizonShareCents;
 
@@ -106,6 +121,8 @@ export function buildMonthEndReconciliation({ month, rows = [], config = {} } = 
     config: {
       verizonLines: cfg.verizonLines,
       verizonLineAmount: money(lineCents),
+      verizonAccountCredit: money(accountCreditCents),
+      verizonAccountLines: cfg.verizonAccountLines,
       share: cfg.share,
     },
     kids: {
@@ -116,9 +133,17 @@ export function buildMonthEndReconciliation({ month, rows = [], config = {} } = 
     verizon: {
       lines: cfg.verizonLines,
       line_amount: money(lineCents),
-      total: money(verizonTotalCents),
+      // `total` is the NET (after credit) and `share` the share of net, so
+      // existing consumers keep working; gross is in `gross_total`.
+      total: money(verizonNetCents),
       share: money(verizonShareCents),
-      label: `Verizon: ${cfg.verizonLines} lines x ${fmt(lineCents)} (plan + surcharges + taxes/fees) = ${fmt(verizonTotalCents)}`,
+      label: `Verizon: ${cfg.verizonLines} lines x ${fmt(lineCents)} (plan + surcharges + taxes/fees) = ${fmt(verizonGrossCents)}`,
+      account_credit_total: money(accountCreditCents),
+      account_credit_lines: cfg.verizonAccountLines,
+      credit_allocated: money(creditAllocatedCents),
+      gross_total: money(verizonGrossCents),
+      net_total: money(verizonNetCents),
+      credit_label: `Account credit: ${fmt(accountCreditCents)} x ${cfg.verizonLines}/${cfg.verizonAccountLines} lines = -${fmt(creditAllocatedCents)}`,
     },
     total_due: money(totalDueCents),
     review: {
@@ -148,7 +173,9 @@ export function buildMonthEndSheetRows(result) {
   out.push([]);
 
   out.push(["VERIZON ALLOCATION"]);
-  out.push([result.verizon.label, "", "", "", result.verizon.total]);
+  out.push([result.verizon.label, "", "", "", result.verizon.gross_total]);
+  out.push([result.verizon.credit_label, "", "", "", -result.verizon.credit_allocated]);
+  out.push(["", "", "", "Net Verizon", result.verizon.net_total]);
   out.push(["", "", "", `${pct} share`, result.verizon.share]);
   out.push([]);
 
@@ -168,7 +195,9 @@ export function buildMonthEndSheetRows(result) {
 }
 
 // Query-string overrides -> config, or { error } for the 400.
-export function parseMonthEndConfig({ verizonLines, verizonLineAmount } = {}) {
+export function parseMonthEndConfig({
+  verizonLines, verizonLineAmount, verizonAccountCredit, verizonAccountLines,
+} = {}) {
   const config = {};
   if (verizonLines !== undefined && verizonLines !== "") {
     const s = String(verizonLines);
@@ -182,5 +211,23 @@ export function parseMonthEndConfig({ verizonLines, verizonLineAmount } = {}) {
     }
     config.verizonLineAmount = Number(s);
   }
+  if (verizonAccountCredit !== undefined && verizonAccountCredit !== "") {
+    const s = String(verizonAccountCredit);
+    if (!/^\d{1,7}(\.\d{1,2})?$/.test(s)) {
+      return { error: "verizonAccountCredit must be a non-negative dollar amount with at most 2 decimals" };
+    }
+    config.verizonAccountCredit = Number(s);
+  }
+  if (verizonAccountLines !== undefined && verizonAccountLines !== "") {
+    const s = String(verizonAccountLines);
+    const n = Number(s);
+    if (!/^\d{1,3}$/.test(s) || n < 1 || n > 999) {
+      return { error: "verizonAccountLines must be an integer from 1 to 999" };
+    }
+    config.verizonAccountLines = n;
+  }
+  const lines = config.verizonLines ?? DEFAULT_MONTH_END_CONFIG.verizonLines;
+  const accountLines = config.verizonAccountLines ?? DEFAULT_MONTH_END_CONFIG.verizonAccountLines;
+  if (accountLines < lines) return { error: "verizonAccountLines must be at least verizonLines" };
   return { config };
 }

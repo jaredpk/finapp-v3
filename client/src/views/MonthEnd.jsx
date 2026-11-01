@@ -13,6 +13,8 @@ function previousMonth() {
 // Match the server defaults (exact per-line bill charge incl. surcharges, taxes, fees).
 const DEFAULT_VERIZON_LINES = 2;
 const DEFAULT_VERIZON_LINE_AMOUNT = 37.49;
+const DEFAULT_VERIZON_ACCOUNT_CREDIT = 20.0;
+const DEFAULT_VERIZON_ACCOUNT_LINES = 9;
 
 const COLS = "90px minmax(0,1fr) 140px 140px 100px";
 
@@ -49,30 +51,39 @@ export default function MonthEnd() {
   const [error, setError] = useState(null);
   const [linesInput, setLinesInput] = useState(String(DEFAULT_VERIZON_LINES));
   const [amountInput, setAmountInput] = useState(DEFAULT_VERIZON_LINE_AMOUNT.toFixed(2));
+  const [creditInput, setCreditInput] = useState(DEFAULT_VERIZON_ACCOUNT_CREDIT.toFixed(2));
+  const [accountLinesInput, setAccountLinesInput] = useState(String(DEFAULT_VERIZON_ACCOUNT_LINES));
 
   // Empty/invalid input falls back to the defaults so bad values are never sent.
   const verizonLines = /^\d{1,3}$/.test(linesInput.trim()) ? Number(linesInput.trim()) : DEFAULT_VERIZON_LINES;
   const verizonLineAmount = /^\d{1,7}(\.\d{1,2})?$/.test(amountInput.trim())
     ? Number(amountInput.trim())
     : DEFAULT_VERIZON_LINE_AMOUNT;
+  const verizonAccountCredit = /^\d{1,7}(\.\d{1,2})?$/.test(creditInput.trim())
+    ? Number(creditInput.trim())
+    : DEFAULT_VERIZON_ACCOUNT_CREDIT;
+  const verizonAccountLines =
+    /^\d{1,3}$/.test(accountLinesInput.trim()) && Number(accountLinesInput.trim()) >= 1
+      ? Number(accountLinesInput.trim())
+      : DEFAULT_VERIZON_ACCOUNT_LINES;
 
   useEffect(() => {
     if (!/^\d{4}-\d{2}$/.test(month)) return;
     let cancelled = false;
     setLoading(true);
     setError(null);
-    fetchMonthEnd(month, { verizonLines, verizonLineAmount })
+    fetchMonthEnd(month, { verizonLines, verizonLineAmount, verizonAccountCredit, verizonAccountLines })
       .then((res) => { if (!cancelled) setData(res); })
       .catch((e) => { if (!cancelled) { setError(e.message); setData(null); } })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [month, verizonLines, verizonLineAmount]);
+  }, [month, verizonLines, verizonLineAmount, verizonAccountCredit, verizonAccountLines]);
 
   async function handleDownload() {
     setDownloading(true);
     setError(null);
     try {
-      await downloadMonthEndXlsx(month, { verizonLines, verizonLineAmount });
+      await downloadMonthEndXlsx(month, { verizonLines, verizonLineAmount, verizonAccountCredit, verizonAccountLines });
     } catch (e) {
       setError(e.message);
     } finally {
@@ -112,6 +123,28 @@ export default function MonthEnd() {
             style={{ ...styles.dateInput, width: 60 }}
           />
         </label>
+        <label style={styles.fieldLabel}>
+          Account credit ($)
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            value={creditInput}
+            onChange={(e) => setCreditInput(e.target.value)}
+            style={{ ...styles.dateInput, width: 90 }}
+          />
+        </label>
+        <label style={styles.fieldLabel}>
+          Account lines
+          <input
+            type="number"
+            min="1"
+            step="1"
+            value={accountLinesInput}
+            onChange={(e) => setAccountLinesInput(e.target.value)}
+            style={{ ...styles.dateInput, width: 60 }}
+          />
+        </label>
         <button onClick={handleDownload} disabled={downloading || !data} style={styles.chip}>
           {downloading ? "Downloading…" : "Download Excel"}
         </button>
@@ -140,7 +173,9 @@ export default function MonthEnd() {
               <p style={{ ...styles.statVal, color: "var(--accent)" }}>{fmtSigned(data.total_due)}</p>
             </div>
           </div>
-          <p style={styles.note}>{data.verizon.label} (total {fmtSigned(data.verizon.total)})</p>
+          <p style={styles.note}>{data.verizon.label}</p>
+          <p style={styles.note}>{data.verizon.credit_label}</p>
+          <p style={styles.note}>Net Verizon: {fmtSigned(data.verizon.net_total)}</p>
 
           <p style={styles.subTitle}>Kids ({data.kids.rows.length})</p>
           <TxnTable rows={data.kids.rows} />

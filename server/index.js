@@ -1664,14 +1664,16 @@ app.get("/api/export-xlsx", requireAuth, async (req, res) => {
 // ── Month-end reconciliation ─────────────────────────────────────────────────
 // Kids + kids-health spend (50% share), a Verizon allocation, and review lists
 // of uncategorized / Health transactions. `month` is YYYY-MM and defaults to the
-// previous full month; verizonLines / verizonLineAmount optionally override the
-// defaults. See monthEndReconciliation.js.
+// previous full month; verizonLines / verizonLineAmount / verizonAccountCredit /
+// verizonAccountLines optionally override the defaults. See monthEndReconciliation.js.
 async function loadMonthEnd(req) {
   const month = req.query.month || previousMonth();
   if (!isValidMonth(month)) return { status: 400, error: "month must be YYYY-MM" };
   const parsed = parseMonthEndConfig({
     verizonLines: req.query.verizonLines,
     verizonLineAmount: req.query.verizonLineAmount,
+    verizonAccountCredit: req.query.verizonAccountCredit,
+    verizonAccountLines: req.query.verizonAccountLines,
   });
   if (parsed.error) return { status: 400, error: parsed.error };
   const { startDate, endDate } = monthRange(month);

@@ -314,13 +314,20 @@ export async function downloadXlsx(startDate, endDate, offset) {
 
 // ── Month-end reconciliation ──────────────────────────────────────────────────
 // month is YYYY-MM (server defaults to the previous full month when omitted).
-// Optional { verizonLines, verizonLineAmount } are only sent when valid.
-function setVerizonParams(qs, { verizonLines, verizonLineAmount } = {}) {
+// Optional { verizonLines, verizonLineAmount, verizonAccountCredit,
+// verizonAccountLines } are only sent when valid.
+function setVerizonParams(qs, { verizonLines, verizonLineAmount, verizonAccountCredit, verizonAccountLines } = {}) {
   if (Number.isInteger(verizonLines) && verizonLines >= 0 && verizonLines <= 999) {
     qs.set("verizonLines", String(verizonLines));
   }
   if (Number.isFinite(verizonLineAmount) && verizonLineAmount >= 0 && verizonLineAmount < 1e7) {
     qs.set("verizonLineAmount", (Math.round(verizonLineAmount * 100) / 100).toFixed(2));
+  }
+  if (Number.isFinite(verizonAccountCredit) && verizonAccountCredit >= 0 && verizonAccountCredit < 1e7) {
+    qs.set("verizonAccountCredit", (Math.round(verizonAccountCredit * 100) / 100).toFixed(2));
+  }
+  if (Number.isInteger(verizonAccountLines) && verizonAccountLines >= 1 && verizonAccountLines <= 999) {
+    qs.set("verizonAccountLines", String(verizonAccountLines));
   }
 }
 
