@@ -53,7 +53,7 @@ import {
 } from "./db.js";
 import pool from "./db.js";
 import {
-  buildMonthEndReconciliation, buildMonthEndSheetRows, monthEndSheetName,
+  buildMonthEndReconciliation, buildMonthEndWorkbookSheets,
   isValidMonth, previousMonth, monthRange, parseMonthEndConfig, HEALTH_EQUITY_RE,
 } from "./monthEndReconciliation.js";
 import {
@@ -1768,9 +1768,11 @@ app.get("/api/reconcile/month-end.xlsx", requireAuth, async (req, res) => {
     if (out.error) return res.status(out.status).json({ error: out.error });
     const { utils, write } = xlsxLib;
     const wb = utils.book_new();
-    const ws = utils.aoa_to_sheet(buildMonthEndSheetRows(out.result));
-    ws["!cols"] = [{ wch: 28 }, { wch: 30 }, { wch: 20 }, { wch: 22 }, { wch: 12 }];
-    utils.book_append_sheet(wb, ws, monthEndSheetName(out.result.month));
+    for (const sheet of buildMonthEndWorkbookSheets(out.result)) {
+      const ws = utils.aoa_to_sheet(sheet.rows);
+      ws["!cols"] = [{ wch: 28 }, { wch: 30 }, { wch: 20 }, { wch: 22 }, { wch: 12 }];
+      utils.book_append_sheet(wb, ws, sheet.name);
+    }
     const buf = write(wb, { type: "buffer", bookType: "xlsx" });
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     res.setHeader("Content-Disposition", `attachment; filename="month-end-${out.result.month}.xlsx"`);
