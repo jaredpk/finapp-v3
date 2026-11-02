@@ -192,56 +192,63 @@ export function buildMonthEndReconciliation({ month, rows = [], config = {} } = 
   };
 }
 
-export function monthEndSheetName(month) {
-  return `Month-End ${month}`;
-}
+export const MONTH_END_SHEET_NAMES = {
+  kids: "Kids to split",
+  personal: "Personal - Jared",
+  review: "To review",
+};
 
-// Array-of-arrays for the single stacked sheet. Review sections are
+export const MONTH_END_REVIEW_NOTE = "Transactions to check for missed kids items — not included in any total";
+
+const SHEET_HEADER = ["Date", "Merchant", "Category", "Account", "Amount"];
+const sheetLine = (r) => [r.date, r.merchant, r.category, r.account, r.amount];
+
+// Array-of-arrays per tab: [{ name, rows }] in tab order. Review sections are
 // informational and not part of any total.
-export function buildMonthEndSheetRows(result) {
+export function buildMonthEndWorkbookSheets(result) {
   const pct = `${Math.round(result.config.share * 10000) / 100}%`;
-  const header = ["Date", "Merchant", "Category", "Account", "Amount"];
-  const line = (r) => [r.date, r.merchant, r.category, r.account, r.amount];
-  const out = [];
 
+  const kids = [];
   if (result.health_equity?.banner) {
-    out.push([result.health_equity.banner]);
-    out.push([]);
+    kids.push([result.health_equity.banner]);
+    kids.push([]);
   }
+  kids.push([`KIDS (Kids and Kids health) - ${result.month}`]);
+  kids.push(SHEET_HEADER);
+  for (const r of result.kids.rows) kids.push(sheetLine(r));
+  kids.push(["", "", "", "Subtotal", result.kids.subtotal]);
+  kids.push(["", "", "", `${pct} share`, result.kids.share]);
+  kids.push([]);
+  kids.push(["VERIZON ALLOCATION"]);
+  kids.push([result.verizon.label, "", "", "", result.verizon.gross_total]);
+  kids.push([result.verizon.credit_label, "", "", "", -result.verizon.credit_allocated]);
+  kids.push(["", "", "", "Net Verizon", result.verizon.net_total]);
+  kids.push(["", "", "", `${pct} share`, result.verizon.share]);
+  kids.push([]);
+  kids.push(["", "", "", "TOTAL DUE", result.total_due]);
 
-  out.push([`KIDS (Kids and Kids health) - ${result.month}`]);
-  out.push(header);
-  for (const r of result.kids.rows) out.push(line(r));
-  out.push(["", "", "", "Subtotal", result.kids.subtotal]);
-  out.push(["", "", "", `${pct} share`, result.kids.share]);
-  out.push([]);
+  const personal = [];
+  personal.push(["PERSONAL - JARED (listed only - not included in total due)"]);
+  personal.push(SHEET_HEADER);
+  for (const r of result.personal_jared.rows) personal.push(sheetLine(r));
+  personal.push(["", "", "", "Subtotal", result.personal_jared.subtotal]);
 
-  out.push(["VERIZON ALLOCATION"]);
-  out.push([result.verizon.label, "", "", "", result.verizon.gross_total]);
-  out.push([result.verizon.credit_label, "", "", "", -result.verizon.credit_allocated]);
-  out.push(["", "", "", "Net Verizon", result.verizon.net_total]);
-  out.push(["", "", "", `${pct} share`, result.verizon.share]);
-  out.push([]);
+  const review = [];
+  review.push([MONTH_END_REVIEW_NOTE]);
+  review.push([]);
+  review.push(["REVIEW - UNCATEGORIZED (not included in totals)"]);
+  review.push(SHEET_HEADER);
+  for (const r of result.review.uncategorized) review.push(sheetLine(r));
+  review.push([]);
+  review.push(["REVIEW - HEALTH (not included in totals)"]);
+  review.push(SHEET_HEADER);
+  for (const r of result.review.health) review.push(sheetLine(r));
 
-  out.push(["", "", "", "TOTAL DUE", result.total_due]);
-  out.push([]);
-
-  out.push(["PERSONAL - JARED (listed only - not included in total due)"]);
-  out.push(header);
-  for (const r of result.personal_jared.rows) out.push(line(r));
-  out.push(["", "", "", "Subtotal", result.personal_jared.subtotal]);
-  out.push([]);
-
-  out.push(["REVIEW - UNCATEGORIZED (not included in totals)"]);
-  out.push(header);
-  for (const r of result.review.uncategorized) out.push(line(r));
-  out.push([]);
-
-  out.push(["REVIEW - HEALTH (not included in totals)"]);
-  out.push(header);
-  for (const r of result.review.health) out.push(line(r));
-
-  return out;
+  return [
+    { name: MONTH_END_SHEET_NAMES.kids, rows: kids },
+    { name: MONTH_END_SHEET_NAMES.personal, rows: personal },
+    { name: MONTH_END_SHEET_NAMES.review, rows: review },
+  ];
 }
 
 // Query-string overrides -> config, or { error } for the 400.

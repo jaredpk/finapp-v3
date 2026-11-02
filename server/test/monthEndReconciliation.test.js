@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  buildMonthEndReconciliation, buildMonthEndSheetRows, parseMonthEndConfig,
+  buildMonthEndReconciliation, buildMonthEndWorkbookSheets, parseMonthEndConfig,
   isValidMonth, previousMonth, monthRange, shareOfCents, isPersonalJaredCategory,
 } from "../monthEndReconciliation.js";
 
@@ -124,29 +124,141 @@ test("empty month yields zeros plus the Verizon share", () => {
   assert.equal(r.total_due, 35.27);
 });
 
-test("sheet rows are stacked in the requested order", () => {
+const HDR = ["Date", "Merchant", "Category", "Account", "Amount"];
+const sheetsOf = (r) => buildMonthEndWorkbookSheets(r);
+const byName = (r) => Object.fromEntries(sheetsOf(r).map((s) => [s.name, s.rows]));
+
+test("workbook has three tabs in order with valid Excel names", () => {
+  const sheets = sheetsOf(buildMonthEndReconciliation({ month: MONTH, rows: [] }));
+  assert.deepEqual(sheets.map((s) => s.name), ["Kids to split", "Personal - Jared", "To review"]);
+  for (const s of sheets) {
+    assert.ok(s.name.length <= 31);
+    assert.ok(!/[:\\/?*\[\]]/.test(s.name));
+  }
+});
+
+test("tab 1 'Kids to split': kids, verizon, total due; positions match the old sheet's first part", () => {
   const r = buildMonthEndReconciliation({
     month: MONTH,
     rows: [row("1", "2026-10-02", "School", "Kids", 100), row("2", "2026-10-03", "X", null, 1)],
   });
-  const flat = buildMonthEndSheetRows(r).map((x) => String(x[0] ?? "") + "|" + String(x[3] ?? ""));
-  const idx = (s) => flat.findIndex((l) => l.includes(s));
-  assert.ok(idx("KIDS") < idx("VERIZON ALLOCATION"));
-  assert.ok(idx("VERIZON ALLOCATION") < idx("TOTAL DUE"));
-  assert.ok(idx("TOTAL DUE") < idx("REVIEW - UNCATEGORIZED"));
-  assert.ok(idx("REVIEW - UNCATEGORIZED") < idx("REVIEW - HEALTH"));
-});
-
-test("sheet VERIZON ALLOCATION: gross, negative credit, net, then 50% share", () => {
-  const r = buildMonthEndReconciliation({ month: MONTH, rows: [] });
-  const rows = buildMonthEndSheetRows(r);
-  const start = rows.findIndex((x) => x[0] === "VERIZON ALLOCATION");
-  assert.deepEqual(rows.slice(start + 1, start + 5), [
-    [r.verizon.label, "", "", "", 74.98],
+  const rows = sheetsOf(r)[0].rows;
+  assert.deepEqual(rows, [
+    ["Health Equity for October 2026 not imported"],
+    [],
+    ["KIDS (Kids and Kids health) - 2026-10"],
+    HDR,
+    ["2026-10-02", "School", "Kids", "Chase", 100],
+    ["", "", "", "Subtotal", 100],
+    ["", "", "", "50% share", 50],
+    [],
+    ["VERIZON ALLOCATION"],
+    ["Verizon: 2 lines x $37.49 (plan + surcharges + taxes/fees) = $74.98", "", "", "", 74.98],
     ["Account credit: $20.00 x 2/9 lines = -$4.44", "", "", "", -4.44],
     ["", "", "", "Net Verizon", 70.54],
     ["", "", "", "50% share", 35.27],
+    [],
+    ["", "", "", "TOTAL DUE", 85.27],
   ]);
+});
+
+test("tab 2 'Personal - Jared': title, header, rows, Subtotal; no share row", () => {
+  const r = buildMonthEndReconciliation({
+    month: MONTH,
+    rows: [row("1", "2026-10-02", "School", "Kids", 100), row("2", "2026-10-03", "Gift", "Personal - Jared", 12.5)],
+  });
+  const rows = sheetsOf(r)[1].rows;
+  assert.deepEqual(rows, [
+    [PJ_TITLE],
+    HDR,
+    ["2026-10-03", "Gift", "Personal - Jared", "Chase", 12.5],
+    ["", "", "", "Subtotal", 12.5],
+  ]);
+  assert.equal(rows.filter((x) => String(x[3]).includes("share")).length, 0);
+});
+
+test("tab 3 'To review': note, blank, uncategorized then health sections", () => {
+  const r = buildMonthEndReconciliation({
+    month: MONTH,
+    rows: [row("1", "2026-10-03", "Mystery", null, 12), row("2", "2026-10-04", "Clinic", "Health", 80)],
+  });
+  assert.deepEqual(sheetsOf(r)[2].rows, [
+    ["Transactions to check for missed kids items — not included in any total"],
+    [],
+    ["REVIEW - UNCATEGORIZED (not included in totals)"],
+    HDR,
+    ["2026-10-03", "Mystery", "", "Chase", 12],
+    [],
+    ["REVIEW - HEALTH (not included in totals)"],
+    HDR,
+    ["2026-10-04", "Clinic", "Health", "Chase", 80],
+  ]);
+});
+
+test("empty month: each tab renders its titles/headers and zero subtotal", () => {
+  const t = byName(buildMonthEndReconciliation({ month: "2026-10", rows: [{ ...row("h", "2026-10-01", "HE", "Medical", 1, "HealthEquity HSA") }] }));
+  const e = byName(buildMonthEndReconciliation({ month: MONTH, rows: [] }));
+  assert.deepEqual(e["Kids to split"].slice(0, 5), [
+    ["Health Equity for October 2026 not imported"], [], ["KIDS (Kids and Kids health) - 2026-10"], HDR,
+    ["", "", "", "Subtotal", 0],
+  ]);
+  assert.deepEqual(e["Personal - Jared"], [[PJ_TITLE], HDR, ["", "", "", "Subtotal", 0]]);
+  assert.deepEqual(e["To review"], [
+    ["Transactions to check for missed kids items — not included in any total"], [],
+    ["REVIEW - UNCATEGORIZED (not included in totals)"], HDR, [],
+    ["REVIEW - HEALTH (not included in totals)"], HDR,
+  ]);
+  assert.ok(t["Kids to split"]);
+});
+
+test("banner appears only on tab 1 and only when HealthEquity is not imported", () => {
+  const banner = "Health Equity for October 2026 not imported";
+  const missing = byName(buildMonthEndReconciliation({ month: MONTH, rows: [KIDS_ROW] }));
+  assert.deepEqual(missing["Kids to split"][0], [banner]);
+  assert.deepEqual(missing["Kids to split"][1], []);
+  assert.deepEqual(missing["Kids to split"][2], ["KIDS (Kids and Kids health) - 2026-10"]);
+  for (const n of ["Personal - Jared", "To review"]) {
+    assert.ok(!missing[n].some((x) => x[0] === banner));
+  }
+  const present = byName(
+    buildMonthEndReconciliation({ month: MONTH, rows: [KIDS_ROW, row("2", "2026-10-04", "P", "", 1, "Health Equity")] })
+  );
+  assert.deepEqual(present["Kids to split"][0], ["KIDS (Kids and Kids health) - 2026-10"]);
+  for (const s of Object.values(present)) assert.ok(!s.some((x) => x[0] === banner));
+});
+
+test("no row appears on two tabs", () => {
+  const r = buildMonthEndReconciliation({
+    month: MONTH,
+    rows: [
+      row("1", "2026-10-02", "School", "Kids", 100),
+      row("2", "2026-10-03", "Gift", "Personal - Jared", 12.5),
+      row("3", "2026-10-04", "Mystery", null, 12),
+      row("4", "2026-10-05", "Clinic", "Health", 80),
+    ],
+  });
+  const [k, p, rv] = sheetsOf(r).map((s) => s.rows.filter((x) => /^\d{4}-\d{2}-\d{2}$/.test(x[0])).map((x) => JSON.stringify(x)));
+  assert.equal(k.length, 1);
+  assert.equal(p.length, 1);
+  assert.equal(rv.length, 2);
+  const all = [...k, ...p, ...rv];
+  assert.equal(new Set(all).size, all.length);
+});
+
+test("HealthEquity HSA kids row lands on tab 1 only; same row uncategorized lands on tab 3 only", () => {
+  const he = (category) => row("he1", "2026-10-28", "Meadowbrook Counseling", category, 135, "HealthEquity HSA");
+  const line = (category) => ["2026-10-28", "Meadowbrook Counseling", category, "HealthEquity HSA", 135];
+  const has = (rows, l) => rows.some((x) => JSON.stringify(x) === JSON.stringify(l));
+
+  const kids = byName(buildMonthEndReconciliation({ month: MONTH, rows: [he("Kids - Healthcare")] }));
+  assert.ok(has(kids["Kids to split"], line("Kids - Healthcare")));
+  assert.ok(!has(kids["To review"], line("Kids - Healthcare")));
+  assert.ok(!has(kids["Personal - Jared"], line("Kids - Healthcare")));
+
+  const unc = byName(buildMonthEndReconciliation({ month: MONTH, rows: [he("")] }));
+  assert.ok(has(unc["To review"], line("")));
+  assert.ok(!has(unc["Kids to split"], line("")));
+  assert.ok(!has(unc["Personal - Jared"], line("")));
 });
 
 test("month and config validation helpers", () => {
@@ -276,18 +388,6 @@ test("health equity: totals are unchanged by the check", () => {
   assert.equal(withHe.total_due, 85.27);
 });
 
-test("health equity: sheet first row is the banner then a blank row when not imported; unchanged when imported", () => {
-  const missing = buildMonthEndSheetRows(buildMonthEndReconciliation({ month: "2026-10", rows: [KIDS_ROW] }));
-  assert.deepEqual(missing[0], ["Health Equity for October 2026 not imported"]);
-  assert.deepEqual(missing[1], []);
-  assert.deepEqual(missing[2], ["KIDS (Kids and Kids health) - 2026-10"]);
-
-  const present = buildMonthEndSheetRows(
-    buildMonthEndReconciliation({ month: "2026-10", rows: [KIDS_ROW, row("2", "2026-10-04", "P", "", 1, "Health Equity")] })
-  );
-  assert.deepEqual(present[0], ["KIDS (Kids and Kids health) - 2026-10"]);
-});
-
 const PJ_TITLE = "PERSONAL - JARED (listed only - not included in total due)";
 
 test("personal jared: matches case-insensitively with trim; near-misses do not match", () => {
@@ -342,33 +442,6 @@ test("personal jared: kids, verizon, total_due and review lists unchanged by its
   assert.equal(b.review.uncategorized.length, 1);
   assert.equal(b.review.health.length, 1);
   assert.equal(b.personal_jared.subtotal, 70);
-});
-
-test("personal jared: sheet block sits after TOTAL DUE and before REVIEW - UNCATEGORIZED with exact title and Subtotal row", () => {
-  const r = buildMonthEndReconciliation({
-    month: MONTH,
-    rows: [row("1", "2026-10-02", "School", "Kids", 100), row("2", "2026-10-03", "Gift", "Personal - Jared", 12.5)],
-  });
-  const rows = buildMonthEndSheetRows(r);
-  const idx = (pred) => rows.findIndex(pred);
-  const total = idx((x) => x[3] === "TOTAL DUE");
-  const pj = idx((x) => x[0] === PJ_TITLE);
-  const unc = idx((x) => x[0] === "REVIEW - UNCATEGORIZED (not included in totals)");
-  const health = idx((x) => x[0] === "REVIEW - HEALTH (not included in totals)");
-  assert.ok(total >= 0 && total < pj && pj < unc && unc < health);
-  assert.deepEqual(rows[pj + 1], ["Date", "Merchant", "Category", "Account", "Amount"]);
-  assert.deepEqual(rows[pj + 2], ["2026-10-03", "Gift", "Personal - Jared", "Chase", 12.5]);
-  assert.deepEqual(rows[pj + 3], ["", "", "", "Subtotal", 12.5]);
-  assert.deepEqual(rows[pj + 4], []);
-  assert.equal(pj + 5, unc);
-  assert.equal(rows.filter((x) => x[3] === "50% share").length, 2); // kids + verizon only
-});
-
-test("personal jared: empty month still prints heading, header and Subtotal 0", () => {
-  const rows = buildMonthEndSheetRows(buildMonthEndReconciliation({ month: MONTH, rows: [] }));
-  const pj = rows.findIndex((x) => x[0] === PJ_TITLE);
-  assert.ok(pj >= 0);
-  assert.deepEqual(rows[pj + 2], ["", "", "", "Subtotal", 0]);
 });
 
 test("personal jared: a split line categorized Personal - Jared appears by category", () => {
