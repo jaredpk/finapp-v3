@@ -367,3 +367,69 @@ test("the notice degrades rather than lying when there are no rows at all", () =
   assert.equal(infoValue(rows, "Oldest transaction included"), "(none)");
   assert.equal(infoValue(rows, "Date range requested"), "2030-01-01 onwards");
 });
+
+// ── noStore: authenticated downloads must never live in a shared cache ─────────
+import { readFileSync } from "node:fs";
+import { noStore } from "../limits.js";
+import { parseMonthEndConfig, isValidMonth } from "../monthEndReconciliation.js";
+
+function fakeRes() {
+  const h = new Map();
+  return {
+    h,
+    setHeader(k, v) { h.set(k.toLowerCase(), v); },
+    getHeader(k) { return h.get(k.toLowerCase()); },
+  };
+}
+
+test("noStore sets private/no-store, Pragma and Vary: Authorization", () => {
+  const res = noStore(fakeRes());
+  assert.equal(res.h.get("cache-control"), "private, no-store, max-age=0");
+  assert.equal(res.h.get("pragma"), "no-cache");
+  assert.equal(res.h.get("vary"), "Authorization");
+});
+
+test("noStore appends to an existing Vary and keeps other headers", () => {
+  const res = fakeRes();
+  res.setHeader("Vary", "Origin");
+  res.setHeader("X-Result-Truncated", "true");
+  noStore(res);
+  assert.equal(res.h.get("vary"), "Origin, Authorization");
+  assert.equal(res.h.get("x-result-truncated"), "true");
+  noStore(res);
+  assert.equal(res.h.get("vary"), "Origin, Authorization");
+});
+
+test("noStore does not duplicate Authorization or touch Vary: *", () => {
+  const a = fakeRes(); a.setHeader("Vary", "authorization");
+  assert.equal(noStore(a).h.get("vary"), "authorization");
+  const b = fakeRes(); b.setHeader("Vary", "*");
+  assert.equal(noStore(b).h.get("vary"), "*");
+});
+
+test("every download/report route calls noStore(res)", () => {
+  const src = readFileSync(new URL("../index.js", import.meta.url), "utf8");
+  for (const route of [
+    "/api/export-xlsx", "/api/reconcile/month-end", "/api/reconcile/month-end.xlsx",
+    "/api/reports/summary", "/api/reconcile/payment-pairs",
+  ]) {
+    const start = src.indexOf(`app.get("${route}",`);
+    assert.ok(start >= 0, route);
+    const head = src.slice(start, start + 200);
+    assert.match(head, /noStore\(res\);/, `${route} must call noStore`);
+  }
+});
+
+test("a cache-busting `_` query param is ignored by month-end parsing", () => {
+  // loadMonthEnd only forwards the four verizon* params and month, so `_` never
+  // reaches validation; the config it builds must be identical with or without it.
+  const q = { month: "2026-10", verizonLines: "3", _: "1730000000000" };
+  const pick = (x) => parseMonthEndConfig({
+    verizonLines: x.verizonLines, verizonLineAmount: x.verizonLineAmount,
+    verizonAccountCredit: x.verizonAccountCredit, verizonAccountLines: x.verizonAccountLines,
+  });
+  const { _, ...plain } = q;
+  assert.deepEqual(pick(q), pick(plain));
+  assert.equal(pick(q).error, undefined);
+  assert.ok(isValidMonth(q.month));
+});

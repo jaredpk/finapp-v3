@@ -310,7 +310,9 @@ export async function downloadXlsx(startDate, endDate, offset) {
   if (startDate) qs.set("start_date", startDate);
   if (endDate) qs.set("end_date", endDate);
   if (offset) qs.set("offset", offset);
-  const r = await fetch(`${BASE}/export-xlsx${qs.toString() ? `?${qs}` : ""}`, { headers });
+  // `_` busts any shared cache that already holds the plain URL; the server ignores it.
+  qs.set("_", Date.now());
+  const r = await fetch(`${BASE}/export-xlsx?${qs}`, { headers, cache: "no-store" });
   if (!r.ok) {
     // The route answers a bad date range or offset with a 400 and { error };
     // surfacing it beats "Export failed" when the fix is to swap two inputs.
@@ -355,6 +357,7 @@ export async function fetchMonthEnd(month, verizon) {
   setVerizonParams(qs, verizon);
   const r = await fetch(`${BASE}/reconcile/month-end${qs.toString() ? `?${qs}` : ""}`, {
     headers: await authHeaders(),
+    cache: "no-store",
   });
   if (!r.ok) {
     const body = await r.json().catch(() => ({}));
@@ -369,7 +372,9 @@ export async function downloadMonthEndXlsx(month, verizon) {
   const qs = new URLSearchParams();
   if (month) qs.set("month", month);
   setVerizonParams(qs, verizon);
-  const r = await fetch(`${BASE}/reconcile/month-end.xlsx${qs.toString() ? `?${qs}` : ""}`, { headers });
+  // `_` busts any shared cache that already holds the plain URL; the server ignores it.
+  qs.set("_", Date.now());
+  const r = await fetch(`${BASE}/reconcile/month-end.xlsx?${qs}`, { headers, cache: "no-store" });
   if (!r.ok) {
     const body = await r.json().catch(() => ({}));
     throw new Error(body.error || "Export failed");

@@ -248,3 +248,25 @@ export function buildExportInfoRows({
   }
   return rows;
 }
+
+// ── Shared-cache protection for authenticated downloads/reports ───────────────
+// The portal in front of this app (portal.elevrics.ai/finance) may sit behind a
+// CDN that keys on the URL and ignores Authorization; a path ending in .xlsx is
+// default-cacheable on many of them, so a stale workbook could be served after a
+// deploy — and one user's financial data to another. `private, no-store` forbids
+// every cache from keeping the body, `Vary: Authorization` is the belt for any
+// cache that ignores that. Applied per route (not as /api middleware) so Plaid
+// webhooks, MCP and static assets keep their own caching. Appends to Vary and
+// leaves every other header (e.g. the truncation headers) alone.
+export function noStore(res) {
+  res.setHeader("Cache-Control", "private, no-store, max-age=0");
+  res.setHeader("Pragma", "no-cache");
+  const existing = res.getHeader("Vary");
+  const tokens = (Array.isArray(existing) ? existing.join(",") : String(existing ?? ""))
+    .split(",").map((t) => t.trim()).filter(Boolean);
+  if (!tokens.includes("*") && !tokens.some((t) => t.toLowerCase() === "authorization")) {
+    tokens.push("Authorization");
+  }
+  res.setHeader("Vary", tokens.join(", "));
+  return res;
+}

@@ -70,7 +70,7 @@ import {
 import { findUnmatchedPaymentLegs } from "./transactionMatching.js";
 import {
   exportMaxRows, resolveTransactionLimit, fetchLimit, takeWithTruncation,
-  truncationHeaders, TRUNCATION_HEADERS, validateDateRange, parseOffset,
+  truncationHeaders, TRUNCATION_HEADERS, noStore, validateDateRange, parseOffset,
   buildExportInfoRows, exportInfoSheetName, exportFilename,
 } from "./limits.js";
 import { parseNeedsReview } from "./needsReview.js";
@@ -1159,6 +1159,7 @@ const REPORT_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 app.get("/api/reports/summary", requireApiKeyOrAuth, async (req, res) => {
   try {
+    noStore(res);
     let { start_date: startDate, end_date: endDate } = req.query;
     if (!startDate && !endDate) {
       // Default: the last 6 full months.
@@ -1633,6 +1634,7 @@ app.get("/api/investment-holdings", requireAuth, async (req, res) => {
 // day the parser is fixed, these names and columns are what it will expect.
 app.get("/api/export-xlsx", requireAuth, async (req, res) => {
   try {
+    noStore(res);
     const { utils, write } = xlsxLib;
     const { start_date: startDate, end_date: endDate } = req.query;
     const invalid = validateDateRange({ startDate, endDate });
@@ -1753,6 +1755,7 @@ async function loadMonthEnd(req) {
 
 app.get("/api/reconcile/month-end", requireAuth, async (req, res) => {
   try {
+    noStore(res);
     const out = await loadMonthEnd(req);
     if (out.error) return res.status(out.status).json({ error: out.error });
     res.json(out.result);
@@ -1764,6 +1767,7 @@ app.get("/api/reconcile/month-end", requireAuth, async (req, res) => {
 
 app.get("/api/reconcile/month-end.xlsx", requireAuth, async (req, res) => {
   try {
+    noStore(res);
     const out = await loadMonthEnd(req);
     if (out.error) return res.status(out.status).json({ error: out.error });
     const { utils, write } = xlsxLib;
@@ -2118,6 +2122,7 @@ app.get("/api/suppressed", requireAuth, async (req, res) => {
 // the old ABS()-keyed dedup produced. This is the regression check for it.
 app.get("/api/reconcile/payment-pairs", requireAuth, async (req, res) => {
   try {
+    noStore(res);
     const { start, end, windowDays } = req.query;
     // Number("") is 0, not NaN, so a blank ?windowDays= used to narrow the search
     // to same-day only instead of falling back to the default. A zero-day window
